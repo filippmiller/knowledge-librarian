@@ -5,7 +5,7 @@ import { requireAdminAuth } from '@/lib/auth';
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
-) {
+): Promise<Response> {
   const authError = await requireAdminAuth(request);
   if (authError) return authError;
 

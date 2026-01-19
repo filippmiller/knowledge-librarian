@@ -5,7 +5,7 @@ import { requireAdminAuth } from '@/lib/auth';
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
-) {
+): Promise<Response> {
   const authError = await requireAdminAuth(request);
   if (authError) return authError;
 
@@ -52,7 +52,7 @@ export async function GET(
 export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
-) {
+): Promise<Response> {
   const authError = await requireAdminAuth(request);
   if (authError) return authError;
 

@@ -17,7 +17,7 @@ import {
 } from '@/lib/ai/knowledge-extractor';
 import { createDocumentChunks } from '@/lib/ai/chunker';
 
-export async function GET(request: NextRequest) {
+export async function GET(request: NextRequest): Promise<Response> {
   const authError = await requireAdminAuth(request);
   if (authError) return authError;
 
@@ -43,7 +43,7 @@ export async function GET(request: NextRequest) {
   }
 }
 
-export async function POST(request: NextRequest) {
+export async function POST(request: NextRequest): Promise<Response> {
   const authError = await requireAdminAuth(request);
   if (authError) return authError;
 
