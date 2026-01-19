@@ -57,17 +57,17 @@ export default function KnowledgeChangesPage() {
   }
 
   if (loading) {
-    return <div className="text-center py-8">Loading...</div>;
+    return <div className="text-center py-8">Загрузка...</div>;
   }
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-6">Knowledge Change Log</h1>
+      <h1 className="text-2xl font-bold mb-6">Журнал изменений</h1>
 
       {changes.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-center text-gray-500">
-            No changes recorded yet.
+            Изменений пока не записано.
           </CardContent>
         </Card>
       ) : (
@@ -75,13 +75,13 @@ export default function KnowledgeChangesPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Date</TableHead>
-                <TableHead>Type</TableHead>
-                <TableHead>Target</TableHead>
-                <TableHead>Change</TableHead>
-                <TableHead>Reason</TableHead>
-                <TableHead>Initiated By</TableHead>
-                <TableHead>Status</TableHead>
+                <TableHead>Дата</TableHead>
+                <TableHead>Тип</TableHead>
+                <TableHead>Цель</TableHead>
+                <TableHead>Изменение</TableHead>
+                <TableHead>Причина</TableHead>
+                <TableHead>Инициатор</TableHead>
+                <TableHead>Статус</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>

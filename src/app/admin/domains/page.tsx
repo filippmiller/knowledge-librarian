@@ -47,7 +47,7 @@ export default function DomainsPage() {
   }, []);
 
   if (loading) {
-    return <div className="text-center py-8">Loading...</div>;
+    return <div className="text-center py-8">Загрузка...</div>;
   }
 
   // Group domains by parent for hierarchical display
@@ -66,12 +66,12 @@ export default function DomainsPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-6">Domains</h1>
+      <h1 className="text-2xl font-bold mb-6">Домены</h1>
 
       {domains.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-center text-gray-500">
-            No domains found. Run database seeding to create base domains.
+            Домены не найдены. Запустите сидинг базы данных для создания базовых доменов.
           </CardContent>
         </Card>
       ) : (
@@ -79,12 +79,12 @@ export default function DomainsPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Domain</TableHead>
-                <TableHead>Title</TableHead>
-                <TableHead>Description</TableHead>
-                <TableHead>Documents</TableHead>
-                <TableHead>Rules</TableHead>
-                <TableHead>Q&A</TableHead>
+                <TableHead>Домен</TableHead>
+                <TableHead>Название</TableHead>
+                <TableHead>Описание</TableHead>
+                <TableHead>Документы</TableHead>
+                <TableHead>Правила</TableHead>
+                <TableHead>Вопросы</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>

@@ -51,18 +51,18 @@ export default function AdminDashboard() {
   }, []);
 
   if (loading) {
-    return <div className="text-center py-8">Loading...</div>;
+    return <div className="text-center py-8">Загрузка...</div>;
   }
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-6">Dashboard</h1>
+      <h1 className="text-2xl font-bold mb-6">Панель управления</h1>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-gray-500">
-              Documents
+              Документы
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -73,7 +73,7 @@ export default function AdminDashboard() {
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-gray-500">
-              Domains
+              Домены
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -84,7 +84,7 @@ export default function AdminDashboard() {
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-gray-500">
-              Active Rules
+              Активные правила
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -95,7 +95,7 @@ export default function AdminDashboard() {
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-gray-500">
-              Q&A Pairs
+              Пары вопросов-ответов
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -106,7 +106,7 @@ export default function AdminDashboard() {
         <Card className={stats?.pendingSuggestions ? 'border-yellow-300 bg-yellow-50' : ''}>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-gray-500">
-              Pending Domain Suggestions
+              Ожидающие предложения доменов
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -117,7 +117,7 @@ export default function AdminDashboard() {
         <Card className={stats?.openQuestions ? 'border-orange-300 bg-orange-50' : ''}>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-gray-500">
-              Open AI Questions
+              Открытые вопросы ИИ
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -128,10 +128,10 @@ export default function AdminDashboard() {
 
       {(stats?.pendingSuggestions || stats?.openQuestions) ? (
         <div className="mt-8 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-          <h2 className="font-semibold text-blue-900">Actions Required</h2>
+          <h2 className="font-semibold text-blue-900">Требуются действия</h2>
           <p className="text-blue-700 text-sm mt-1">
-            There are pending items that need your attention. Please review the
-            domain suggestions and AI questions.
+            Есть элементы, ожидающие вашего внимания. Пожалуйста, проверьте
+            предложения доменов и вопросы ИИ.
           </p>
         </div>
       ) : null}

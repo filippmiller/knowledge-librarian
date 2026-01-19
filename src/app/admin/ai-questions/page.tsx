@@ -55,11 +55,11 @@ export default function AIQuestionsPage() {
         fetchQuestions();
       } else {
         const error = await response.json();
-        alert(error.error || 'Action failed');
+        alert(error.error || 'Ошибка действия');
       }
     } catch (error) {
       console.error('Error:', error);
-      alert('Action failed');
+      alert('Ошибка действия');
     } finally {
       setProcessing(null);
     }
@@ -67,11 +67,11 @@ export default function AIQuestionsPage() {
 
   function getIssueTypeBadge(type: string) {
     const labels: Record<string, string> = {
-      ambiguous: 'Ambiguous',
-      outdated: 'Outdated',
-      conflicting: 'Conflict',
-      missing_context: 'Missing Context',
-      price_conflict: 'Price Conflict',
+      ambiguous: 'Неоднозначно',
+      outdated: 'Устарело',
+      conflicting: 'Конфликт',
+      missing_context: 'Нет контекста',
+      price_conflict: 'Конфликт цен',
     };
     const colors: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
       ambiguous: 'secondary',
@@ -88,7 +88,7 @@ export default function AIQuestionsPage() {
   }
 
   if (loading) {
-    return <div className="text-center py-8">Loading...</div>;
+    return <div className="text-center py-8">Загрузка...</div>;
   }
 
   const openQuestions = questions.filter((q) => q.status === 'OPEN');
@@ -96,13 +96,13 @@ export default function AIQuestionsPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-6">AI Questions</h1>
+      <h1 className="text-2xl font-bold mb-6">Вопросы ИИ</h1>
 
       {openQuestions.length === 0 && closedQuestions.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-center text-gray-500">
-            No AI questions yet. Questions will appear when the AI encounters
-            uncertainties during document processing.
+            Вопросов ИИ пока нет. Вопросы появятся, когда ИИ столкнётся
+            с неопределённостями при обработке документов.
           </CardContent>
         </Card>
       ) : (
@@ -110,7 +110,7 @@ export default function AIQuestionsPage() {
           {openQuestions.length > 0 && (
             <div className="mb-8">
               <h2 className="text-lg font-semibold mb-4">
-                Open Questions ({openQuestions.length})
+                Открытые вопросы ({openQuestions.length})
               </h2>
               <div className="space-y-4">
                 {openQuestions.map((q) => (
@@ -125,13 +125,13 @@ export default function AIQuestionsPage() {
                       <div className="space-y-4">
                         {q.context && (
                           <div className="text-sm bg-white rounded p-3 border">
-                            <span className="font-medium">Context:</span>{' '}
+                            <span className="font-medium">Контекст:</span>{' '}
                             {JSON.stringify(q.context)}
                           </div>
                         )}
                         {q.proposedChange && (
                           <div className="text-sm bg-white rounded p-3 border">
-                            <span className="font-medium">Proposed Change:</span>
+                            <span className="font-medium">Предлагаемое изменение:</span>
                             <div className="mt-1 font-mono text-xs">
                               <span className="text-red-600 line-through">
                                 {q.proposedChange.old}
@@ -145,7 +145,7 @@ export default function AIQuestionsPage() {
                         )}
                         <div>
                           <Textarea
-                            placeholder="Your response..."
+                            placeholder="Ваш ответ..."
                             value={responses[q.id] || ''}
                             onChange={(e) =>
                               setResponses((prev) => ({
@@ -162,7 +162,7 @@ export default function AIQuestionsPage() {
                             onClick={() => handleAction(q.id, 'answer')}
                             disabled={processing === q.id || !responses[q.id]}
                           >
-                            Submit Answer
+                            Отправить ответ
                           </Button>
                           <Button
                             size="sm"
@@ -170,7 +170,7 @@ export default function AIQuestionsPage() {
                             onClick={() => handleAction(q.id, 'dismiss')}
                             disabled={processing === q.id}
                           >
-                            Dismiss
+                            Отклонить
                           </Button>
                         </div>
                       </div>
@@ -184,7 +184,7 @@ export default function AIQuestionsPage() {
           {closedQuestions.length > 0 && (
             <div>
               <h2 className="text-lg font-semibold mb-4">
-                Closed ({closedQuestions.length})
+                Закрытые ({closedQuestions.length})
               </h2>
               <div className="space-y-2">
                 {closedQuestions.map((q) => (
@@ -196,7 +196,7 @@ export default function AIQuestionsPage() {
                       <div className="text-sm">{q.question}</div>
                       {q.response && (
                         <div className="text-xs text-gray-500 mt-1">
-                          Response: {q.response}
+                          Ответ: {q.response}
                         </div>
                       )}
                     </div>

@@ -53,11 +53,11 @@ export default function PlaygroundPage() {
         ]);
       } else {
         const error = await response.json();
-        alert(error.error || 'Failed to get answer');
+        alert(error.error || 'Не удалось получить ответ');
       }
     } catch (error) {
       console.error('Error:', error);
-      alert('Failed to get answer');
+      alert('Не удалось получить ответ');
     } finally {
       setLoading(false);
     }
@@ -68,9 +68,9 @@ export default function PlaygroundPage() {
       {/* Header */}
       <header className="bg-white border-b">
         <div className="max-w-4xl mx-auto px-4 py-4 flex justify-between items-center">
-          <h1 className="text-xl font-bold">Knowledge Playground</h1>
+          <h1 className="text-xl font-bold">Песочница знаний</h1>
           <Link href="/admin" className="text-sm text-gray-600 hover:text-gray-900">
-            Admin Panel
+            Панель администратора
           </Link>
         </div>
       </header>
@@ -80,7 +80,7 @@ export default function PlaygroundPage() {
         <Card className="mb-6">
           <CardContent className="pt-6">
             <Textarea
-              placeholder="Ask a question about the knowledge base..."
+              placeholder="Задайте вопрос по базе знаний..."
               value={question}
               onChange={(e) => setQuestion(e.target.value)}
               className="min-h-24 text-lg"
@@ -98,10 +98,10 @@ export default function PlaygroundPage() {
                   onChange={(e) => setShowDebug(e.target.checked)}
                   className="rounded"
                 />
-                Show debug info
+                Показать отладочную информацию
               </label>
               <Button onClick={handleAsk} disabled={loading || !question.trim()}>
-                {loading ? 'Thinking...' : 'Ask'}
+                {loading ? 'Думаю...' : 'Спросить'}
               </Button>
             </div>
           </CardContent>
@@ -112,10 +112,10 @@ export default function PlaygroundPage() {
           <Card className="mb-6">
             <CardHeader>
               <div className="flex items-center justify-between">
-                <CardTitle>Answer</CardTitle>
+                <CardTitle>Ответ</CardTitle>
                 <div className="flex items-center gap-2">
                   <Badge variant={result.confidence >= 0.8 ? 'default' : 'secondary'}>
-                    {(result.confidence * 100).toFixed(0)}% confidence
+                    {(result.confidence * 100).toFixed(0)}% уверенности
                   </Badge>
                 </div>
               </div>
@@ -127,7 +127,7 @@ export default function PlaygroundPage() {
 
               {result.domainsUsed.length > 0 && (
                 <div className="flex items-center gap-2 mt-4">
-                  <span className="text-sm text-gray-500">Domains:</span>
+                  <span className="text-sm text-gray-500">Домены:</span>
                   {result.domainsUsed.map((domain) => (
                     <Badge key={domain} variant="outline">
                       {domain}
@@ -140,7 +140,7 @@ export default function PlaygroundPage() {
                 <>
                   <Separator className="my-4" />
                   <div>
-                    <h4 className="font-medium text-sm mb-2">Citations</h4>
+                    <h4 className="font-medium text-sm mb-2">Источники</h4>
                     <div className="space-y-2">
                       {result.citations.map((citation, i) => (
                         <div key={i} className="text-sm bg-gray-50 rounded p-3">
@@ -169,15 +169,15 @@ export default function PlaygroundPage() {
                   <Separator className="my-4" />
                   <Tabs defaultValue="chunks">
                     <TabsList>
-                      <TabsTrigger value="chunks">Retrieved Chunks</TabsTrigger>
-                      <TabsTrigger value="intent">Intent</TabsTrigger>
+                      <TabsTrigger value="chunks">Полученные фрагменты</TabsTrigger>
+                      <TabsTrigger value="intent">Намерение</TabsTrigger>
                     </TabsList>
                     <TabsContent value="chunks" className="mt-2">
                       <div className="space-y-2">
                         {result.debug.chunks.map((chunk, i) => (
                           <div key={i} className="text-xs bg-gray-100 rounded p-2">
                             <div className="font-mono text-gray-500 mb-1">
-                              Similarity: {(chunk.similarity * 100).toFixed(1)}%
+                              Сходство: {(chunk.similarity * 100).toFixed(1)}%
                             </div>
                             <div className="text-gray-700">{chunk.content}</div>
                           </div>
@@ -186,7 +186,7 @@ export default function PlaygroundPage() {
                     </TabsContent>
                     <TabsContent value="intent" className="mt-2">
                       <div className="text-sm">
-                        <span className="font-medium">Classified Intent: </span>
+                        <span className="font-medium">Распознанное намерение: </span>
                         <code>{result.debug.intentClassification}</code>
                       </div>
                     </TabsContent>
@@ -201,7 +201,7 @@ export default function PlaygroundPage() {
         {history.length > 0 && (
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Recent Questions</CardTitle>
+              <CardTitle className="text-base">Недавние вопросы</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="space-y-3">

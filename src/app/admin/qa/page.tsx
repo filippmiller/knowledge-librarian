@@ -46,21 +46,27 @@ export default function QAPage() {
   }, [statusFilter]);
 
   if (loading) {
-    return <div className="text-center py-8">Loading...</div>;
+    return <div className="text-center py-8">Загрузка...</div>;
   }
+
+  const statusLabels: Record<string, string> = {
+    ACTIVE: 'активных',
+    SUPERSEDED: 'замененных',
+    DEPRECATED: 'устаревших',
+  };
 
   return (
     <div>
       <div className="flex justify-between items-center mb-6">
-        <h1 className="text-2xl font-bold">Q&A Pairs</h1>
+        <h1 className="text-2xl font-bold">Вопросы и ответы</h1>
         <Select value={statusFilter} onValueChange={setStatusFilter}>
           <SelectTrigger className="w-40">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="ACTIVE">Active</SelectItem>
-            <SelectItem value="SUPERSEDED">Superseded</SelectItem>
-            <SelectItem value="DEPRECATED">Deprecated</SelectItem>
+            <SelectItem value="ACTIVE">Активные</SelectItem>
+            <SelectItem value="SUPERSEDED">Замененные</SelectItem>
+            <SelectItem value="DEPRECATED">Устаревшие</SelectItem>
           </SelectContent>
         </Select>
       </div>
@@ -68,7 +74,7 @@ export default function QAPage() {
       {qaPairs.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-center text-gray-500">
-            No {statusFilter.toLowerCase()} Q&A pairs found.
+            {statusLabels[statusFilter] || statusFilter.toLowerCase()} пар вопрос-ответ не найдено.
           </CardContent>
         </Card>
       ) : (
@@ -79,7 +85,7 @@ export default function QAPage() {
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
                     <CardTitle className="text-base font-medium">
-                      Q: {qa.question}
+                      В: {qa.question}
                     </CardTitle>
                   </div>
                   <div className="flex items-center gap-2">
@@ -96,7 +102,7 @@ export default function QAPage() {
               </CardHeader>
               <CardContent>
                 <div className="bg-gray-50 rounded p-3 text-sm">
-                  <span className="font-medium text-gray-700">A:</span> {qa.answer}
+                  <span className="font-medium text-gray-700">О:</span> {qa.answer}
                 </div>
                 <div className="flex items-center justify-between mt-3 text-xs text-gray-500">
                   <div className="flex gap-2">

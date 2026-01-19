@@ -52,11 +52,11 @@ export default function DomainSuggestionsPage() {
         fetchSuggestions();
       } else {
         const error = await response.json();
-        alert(error.error || 'Action failed');
+        alert(error.error || 'Ошибка действия');
       }
     } catch (error) {
       console.error('Error:', error);
-      alert('Action failed');
+      alert('Ошибка действия');
     } finally {
       setProcessing(null);
     }
@@ -72,7 +72,7 @@ export default function DomainSuggestionsPage() {
   }
 
   if (loading) {
-    return <div className="text-center py-8">Loading...</div>;
+    return <div className="text-center py-8">Загрузка...</div>;
   }
 
   const pendingSuggestions = suggestions.filter((s) => s.status === 'PENDING');
@@ -80,12 +80,12 @@ export default function DomainSuggestionsPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-6">Domain Suggestions</h1>
+      <h1 className="text-2xl font-bold mb-6">Предложения доменов</h1>
 
       {pendingSuggestions.length === 0 && processedSuggestions.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-center text-gray-500">
-            No domain suggestions yet. Upload documents to generate suggestions.
+            Предложений доменов пока нет. Загрузите документы для генерации предложений.
           </CardContent>
         </Card>
       ) : (
@@ -93,7 +93,7 @@ export default function DomainSuggestionsPage() {
           {pendingSuggestions.length > 0 && (
             <div className="mb-8">
               <h2 className="text-lg font-semibold mb-4">
-                Pending Review ({pendingSuggestions.length})
+                Ожидают проверки ({pendingSuggestions.length})
               </h2>
               <div className="space-y-4">
                 {pendingSuggestions.map((suggestion) => (
@@ -109,7 +109,7 @@ export default function DomainSuggestionsPage() {
                           </p>
                         </div>
                         <Badge variant="outline">
-                          {(suggestion.confidence * 100).toFixed(0)}% confidence
+                          {(suggestion.confidence * 100).toFixed(0)}% уверенности
                         </Badge>
                       </div>
                     </CardHeader>
@@ -120,18 +120,18 @@ export default function DomainSuggestionsPage() {
                         )}
                         {suggestion.parentSlug && (
                           <p className="text-sm text-gray-600">
-                            Parent: <code>{suggestion.parentSlug}</code>
+                            Родительский: <code>{suggestion.parentSlug}</code>
                           </p>
                         )}
                         <div className="p-3 bg-white rounded border">
                           <p className="text-sm font-medium text-gray-700">
-                            AI Reasoning:
+                            Обоснование ИИ:
                           </p>
                           <p className="text-sm mt-1">{suggestion.reason}</p>
                         </div>
                         {suggestion.document && (
                           <p className="text-xs text-gray-500">
-                            From: {suggestion.document.title}
+                            Из: {suggestion.document.title}
                           </p>
                         )}
                         <div className="flex gap-2 pt-2">
@@ -140,7 +140,7 @@ export default function DomainSuggestionsPage() {
                             onClick={() => handleAction(suggestion.id, 'approve')}
                             disabled={processing === suggestion.id}
                           >
-                            Approve & Create Domain
+                            Одобрить и создать домен
                           </Button>
                           <Button
                             size="sm"
@@ -148,7 +148,7 @@ export default function DomainSuggestionsPage() {
                             onClick={() => handleAction(suggestion.id, 'reject')}
                             disabled={processing === suggestion.id}
                           >
-                            Reject
+                            Отклонить
                           </Button>
                         </div>
                       </div>
@@ -162,7 +162,7 @@ export default function DomainSuggestionsPage() {
           {processedSuggestions.length > 0 && (
             <div>
               <h2 className="text-lg font-semibold mb-4">
-                Processed ({processedSuggestions.length})
+                Обработано ({processedSuggestions.length})
               </h2>
               <div className="space-y-2">
                 {processedSuggestions.map((suggestion) => (

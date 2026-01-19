@@ -67,21 +67,27 @@ export default function RulesPage() {
   }
 
   if (loading) {
-    return <div className="text-center py-8">Loading...</div>;
+    return <div className="text-center py-8">Загрузка...</div>;
   }
+
+  const statusLabels: Record<string, string> = {
+    ACTIVE: 'активных',
+    SUPERSEDED: 'замененных',
+    DEPRECATED: 'устаревших',
+  };
 
   return (
     <div>
       <div className="flex justify-between items-center mb-6">
-        <h1 className="text-2xl font-bold">Rules</h1>
+        <h1 className="text-2xl font-bold">Правила</h1>
         <Select value={statusFilter} onValueChange={setStatusFilter}>
           <SelectTrigger className="w-40">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="ACTIVE">Active</SelectItem>
-            <SelectItem value="SUPERSEDED">Superseded</SelectItem>
-            <SelectItem value="DEPRECATED">Deprecated</SelectItem>
+            <SelectItem value="ACTIVE">Активные</SelectItem>
+            <SelectItem value="SUPERSEDED">Замененные</SelectItem>
+            <SelectItem value="DEPRECATED">Устаревшие</SelectItem>
           </SelectContent>
         </Select>
       </div>
@@ -89,7 +95,7 @@ export default function RulesPage() {
       {rules.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-center text-gray-500">
-            No {statusFilter.toLowerCase()} rules found.
+            {statusLabels[statusFilter] || statusFilter.toLowerCase()} правил не найдено.
           </CardContent>
         </Card>
       ) : (
@@ -97,12 +103,12 @@ export default function RulesPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Code</TableHead>
-                <TableHead>Title</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Confidence</TableHead>
-                <TableHead>Domains</TableHead>
-                <TableHead>Version</TableHead>
+                <TableHead>Код</TableHead>
+                <TableHead>Название</TableHead>
+                <TableHead>Статус</TableHead>
+                <TableHead>Уверенность</TableHead>
+                <TableHead>Домены</TableHead>
+                <TableHead>Версия</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -118,7 +124,7 @@ export default function RulesPage() {
                     </div>
                     {rule.supersedesRule && (
                       <div className="text-xs text-gray-400 mt-1">
-                        Supersedes: {rule.supersedesRule.ruleCode}
+                        Заменяет: {rule.supersedesRule.ruleCode}
                       </div>
                     )}
                   </TableCell>

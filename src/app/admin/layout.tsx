@@ -5,13 +5,13 @@ import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
 
 const navigation = [
-  { name: 'Documents', href: '/admin/documents' },
-  { name: 'Domains', href: '/admin/domains' },
-  { name: 'Domain Suggestions', href: '/admin/domain-suggestions' },
-  { name: 'Rules', href: '/admin/rules' },
-  { name: 'Q&A', href: '/admin/qa' },
-  { name: 'AI Questions', href: '/admin/ai-questions' },
-  { name: 'Change Log', href: '/admin/knowledge-changes' },
+  { name: 'Документы', href: '/admin/documents' },
+  { name: 'Домены', href: '/admin/domains' },
+  { name: 'Предложения доменов', href: '/admin/domain-suggestions' },
+  { name: 'Правила', href: '/admin/rules' },
+  { name: 'Вопросы и ответы', href: '/admin/qa' },
+  { name: 'Вопросы ИИ', href: '/admin/ai-questions' },
+  { name: 'Журнал изменений', href: '/admin/knowledge-changes' },
 ];
 
 export default function AdminLayout({
@@ -28,13 +28,13 @@ export default function AdminLayout({
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between h-16 items-center">
             <Link href="/admin" className="font-bold text-xl">
-              Knowledge Librarian
+              Библиотека знаний
             </Link>
             <Link
               href="/playground"
               className="text-sm text-gray-600 hover:text-gray-900"
             >
-              Playground
+              Песочница
             </Link>
           </div>
         </div>

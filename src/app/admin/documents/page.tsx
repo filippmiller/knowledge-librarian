@@ -74,11 +74,11 @@ export default function DocumentsPage() {
         fetchDocuments();
       } else {
         const error = await response.json();
-        alert(error.error || 'Upload failed');
+        alert(error.error || 'Ошибка загрузки');
       }
     } catch (error) {
       console.error('Upload error:', error);
-      alert('Upload failed');
+      alert('Ошибка загрузки');
     } finally {
       setUploading(false);
       event.target.value = '';
@@ -96,13 +96,13 @@ export default function DocumentsPage() {
   }
 
   if (loading) {
-    return <div className="text-center py-8">Loading...</div>;
+    return <div className="text-center py-8">Загрузка...</div>;
   }
 
   return (
     <div>
       <div className="flex justify-between items-center mb-6">
-        <h1 className="text-2xl font-bold">Documents</h1>
+        <h1 className="text-2xl font-bold">Документы</h1>
         <div>
           <Input
             type="file"
@@ -117,7 +117,7 @@ export default function DocumentsPage() {
       {documents.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-center text-gray-500">
-            No documents uploaded yet. Upload your first document to get started.
+            Документы ещё не загружены. Загрузите первый документ, чтобы начать.
           </CardContent>
         </Card>
       ) : (
@@ -125,12 +125,12 @@ export default function DocumentsPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Title</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Domains</TableHead>
-                <TableHead>Rules</TableHead>
-                <TableHead>Q&A</TableHead>
-                <TableHead>Uploaded</TableHead>
+                <TableHead>Название</TableHead>
+                <TableHead>Статус</TableHead>
+                <TableHead>Домены</TableHead>
+                <TableHead>Правила</TableHead>
+                <TableHead>Вопросы</TableHead>
+                <TableHead>Загружен</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
