@@ -1,0 +1,350 @@
+// AI Knowledge Librarian - Database Schema
+// PostgreSQL with pgvector for embeddings
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+// ============================================
+// CORE KNOWLEDGE OBJECTS
+// ============================================
+
+model Document {
+  id          String   @id @default(cuid())
+  title       String
+  filename    String
+  mimeType    String
+  rawText     String?  @db.Text
+  rawBytes    Bytes?
+  uploadedAt  DateTime @default(now())
+  parseStatus ParseStatus @default(PENDING)
+  parseError  String?
+
+  // Relations
+  domains           DocumentDomain[]
+  rules             Rule[]
+  qaPairs           QAPair[]
+  chunks            DocChunk[]
+  domainSuggestions DomainSuggestion[]
+
+  @@index([parseStatus])
+}
+
+enum ParseStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+// Hierarchical domain structure
+model Domain {
+  id             String   @id @default(cuid())
+  slug           String   @unique // dot-notation: "notary.veremiy_msk"
+  title          String
+  description    String?  @db.Text
+  parentDomainId String?
+  policy         Json?    // domain-specific policies
+  createdAt      DateTime @default(now())
+
+  // Self-relation for hierarchy
+  parentDomain   Domain?  @relation("DomainHierarchy", fields: [parentDomainId], references: [id])
+  childDomains   Domain[] @relation("DomainHierarchy")
+
+  // Relations
+  documents      DocumentDomain[]
+  rules          RuleDomain[]
+  qaPairs        QADomain[]
+  chunks         ChunkDomain[]
+
+  @@index([parentDomainId])
+  @@index([slug])
+}
+
+// AI-suggested new domains awaiting approval
+model DomainSuggestion {
+  id                    String   @id @default(cuid())
+  suggestedSlug         String
+  title                 String
+  description           String?  @db.Text
+  parentSlug            String?
+  confidence            Float
+  reason                String   @db.Text
+  status                SuggestionStatus @default(PENDING)
+  createdFromDocumentId String?
+  createdAt             DateTime @default(now())
+  reviewedAt            DateTime?
+  reviewedBy            String?
+
+  // Relations
+  document Document? @relation(fields: [createdFromDocumentId], references: [id])
+
+  @@index([status])
+  @@index([createdFromDocumentId])
+}
+
+enum SuggestionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// ============================================
+// KNOWLEDGE UNITS (VERSIONED)
+// ============================================
+
+// Business rules extracted from documents
+model Rule {
+  id              String   @id @default(cuid())
+  documentId      String?
+  ruleCode        String   // e.g., "R-1", "R-2"
+  title           String
+  body            String   @db.Text
+  confidence      Float    @default(0.8)
+  status          KnowledgeStatus @default(ACTIVE)
+  version         Int      @default(1)
+  supersedesRuleId String?
+  sourceSpan      Json?    // { quote, locationHint }
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  document        Document? @relation(fields: [documentId], references: [id])
+  supersedesRule  Rule?     @relation("RuleVersions", fields: [supersedesRuleId], references: [id])
+  supersededBy    Rule[]    @relation("RuleVersions")
+  domains         RuleDomain[]
+  qaPairs         QAPair[]
+  changes         KnowledgeChange[] @relation("RuleChanges")
+
+  @@index([status])
+  @@index([ruleCode])
+  @@index([documentId])
+}
+
+// Q&A pairs extracted from documents
+model QAPair {
+  id              String   @id @default(cuid())
+  documentId      String?
+  ruleId          String?
+  question        String   @db.Text
+  answer          String   @db.Text
+  status          KnowledgeStatus @default(ACTIVE)
+  version         Int      @default(1)
+  supersedesQaId  String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  document        Document? @relation(fields: [documentId], references: [id])
+  rule            Rule?     @relation(fields: [ruleId], references: [id])
+  supersedesQa    QAPair?   @relation("QAVersions", fields: [supersedesQaId], references: [id])
+  supersededBy    QAPair[]  @relation("QAVersions")
+  domains         QADomain[]
+  changes         KnowledgeChange[] @relation("QAChanges")
+
+  @@index([status])
+  @@index([documentId])
+  @@index([ruleId])
+}
+
+enum KnowledgeStatus {
+  ACTIVE
+  SUPERSEDED
+  DEPRECATED
+}
+
+// ============================================
+// RETRIEVAL UNITS (VECTOR SEARCH)
+// ============================================
+
+model DocChunk {
+  id         String   @id @default(cuid())
+  documentId String
+  chunkIndex Int
+  content    String   @db.Text
+  embedding  Unsupported("vector(1536)")?
+  metadata   Json?    // additional context
+  createdAt  DateTime @default(now())
+
+  // Relations
+  document Document      @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  domains  ChunkDomain[]
+
+  @@unique([documentId, chunkIndex])
+  @@index([documentId])
+}
+
+// ============================================
+// MAPPING TABLES (MANY-TO-MANY)
+// ============================================
+
+model DocumentDomain {
+  documentId String
+  domainId   String
+  isPrimary  Boolean @default(false)
+  confidence Float   @default(0.8)
+  assignedAt DateTime @default(now())
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  domain   Domain   @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  @@id([documentId, domainId])
+}
+
+model RuleDomain {
+  ruleId     String
+  domainId   String
+  confidence Float   @default(0.8)
+  assignedAt DateTime @default(now())
+
+  rule   Rule   @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  domain Domain @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  @@id([ruleId, domainId])
+}
+
+model QADomain {
+  qaId       String
+  domainId   String
+  confidence Float   @default(0.8)
+  assignedAt DateTime @default(now())
+
+  qa     QAPair @relation(fields: [qaId], references: [id], onDelete: Cascade)
+  domain Domain @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  @@id([qaId, domainId])
+}
+
+model ChunkDomain {
+  chunkId    String
+  domainId   String
+  confidence Float   @default(0.8)
+  assignedAt DateTime @default(now())
+
+  chunk  DocChunk @relation(fields: [chunkId], references: [id], onDelete: Cascade)
+  domain Domain   @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  @@id([chunkId, domainId])
+}
+
+// ============================================
+// KNOWLEDGE LIFECYCLE & AUDIT
+// ============================================
+
+model KnowledgeChange {
+  id          String   @id @default(cuid())
+  targetType  ChangeTargetType
+  targetId    String
+  changeType  ChangeType
+  oldValue    Json?
+  newValue    Json?
+  reason      String   @db.Text
+  initiatedBy InitiatedBy
+  approvedBy  String?
+  status      ChangeStatus @default(PENDING)
+  createdAt   DateTime @default(now())
+  reviewedAt  DateTime?
+
+  // Polymorphic relations
+  rule   Rule?   @relation("RuleChanges", fields: [targetId], references: [id], map: "rule_change_fk")
+  qaPair QAPair? @relation("QAChanges", fields: [targetId], references: [id], map: "qa_change_fk")
+
+  @@index([targetType, targetId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum ChangeTargetType {
+  RULE
+  QA_PAIR
+}
+
+enum ChangeType {
+  CREATE
+  UPDATE
+  SUPERSEDE
+  DEPRECATE
+}
+
+enum InitiatedBy {
+  AI
+  ADMIN
+}
+
+enum ChangeStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// ============================================
+// AI QUESTIONS FOR HUMANS
+// ============================================
+
+model AIQuestion {
+  id             String   @id @default(cuid())
+  issueType      String   // price_conflict, ambiguous_rule, outdated_info
+  question       String   @db.Text
+  context        Json?    // related rule/doc info
+  proposedChange Json?    // { old, new }
+  affectedRuleId String?
+  status         QuestionStatus @default(OPEN)
+  response       String?  @db.Text
+  createdAt      DateTime @default(now())
+  respondedAt    DateTime?
+
+  @@index([status])
+  @@index([issueType])
+}
+
+enum QuestionStatus {
+  OPEN
+  ANSWERED
+  DISMISSED
+}
+
+// ============================================
+// SESSIONS & CHAT HISTORY
+// ============================================
+
+model ChatSession {
+  id        String   @id @default(cuid())
+  source    ChatSource @default(WEB)
+  userId    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages ChatMessage[]
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  sessionId String
+  role      MessageRole
+  content   String   @db.Text
+  metadata  Json?    // domains used, chunks retrieved, confidence
+  createdAt DateTime @default(now())
+
+  session ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+}
+
+enum ChatSource {
+  WEB
+  TELEGRAM
+  API
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}

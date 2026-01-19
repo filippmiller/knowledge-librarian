@@ -1,0 +1,181 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+
+interface Document {
+  id: string;
+  title: string;
+  filename: string;
+  mimeType: string;
+  uploadedAt: string;
+  parseStatus: string;
+  parseError: string | null;
+  domains: Array<{
+    isPrimary: boolean;
+    domain: { slug: string; title: string };
+  }>;
+  _count: {
+    rules: number;
+    qaPairs: number;
+    chunks: number;
+  };
+}
+
+export default function DocumentsPage() {
+  const [documents, setDocuments] = useState<Document[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [uploading, setUploading] = useState(false);
+
+  async function fetchDocuments() {
+    try {
+      const response = await fetch('/api/documents');
+      const data = await response.json();
+      setDocuments(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error('Error fetching documents:', error);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    fetchDocuments();
+  }, []);
+
+  async function handleUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setUploading(true);
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('title', file.name);
+
+    try {
+      const response = await fetch('/api/documents', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (response.ok) {
+        fetchDocuments();
+      } else {
+        const error = await response.json();
+        alert(error.error || 'Upload failed');
+      }
+    } catch (error) {
+      console.error('Upload error:', error);
+      alert('Upload failed');
+    } finally {
+      setUploading(false);
+      event.target.value = '';
+    }
+  }
+
+  function getStatusBadge(status: string) {
+    const variants: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
+      PENDING: 'secondary',
+      PROCESSING: 'outline',
+      COMPLETED: 'default',
+      FAILED: 'destructive',
+    };
+    return <Badge variant={variants[status] || 'outline'}>{status}</Badge>;
+  }
+
+  if (loading) {
+    return <div className="text-center py-8">Loading...</div>;
+  }
+
+  return (
+    <div>
+      <div className="flex justify-between items-center mb-6">
+        <h1 className="text-2xl font-bold">Documents</h1>
+        <div>
+          <Input
+            type="file"
+            accept=".pdf,.docx,.doc,.txt,.md,.rtf"
+            onChange={handleUpload}
+            disabled={uploading}
+            className="max-w-xs"
+          />
+        </div>
+      </div>
+
+      {documents.length === 0 ? (
+        <Card>
+          <CardContent className="py-8 text-center text-gray-500">
+            No documents uploaded yet. Upload your first document to get started.
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="bg-white rounded-lg border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Title</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Domains</TableHead>
+                <TableHead>Rules</TableHead>
+                <TableHead>Q&A</TableHead>
+                <TableHead>Uploaded</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {documents.map((doc) => (
+                <TableRow key={doc.id}>
+                  <TableCell>
+                    <a
+                      href={`/admin/documents/${doc.id}`}
+                      className="text-blue-600 hover:underline"
+                    >
+                      {doc.title}
+                    </a>
+                    <div className="text-xs text-gray-500">{doc.filename}</div>
+                  </TableCell>
+                  <TableCell>
+                    {getStatusBadge(doc.parseStatus)}
+                    {doc.parseError && (
+                      <div className="text-xs text-red-500 mt-1">
+                        {doc.parseError}
+                      </div>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex flex-wrap gap-1">
+                      {doc.domains.map((d) => (
+                        <Badge
+                          key={d.domain.slug}
+                          variant={d.isPrimary ? 'default' : 'secondary'}
+                        >
+                          {d.domain.slug}
+                        </Badge>
+                      ))}
+                    </div>
+                  </TableCell>
+                  <TableCell>{doc._count.rules}</TableCell>
+                  <TableCell>{doc._count.qaPairs}</TableCell>
+                  <TableCell className="text-sm text-gray-500">
+                    {new Date(doc.uploadedAt).toLocaleDateString()}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+    </div>
+  );
+}
