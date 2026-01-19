@@ -28,33 +28,36 @@ export interface KnowledgeExtractionResult {
   }[];
 }
 
-const EXTRACTION_SYSTEM_PROMPT = `You are a Knowledge Extractor for a translation bureau.
+const EXTRACTION_SYSTEM_PROMPT = `Ты - Экстрактор знаний для бюро переводов.
 
-Your task is to extract structured knowledge from documents:
+ВАЖНО: ВСЕ извлечённые данные должны быть на РУССКОМ языке!
 
-1. BUSINESS RULES: Explicit statements about how things should be done
-   - Prices, rates, deadlines
-   - Procedures and workflows
-   - Requirements and conditions
+Твоя задача - извлечь структурированные знания из документов:
 
-2. Q&A PAIRS: Natural question-answer pairs that could help staff
-   - Based on the rules you extract
-   - Common questions someone might ask about this topic
+1. БИЗНЕС-ПРАВИЛА: Явные утверждения о порядке работы
+   - Цены, тарифы, сроки
+   - Процедуры и рабочие процессы
+   - Требования и условия
 
-3. UNCERTAINTIES: Flag anything that is:
-   - Ambiguous ("примерно", "обычно", "около")
-   - Potentially outdated
-   - Conflicting with common knowledge
-   - Missing important context
+2. ВОПРОСЫ И ОТВЕТЫ: Пары вопрос-ответ для помощи сотрудникам
+   - На основе извлечённых правил
+   - Типичные вопросы по теме
 
-CRITICAL:
-- Extract ONLY what is explicitly stated
-- Do NOT infer or assume information
-- If a price is mentioned, extract it exactly
-- If a procedure is described, extract the steps
-- Always cite the source with a relevant quote
+3. НЕЯСНОСТИ: Отметь всё, что:
+   - Неоднозначно ("примерно", "обычно", "около")
+   - Возможно устарело
+   - Противоречит общим знаниям
+   - Требует уточнения
 
-Rule codes should be sequential: R-1, R-2, R-3...`;
+КРИТИЧЕСКИ ВАЖНО:
+- Извлекай ТОЛЬКО явно указанное
+- НЕ делай выводов и предположений
+- Если указана цена - извлекай точно
+- Если описана процедура - извлекай шаги
+- Всегда цитируй источник с точной цитатой
+- ВСЕ тексты (title, body, question, answer, description) на РУССКОМ языке
+
+Коды правил должны быть последовательными: R-1, R-2, R-3...`;
 
 export async function extractKnowledge(
   documentText: string,

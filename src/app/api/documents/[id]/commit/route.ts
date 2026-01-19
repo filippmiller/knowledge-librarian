@@ -1,0 +1,316 @@
+import { NextRequest, NextResponse } from 'next/server';
+import prisma from '@/lib/db';
+import { requireAdminAuth } from '@/lib/auth';
+import { generateEmbeddings } from '@/lib/openai';
+
+// POST - сохранить верифицированные элементы в финальные таблицы
+export async function POST(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+): Promise<Response> {
+  const authError = await requireAdminAuth(request);
+  if (authError) return authError;
+
+  const { id: documentId } = await params;
+
+  try {
+    // Get the document
+    const document = await prisma.document.findUnique({
+      where: { id: documentId },
+    });
+
+    if (!document) {
+      return NextResponse.json(
+        { error: 'Документ не найден' },
+        { status: 404 }
+      );
+    }
+
+    // Get all verified staged items
+    const verifiedItems = await prisma.stagedExtraction.findMany({
+      where: {
+        documentId,
+        isVerified: true,
+      },
+    });
+
+    if (verifiedItems.length === 0) {
+      return NextResponse.json(
+        { error: 'Нет подтверждённых элементов для сохранения' },
+        { status: 400 }
+      );
+    }
+
+    const results = {
+      domainsLinked: 0,
+      domainSuggestionsCreated: 0,
+      rulesCreated: 0,
+      qaPairsCreated: 0,
+      aiQuestionsCreated: 0,
+      chunksCreated: 0,
+    };
+
+    // Collect domain IDs for linking rules and QAs
+    const domainIds: string[] = [];
+
+    // Process domain assignments
+    const domainAssignments = verifiedItems.filter(
+      (i) => i.itemType === 'DOMAIN_ASSIGNMENT'
+    );
+    for (const item of domainAssignments) {
+      const data = item.data as {
+        primaryDomainSlug: string;
+        secondaryDomainSlugs: string[];
+        confidence: number;
+      };
+
+      // Link primary domain
+      const primaryDomain = await prisma.domain.findUnique({
+        where: { slug: data.primaryDomainSlug },
+      });
+
+      if (primaryDomain) {
+        await prisma.documentDomain.upsert({
+          where: {
+            documentId_domainId: {
+              documentId,
+              domainId: primaryDomain.id,
+            },
+          },
+          update: {
+            isPrimary: true,
+            confidence: data.confidence,
+          },
+          create: {
+            documentId,
+            domainId: primaryDomain.id,
+            isPrimary: true,
+            confidence: data.confidence,
+          },
+        });
+        domainIds.push(primaryDomain.id);
+        results.domainsLinked++;
+      }
+
+      // Link secondary domains
+      for (const secondarySlug of data.secondaryDomainSlugs) {
+        const secondaryDomain = await prisma.domain.findUnique({
+          where: { slug: secondarySlug },
+        });
+
+        if (secondaryDomain) {
+          await prisma.documentDomain.upsert({
+            where: {
+              documentId_domainId: {
+                documentId,
+                domainId: secondaryDomain.id,
+              },
+            },
+            update: {
+              isPrimary: false,
+              confidence: data.confidence * 0.8,
+            },
+            create: {
+              documentId,
+              domainId: secondaryDomain.id,
+              isPrimary: false,
+              confidence: data.confidence * 0.8,
+            },
+          });
+          domainIds.push(secondaryDomain.id);
+          results.domainsLinked++;
+        }
+      }
+    }
+
+    // Process domain suggestions
+    const domainSuggestions = verifiedItems.filter(
+      (i) => i.itemType === 'DOMAIN_SUGGESTION'
+    );
+    for (const item of domainSuggestions) {
+      const data = item.data as {
+        suggestedSlug: string;
+        title: string;
+        description: string;
+        parentSlug: string | null;
+        confidence: number;
+        reason: string;
+      };
+
+      await prisma.domainSuggestion.create({
+        data: {
+          suggestedSlug: data.suggestedSlug,
+          title: data.title,
+          description: data.description,
+          parentSlug: data.parentSlug,
+          confidence: data.confidence,
+          reason: data.reason,
+          createdFromDocumentId: documentId,
+        },
+      });
+      results.domainSuggestionsCreated++;
+    }
+
+    // Track rule codes for QA linking
+    const ruleCodeToId = new Map<string, string>();
+
+    // Process rules
+    const rules = verifiedItems.filter((i) => i.itemType === 'RULE');
+    for (const item of rules) {
+      const data = item.data as {
+        ruleCode: string;
+        title: string;
+        body: string;
+        confidence: number;
+        sourceSpan: { quote: string; locationHint: string };
+      };
+
+      const created = await prisma.rule.create({
+        data: {
+          documentId,
+          ruleCode: data.ruleCode,
+          title: data.title,
+          body: data.body,
+          confidence: data.confidence,
+          sourceSpan: data.sourceSpan,
+        },
+      });
+
+      ruleCodeToId.set(data.ruleCode, created.id);
+
+      // Link rule to domains
+      for (const domainId of domainIds) {
+        await prisma.ruleDomain.create({
+          data: {
+            ruleId: created.id,
+            domainId,
+            confidence: data.confidence,
+          },
+        });
+      }
+
+      results.rulesCreated++;
+    }
+
+    // Process QA pairs
+    const qaPairs = verifiedItems.filter((i) => i.itemType === 'QA_PAIR');
+    for (const item of qaPairs) {
+      const data = item.data as {
+        question: string;
+        answer: string;
+        linkedRuleCode: string | null;
+      };
+
+      const ruleId = data.linkedRuleCode
+        ? ruleCodeToId.get(data.linkedRuleCode)
+        : null;
+
+      const created = await prisma.qAPair.create({
+        data: {
+          documentId,
+          ruleId: ruleId || null,
+          question: data.question,
+          answer: data.answer,
+        },
+      });
+
+      // Link QA to domains
+      for (const domainId of domainIds) {
+        await prisma.qADomain.create({
+          data: {
+            qaId: created.id,
+            domainId,
+          },
+        });
+      }
+
+      results.qaPairsCreated++;
+    }
+
+    // Process uncertainties
+    const uncertainties = verifiedItems.filter((i) => i.itemType === 'UNCERTAINTY');
+    for (const item of uncertainties) {
+      const data = item.data as {
+        type: string;
+        description: string;
+        suggestedQuestion: string;
+      };
+
+      await prisma.aIQuestion.create({
+        data: {
+          issueType: data.type,
+          question: data.suggestedQuestion,
+          context: { description: data.description },
+        },
+      });
+      results.aiQuestionsCreated++;
+    }
+
+    // Process chunks
+    const chunks = verifiedItems.filter((i) => i.itemType === 'CHUNK');
+    if (chunks.length > 0) {
+      // Generate embeddings for all chunks at once
+      const chunkContents = chunks.map(
+        (c) => (c.data as { content: string }).content
+      );
+      const embeddings = await generateEmbeddings(chunkContents);
+
+      for (let i = 0; i < chunks.length; i++) {
+        const item = chunks[i];
+        const data = item.data as {
+          index: number;
+          content: string;
+          metadata: { startChar: number; endChar: number };
+        };
+
+        const created = await prisma.docChunk.create({
+          data: {
+            documentId,
+            chunkIndex: data.index,
+            content: data.content,
+            embedding: embeddings[i],
+            metadata: data.metadata,
+          },
+        });
+
+        // Link chunk to domains
+        for (const domainId of domainIds) {
+          await prisma.chunkDomain.create({
+            data: {
+              chunkId: created.id,
+              domainId,
+            },
+          });
+        }
+
+        results.chunksCreated++;
+      }
+    }
+
+    // Update document status
+    await prisma.document.update({
+      where: { id: documentId },
+      data: { parseStatus: 'COMPLETED' },
+    });
+
+    // Delete committed staged items
+    await prisma.stagedExtraction.deleteMany({
+      where: {
+        documentId,
+        isVerified: true,
+      },
+    });
+
+    return NextResponse.json({
+      success: true,
+      message: 'Данные успешно сохранены',
+      results,
+    });
+  } catch (error) {
+    console.error('Error committing staged data:', error);
+    return NextResponse.json(
+      { error: 'Не удалось сохранить данные' },
+      { status: 500 }
+    );
+  }
+}

@@ -23,40 +23,40 @@ interface IntentClassification {
   confidence: number;
 }
 
-const INTENT_CLASSIFIER_PROMPT = `You are an intent classifier for a translation bureau knowledge system.
+const INTENT_CLASSIFIER_PROMPT = `Ты - классификатор намерений для системы знаний бюро переводов.
 
-Classify the user's question:
-1. Identify the intent (price_query, procedure_query, contact_query, general_info)
-2. Identify relevant domains from the list
-3. Rate your confidence
+Классифицируй вопрос пользователя:
+1. Определи намерение (price_query, procedure_query, contact_query, general_info)
+2. Определи релевантные домены из списка
+3. Оцени свою уверенность
 
-Available domains:
+Доступные домены:
 - general_ops, notary, pricing, translation_ops, formatting_delivery
 - it_tools, hr_internal, sales_clients, legal_compliance
 
-Respond with JSON:
+Ответь в формате JSON:
 {
-  "intent": "string",
-  "domains": ["string"],
+  "intent": "строка",
+  "domains": ["строка"],
   "confidence": 0.0-1.0
 }`;
 
-const ANSWERING_PROMPT = `You are the AI Knowledge Librarian for a translation bureau.
+const ANSWERING_PROMPT = `Ты - ИИ-библиотекарь знаний для бюро переводов.
 
-CRITICAL RULES:
-1. Answer ONLY based on the provided knowledge
-2. If the knowledge is insufficient, say so clearly
-3. Always cite your sources
-4. Be concise and direct
-5. Use Russian for responses (unless the question is in English)
+КРИТИЧЕСКИЕ ПРАВИЛА:
+1. Отвечай ТОЛЬКО на основе предоставленных знаний
+2. Если знаний недостаточно - чётко скажи об этом
+3. Всегда указывай источники
+4. Будь краток и точен
+5. Отвечай на русском языке
 
-If you cannot answer:
-- Say "Я не нашёл информации по этому вопросу в базе знаний"
-- Suggest what information might be needed
+Если не можешь ответить:
+- Скажи "Я не нашёл информации по этому вопросу в базе знаний"
+- Предложи, какая информация может понадобиться
 
-For prices and procedures:
-- Quote exact values from the knowledge
-- Note if information might be outdated`;
+Для цен и процедур:
+- Цитируй точные значения из базы знаний
+- Отметь, если информация может быть устаревшей`;
 
 export async function classifyIntent(question: string): Promise<IntentClassification> {
   const response = await openai.chat.completions.create({

@@ -12,6 +12,7 @@ const navigation = [
   { name: 'Вопросы и ответы', href: '/admin/qa' },
   { name: 'Вопросы ИИ', href: '/admin/ai-questions' },
   { name: 'Журнал изменений', href: '/admin/knowledge-changes' },
+  { name: 'Настройки ИИ', href: '/admin/ai-settings' },
 ];
 
 export default function AdminLayout({

@@ -31,6 +31,7 @@ model Document {
   qaPairs           QAPair[]
   chunks            DocChunk[]
   domainSuggestions DomainSuggestion[]
+  stagedExtractions StagedExtraction[]
 
   @@index([parseStatus])
 }
@@ -367,4 +368,57 @@ enum UserRole {
   ADMIN
   EDITOR
   VIEWER
+}
+
+// ============================================
+// STAGED EXTRACTION (STREAMING PROCESSING)
+// ============================================
+
+model StagedExtraction {
+  id           String   @id @default(cuid())
+  documentId   String
+  phase        ExtractionPhase
+  itemType     StagedItemType
+  data         Json
+  isVerified   Boolean  @default(false)
+  isRejected   Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  verifiedAt   DateTime?
+
+  document     Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId, phase])
+  @@index([documentId, isVerified])
+}
+
+enum ExtractionPhase {
+  DOMAIN_CLASSIFICATION
+  KNOWLEDGE_EXTRACTION
+  CHUNKING
+}
+
+enum StagedItemType {
+  DOMAIN_ASSIGNMENT
+  DOMAIN_SUGGESTION
+  RULE
+  QA_PAIR
+  UNCERTAINTY
+  CHUNK
+}
+
+// ============================================
+// AI SETTINGS
+// ============================================
+
+model AISettings {
+  id           String   @id @default(cuid())
+  provider     String   @default("openai")
+  apiKey       String   // Зашифрованный ключ
+  model        String   @default("gpt-4o")
+  embeddingModel String @default("text-embedding-3-small")
+  isActive     Boolean  @default(true)
+  lastVerified DateTime?
+  lastError    String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 }

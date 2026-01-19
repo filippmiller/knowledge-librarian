@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -131,6 +132,7 @@ export default function DocumentsPage() {
                 <TableHead>Правила</TableHead>
                 <TableHead>Вопросы</TableHead>
                 <TableHead>Загружен</TableHead>
+                <TableHead>Действия</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -169,6 +171,13 @@ export default function DocumentsPage() {
                   <TableCell>{doc._count.qaPairs}</TableCell>
                   <TableCell className="text-sm text-gray-500">
                     {new Date(doc.uploadedAt).toLocaleDateString()}
+                  </TableCell>
+                  <TableCell>
+                    <Link href={`/admin/documents/${doc.id}/process`}>
+                      <Button variant="outline" size="sm">
+                        Обработать
+                      </Button>
+                    </Link>
                   </TableCell>
                 </TableRow>
               ))}

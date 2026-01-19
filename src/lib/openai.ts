@@ -1,4 +1,6 @@
 import OpenAI from 'openai';
+import type { ChatCompletionMessageParam, ChatCompletionChunk } from 'openai/resources/chat/completions';
+import type { Stream } from 'openai/streaming';
 
 if (!process.env.OPENAI_API_KEY) {
   console.warn('Warning: OPENAI_API_KEY is not set');
@@ -28,4 +30,81 @@ export async function generateEmbeddings(texts: string[]): Promise<number[][]> {
     dimensions: EMBEDDING_DIMENSIONS,
   });
   return response.data.map((d) => d.embedding);
+}
+
+// Streaming chat completion
+export interface StreamChatOptions {
+  model?: string;
+  messages: ChatCompletionMessageParam[];
+  temperature?: number;
+  maxTokens?: number;
+  responseFormat?: 'text' | 'json_object';
+}
+
+export async function streamChatCompletion(
+  options: StreamChatOptions
+): Promise<Stream<ChatCompletionChunk>> {
+  const {
+    model = CHAT_MODEL,
+    messages,
+    temperature = 0.3,
+    maxTokens,
+    responseFormat,
+  } = options;
+
+  const stream = await openai.chat.completions.create({
+    model,
+    messages,
+    temperature,
+    ...(maxTokens && { max_tokens: maxTokens }),
+    ...(responseFormat && { response_format: { type: responseFormat } }),
+    stream: true,
+  });
+
+  return stream;
+}
+
+// Helper to collect full response from stream
+export async function collectStreamResponse(
+  stream: Stream<ChatCompletionChunk>
+): Promise<string> {
+  let fullContent = '';
+
+  for await (const chunk of stream) {
+    const content = chunk.choices[0]?.delta?.content || '';
+    fullContent += content;
+  }
+
+  return fullContent;
+}
+
+// Create OpenAI client with custom API key (for stored keys)
+export function createOpenAIClient(apiKey: string): OpenAI {
+  return new OpenAI({ apiKey });
+}
+
+export async function streamChatCompletionWithKey(
+  apiKey: string,
+  options: StreamChatOptions
+): Promise<Stream<ChatCompletionChunk>> {
+  const client = createOpenAIClient(apiKey);
+
+  const {
+    model = CHAT_MODEL,
+    messages,
+    temperature = 0.3,
+    maxTokens,
+    responseFormat,
+  } = options;
+
+  const stream = await client.chat.completions.create({
+    model,
+    messages,
+    temperature,
+    ...(maxTokens && { max_tokens: maxTokens }),
+    ...(responseFormat && { response_format: { type: responseFormat } }),
+    stream: true,
+  });
+
+  return stream;
 }
