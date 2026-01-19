@@ -1,11 +1,5 @@
 [build]
-builder = "nixpacks"
-
-[build.nixpacks]
-nodejs_version = "20"
-pkg_manager = "pnpm"
-build_cmd = "pnpm build"
-cacheKey = "v2"
+builder = "railpack"
 
 [deploy]
 startCommand = "pnpm start"
