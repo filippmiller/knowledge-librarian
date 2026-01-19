@@ -1,0 +1,13 @@
+# Railpack configuration - force Next.js with pnpm
+[provider]
+name = "node"
+
+[node]
+packageManager = "pnpm"
+version = "20"
+
+[build]
+command = "pnpm build"
+
+[start]
+command = "pnpm start"
