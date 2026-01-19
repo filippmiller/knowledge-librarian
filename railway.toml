@@ -5,6 +5,7 @@ builder = "nixpacks"
 nodejs_version = "20"
 pkg_manager = "pnpm"
 build_cmd = "pnpm build"
+cacheKey = "v2"
 
 [deploy]
 startCommand = "pnpm start"
