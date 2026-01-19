@@ -1,0 +1,13 @@
+{
+  "$schema": "https://railpack.dev/schema.json",
+  "provider": "node",
+  "node": {
+    "packageManager": "pnpm"
+  },
+  "build": {
+    "command": "pnpm build"
+  },
+  "start": {
+    "command": "pnpm start"
+  }
+}

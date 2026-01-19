@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import { hash } from 'bcryptjs';
 
 const prisma = new PrismaClient();
 
@@ -50,6 +51,17 @@ const baseDomains = [
   },
 ];
 
+const adminUsers = [
+  {
+    username: 'yana',
+    password: 'Airbus3+',
+  },
+  {
+    username: 'filipp',
+    password: 'Airbus380+',
+  },
+];
+
 async function main() {
   console.log('Seeding database...');
 
@@ -61,6 +73,21 @@ async function main() {
       create: domain,
     });
     console.log(`Created domain: ${domain.slug}`);
+  }
+
+  // Create admin users
+  for (const user of adminUsers) {
+    const passwordHash = await hash(user.password, 12);
+    await prisma.user.upsert({
+      where: { username: user.username },
+      update: { passwordHash },
+      create: {
+        username: user.username,
+        passwordHash,
+        role: 'ADMIN',
+      },
+    });
+    console.log(`Created admin user: ${user.username}`);
   }
 
   console.log('Seeding completed!');

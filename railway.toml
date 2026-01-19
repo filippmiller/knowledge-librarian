@@ -1,6 +1,11 @@
 [build]
 builder = "nixpacks"
 
+[build.nixpacks]
+nodejs_version = "20"
+pkg_manager = "pnpm"
+build_cmd = "pnpm build"
+
 [deploy]
 startCommand = "pnpm start"
 healthcheckPath = "/"
