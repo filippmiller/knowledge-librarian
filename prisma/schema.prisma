@@ -2,14 +2,12 @@
 // PostgreSQL with pgvector for embeddings
 
 generator client {
-  provider        = "prisma-client-js"
-  previewFeatures = ["postgresqlExtensions"]
+  provider = "prisma-client-js"
 }
 
 datasource db {
-  provider   = "postgresql"
-  url        = env("DATABASE_URL")
-  extensions = [vector]
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 // ============================================
@@ -169,7 +167,7 @@ model DocChunk {
   documentId String
   chunkIndex Int
   content    String   @db.Text
-  embedding  Unsupported("vector(1536)")?
+  embedding  Json?    // vector embeddings stored as JSON array
   metadata   Json?    // additional context
   createdAt  DateTime @default(now())
 

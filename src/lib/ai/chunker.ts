@@ -13,6 +13,24 @@ export interface TextChunk {
   };
 }
 
+// Cosine similarity calculation
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length) return 0;
+
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+
+  for (let i = 0; i < a.length; i++) {
+    dotProduct += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+
+  const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+  return denominator === 0 ? 0 : dotProduct / denominator;
+}
+
 export function splitTextIntoChunks(text: string): TextChunk[] {
   const chunks: TextChunk[] = [];
   let startChar = 0;
@@ -72,29 +90,23 @@ export async function createDocumentChunks(
   // Generate embeddings for all chunks
   const embeddings = await generateEmbeddings(chunks.map((c) => c.content));
 
-  // Store chunks with embeddings
+  // Store chunks with embeddings as JSON
   const createdChunks = [];
 
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
     const embedding = embeddings[i];
 
-    // Create chunk record
+    // Create chunk record with embedding as JSON
     const created = await prisma.docChunk.create({
       data: {
         documentId,
         chunkIndex: chunk.index,
         content: chunk.content,
+        embedding: embedding, // Store as JSON array
         metadata: chunk.metadata,
       },
     });
-
-    // Store embedding using raw SQL (pgvector)
-    await prisma.$executeRaw`
-      UPDATE "DocChunk"
-      SET embedding = ${embedding}::vector
-      WHERE id = ${created.id}
-    `;
 
     // Link chunk to domains
     for (const domainId of domainIds) {
@@ -117,39 +129,59 @@ export async function searchSimilarChunks(
   domainSlugs: string[] = [],
   limit: number = 5
 ): Promise<{ id: string; content: string; similarity: number; documentId: string }[]> {
-  const queryEmbedding = await generateEmbeddings([query]);
-  const embedding = queryEmbedding[0];
+  // Generate query embedding
+  const queryEmbeddings = await generateEmbeddings([query]);
+  const queryEmbedding = queryEmbeddings[0];
 
-  let results;
+  // Fetch chunks with their embeddings
+  let chunks;
 
   if (domainSlugs.length > 0) {
-    // Domain-filtered search
-    results = await prisma.$queryRaw<
-      { id: string; content: string; similarity: number; documentId: string }[]
-    >`
-      SELECT DISTINCT c.id, c.content, c."documentId",
-        1 - (c.embedding <=> ${embedding}::vector) as similarity
-      FROM "DocChunk" c
-      JOIN "ChunkDomain" cd ON cd."chunkId" = c.id
-      JOIN "Domain" d ON d.id = cd."domainId"
-      WHERE d.slug = ANY(${domainSlugs})
-        AND c.embedding IS NOT NULL
-      ORDER BY similarity DESC
-      LIMIT ${limit}
-    `;
+    chunks = await prisma.docChunk.findMany({
+      where: {
+        domains: {
+          some: {
+            domain: {
+              slug: { in: domainSlugs },
+            },
+          },
+        },
+      },
+      select: {
+        id: true,
+        content: true,
+        documentId: true,
+        embedding: true,
+      },
+    });
   } else {
-    // Global search
-    results = await prisma.$queryRaw<
-      { id: string; content: string; similarity: number; documentId: string }[]
-    >`
-      SELECT c.id, c.content, c."documentId",
-        1 - (c.embedding <=> ${embedding}::vector) as similarity
-      FROM "DocChunk" c
-      WHERE c.embedding IS NOT NULL
-      ORDER BY similarity DESC
-      LIMIT ${limit}
-    `;
+    chunks = await prisma.docChunk.findMany({
+      select: {
+        id: true,
+        content: true,
+        documentId: true,
+        embedding: true,
+      },
+    });
   }
+
+  // Calculate similarities
+  const results = chunks
+    .map((chunk) => {
+      const chunkEmbedding = chunk.embedding as number[] | null;
+      if (!chunkEmbedding) return null;
+
+      const similarity = cosineSimilarity(queryEmbedding, chunkEmbedding);
+      return {
+        id: chunk.id,
+        content: chunk.content,
+        documentId: chunk.documentId,
+        similarity,
+      };
+    })
+    .filter((r): r is NonNullable<typeof r> => r !== null)
+    .sort((a, b) => b.similarity - a.similarity)
+    .slice(0, limit);
 
   return results;
 }
