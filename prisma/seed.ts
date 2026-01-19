@@ -54,7 +54,7 @@ const baseDomains = [
 const adminUsers = [
   {
     username: 'yana',
-    password: 'Airbus3+',
+    password: 'Airbus380+',
   },
   {
     username: 'filipp',
