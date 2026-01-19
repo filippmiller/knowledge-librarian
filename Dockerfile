@@ -1,7 +1,8 @@
 # Use Node.js 20 LTS
 FROM node:20-alpine AS base
 
-# Install pnpm
+# Install pnpm and openssl for Prisma
+RUN apk add --no-cache openssl
 RUN corepack enable && corepack prepare pnpm@9.14.4 --activate
 
 # Install dependencies only when needed
@@ -12,7 +13,7 @@ WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
 COPY prisma ./prisma/
 
-# Install dependencies
+# Install dependencies and generate Prisma client
 RUN pnpm install --frozen-lockfile
 
 # Build the application
@@ -22,7 +23,7 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# Generate Prisma client and build
+# Build Next.js (prisma generate runs via postinstall)
 RUN pnpm build
 
 # Production image
@@ -35,12 +36,11 @@ ENV NODE_ENV=production
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
 
-# Copy built application
+# Copy built application (standalone includes node_modules)
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/prisma ./prisma
-COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 
 USER nextjs
 
