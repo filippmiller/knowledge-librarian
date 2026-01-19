@@ -1,0 +1,30 @@
+# Dependencies
+node_modules
+.pnpm-store
+
+# Next.js
+.next
+out
+
+# Testing
+test-results
+playwright-report
+.playwright
+
+# Development
+*.log
+.env*.local
+.DS_Store
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+
+# Misc
+README.md
+SESSION_NOTES.md
+check-users.ts
