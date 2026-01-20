@@ -22,6 +22,20 @@ export async function GET(request: NextRequest): Promise<Response> {
   if (authError) return authError;
 
   try {
+    const processingTimeoutMs = 6 * 60 * 60 * 1000;
+    const timeoutCutoff = new Date(Date.now() - processingTimeoutMs);
+
+    await prisma.document.updateMany({
+      where: {
+        parseStatus: 'PROCESSING',
+        uploadedAt: { lt: timeoutCutoff },
+      },
+      data: {
+        parseStatus: 'FAILED',
+        parseError: 'Processing timed out. Please retry.',
+      },
+    });
+
     const documents = await prisma.document.findMany({
       include: {
         domains: {

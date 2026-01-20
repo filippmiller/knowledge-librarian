@@ -12,6 +12,21 @@ export async function GET(
   const { id } = await params;
 
   try {
+    const processingTimeoutMs = 6 * 60 * 60 * 1000;
+    const timeoutCutoff = new Date(Date.now() - processingTimeoutMs);
+
+    await prisma.document.updateMany({
+      where: {
+        id,
+        parseStatus: 'PROCESSING',
+        uploadedAt: { lt: timeoutCutoff },
+      },
+      data: {
+        parseStatus: 'FAILED',
+        parseError: 'Processing timed out. Please retry.',
+      },
+    });
+
     const document = await prisma.document.findUnique({
       where: { id },
       include: {

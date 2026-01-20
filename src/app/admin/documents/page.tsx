@@ -86,6 +86,25 @@ export default function DocumentsPage() {
     }
   }
 
+  function formatProcessingAge(uploadedAt: string) {
+    const startedAt = new Date(uploadedAt).getTime();
+    if (Number.isNaN(startedAt)) return null;
+
+    const diffMs = Date.now() - startedAt;
+    if (diffMs < 0) return null;
+
+    const totalMinutes = Math.floor(diffMs / 60000);
+    const totalHours = Math.floor(diffMs / 3600000);
+    const days = Math.floor(totalHours / 24);
+    const hours = totalHours % 24;
+    const minutes = totalMinutes % 60;
+
+    if (days > 0) return `${days}д ${hours}ч`;
+    if (totalHours > 0) return `${totalHours}ч`;
+    if (totalMinutes > 0) return `${minutes}м`;
+    return 'только что';
+  }
+
   function getStatusBadge(status: string) {
     const variants: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
       PENDING: 'secondary',
@@ -93,6 +112,16 @@ export default function DocumentsPage() {
       COMPLETED: 'default',
       FAILED: 'destructive',
     };
+
+    if (status === 'PROCESSING') {
+      return (
+        <Badge variant={variants[status]} className="gap-2">
+          <span className="inline-block h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
+          {status}
+        </Badge>
+      );
+    }
+
     return <Badge variant={variants[status] || 'outline'}>{status}</Badge>;
   }
 
@@ -148,7 +177,14 @@ export default function DocumentsPage() {
                     <div className="text-xs text-gray-500">{doc.filename}</div>
                   </TableCell>
                   <TableCell>
-                    {getStatusBadge(doc.parseStatus)}
+                    <div className="space-y-1">
+                      {getStatusBadge(doc.parseStatus)}
+                      {doc.parseStatus === 'PROCESSING' && (
+                        <div className="text-xs text-gray-500">
+                          В обработке {formatProcessingAge(doc.uploadedAt)}
+                        </div>
+                      )}
+                    </div>
                     {doc.parseError && (
                       <div className="text-xs text-red-500 mt-1">
                         {doc.parseError}
@@ -175,7 +211,7 @@ export default function DocumentsPage() {
                   <TableCell>
                     <Link href={`/admin/documents/${doc.id}/process`}>
                       <Button variant="outline" size="sm">
-                        Обработать
+                        Прогресс
                       </Button>
                     </Link>
                   </TableCell>
