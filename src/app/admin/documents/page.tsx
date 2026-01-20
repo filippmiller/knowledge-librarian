@@ -1,7 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import Link from 'next/link';
+import { useEffect, useState, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -13,7 +12,15 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { ProcessingModal } from '@/components/document-processor';
 
 interface Document {
   id: string;
@@ -34,10 +41,46 @@ interface Document {
   };
 }
 
+// Toast component
+function Toast({ message, type, onClose }: { message: string; type: 'success' | 'error' | 'info'; onClose: () => void }) {
+  useEffect(() => {
+    const timer = setTimeout(onClose, 4000);
+    return () => clearTimeout(timer);
+  }, [onClose]);
+
+  const colors = {
+    success: 'bg-green-500/20 border-green-500/50 text-green-400',
+    error: 'bg-red-500/20 border-red-500/50 text-red-400',
+    info: 'bg-cyan-500/20 border-cyan-500/50 text-cyan-400',
+  }[type];
+
+  return (
+    <div className={`fixed bottom-4 right-4 z-50 px-4 py-3 rounded-lg border ${colors} shadow-lg font-mono text-sm`}>
+      <div className="flex items-center gap-2">
+        <span>{message}</span>
+        <button onClick={onClose} className="ml-2 opacity-60 hover:opacity-100">✕</button>
+      </div>
+    </div>
+  );
+}
+
 export default function DocumentsPage() {
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+
+  // Modal state
+  const [processingModal, setProcessingModal] = useState<{
+    isOpen: boolean;
+    documentId: string | null;
+    documentTitle: string;
+    autoStart: boolean;
+  }>({ isOpen: false, documentId: null, documentTitle: '', autoStart: true });
+
+  const showToast = useCallback((message: string, type: 'success' | 'error' | 'info') => {
+    setToast({ message, type });
+  }, []);
 
   async function fetchDocuments() {
     try {
@@ -46,6 +89,7 @@ export default function DocumentsPage() {
       setDocuments(Array.isArray(data) ? data : []);
     } catch (error) {
       console.error('Error fetching documents:', error);
+      showToast('Ошибка загрузки документов', 'error');
     } finally {
       setLoading(false);
     }
@@ -53,6 +97,9 @@ export default function DocumentsPage() {
 
   useEffect(() => {
     fetchDocuments();
+    // Refresh every 30 seconds to update statuses
+    const interval = setInterval(fetchDocuments, 30000);
+    return () => clearInterval(interval);
   }, []);
 
   async function handleUpload(event: React.ChangeEvent<HTMLInputElement>) {
@@ -72,18 +119,97 @@ export default function DocumentsPage() {
       });
 
       if (response.ok) {
+        const data = await response.json();
+        showToast('Документ загружен, начинаю обработку...', 'success');
+
+        // Open processing modal
+        setProcessingModal({
+          isOpen: true,
+          documentId: data.id,
+          documentTitle: file.name,
+          autoStart: true,
+        });
+
         fetchDocuments();
       } else {
         const error = await response.json();
-        alert(error.error || 'Ошибка загрузки');
+        showToast(error.error || 'Ошибка загрузки', 'error');
       }
     } catch (error) {
       console.error('Upload error:', error);
-      alert('Ошибка загрузки');
+      showToast('Ошибка загрузки', 'error');
     } finally {
       setUploading(false);
       event.target.value = '';
     }
+  }
+
+  // Document actions
+  async function handleDocumentAction(docId: string, action: 'delete' | 'reset' | 'cancel' | 'retry') {
+    try {
+      if (action === 'delete') {
+        if (!confirm('Удалить документ и все связанные данные?')) return;
+
+        const response = await fetch(`/api/documents/${docId}`, { method: 'DELETE' });
+        if (response.ok) {
+          showToast('Документ удален', 'success');
+          fetchDocuments();
+        } else {
+          throw new Error('Failed to delete');
+        }
+      } else {
+        const response = await fetch(`/api/documents/${docId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action }),
+        });
+
+        if (response.ok) {
+          const messages = {
+            reset: 'Документ сброшен',
+            cancel: 'Обработка отменена',
+            retry: 'Готов к повторной обработке',
+          };
+          showToast(messages[action], 'success');
+          fetchDocuments();
+        } else {
+          throw new Error('Failed to perform action');
+        }
+      }
+    } catch (error) {
+      showToast('Ошибка выполнения действия', 'error');
+    }
+  }
+
+  // Bulk actions
+  async function handleBulkAction(action: 'reset-stuck' | 'cancel-all-processing') {
+    try {
+      const response = await fetch('/api/documents', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        showToast(data.message, 'success');
+        fetchDocuments();
+      } else {
+        throw new Error('Failed to perform bulk action');
+      }
+    } catch (error) {
+      showToast('Ошибка выполнения действия', 'error');
+    }
+  }
+
+  // Open processing modal for a document
+  function openProcessingModal(doc: Document) {
+    setProcessingModal({
+      isOpen: true,
+      documentId: doc.id,
+      documentTitle: doc.title,
+      autoStart: doc.parseStatus !== 'COMPLETED',
+    });
   }
 
   function formatProcessingAge(uploadedAt: string) {
@@ -96,130 +222,252 @@ export default function DocumentsPage() {
     const totalMinutes = Math.floor(diffMs / 60000);
     const totalHours = Math.floor(diffMs / 3600000);
     const days = Math.floor(totalHours / 24);
-    const hours = totalHours % 24;
-    const minutes = totalMinutes % 60;
 
-    if (days > 0) return `${days}д ${hours}ч`;
+    if (days > 0) return `${days}д`;
     if (totalHours > 0) return `${totalHours}ч`;
-    if (totalMinutes > 0) return `${minutes}м`;
-    return 'только что';
+    if (totalMinutes > 0) return `${totalMinutes}м`;
+    return 'сейчас';
   }
 
   function getStatusBadge(status: string) {
-    const variants: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
-      PENDING: 'secondary',
-      PROCESSING: 'outline',
-      COMPLETED: 'default',
-      FAILED: 'destructive',
+    const config: Record<string, { variant: 'default' | 'secondary' | 'destructive' | 'outline'; className: string }> = {
+      PENDING: { variant: 'secondary', className: 'bg-gray-500/20 text-gray-400' },
+      PROCESSING: { variant: 'outline', className: 'bg-cyan-500/20 text-cyan-400 border-cyan-500/50' },
+      COMPLETED: { variant: 'default', className: 'bg-green-500/20 text-green-400' },
+      FAILED: { variant: 'destructive', className: 'bg-red-500/20 text-red-400' },
     };
+
+    const c = config[status] || config.PENDING;
 
     if (status === 'PROCESSING') {
       return (
-        <Badge variant={variants[status]} className="gap-2">
-          <span className="inline-block h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
-          {status}
+        <Badge variant={c.variant} className={`gap-1.5 font-mono ${c.className}`}>
+          <span className="inline-block h-2 w-2 rounded-full border-2 border-current border-t-transparent animate-spin" />
+          PROCESSING
         </Badge>
       );
     }
 
-    return <Badge variant={variants[status] || 'outline'}>{status}</Badge>;
+    return (
+      <Badge variant={c.variant} className={`font-mono ${c.className}`}>
+        {status === 'COMPLETED' && '✓ '}
+        {status === 'FAILED' && '✗ '}
+        {status}
+      </Badge>
+    );
   }
 
+  const processingCount = documents.filter(d => d.parseStatus === 'PROCESSING').length;
+  const stuckCount = documents.filter(d => {
+    if (d.parseStatus !== 'PROCESSING') return false;
+    const age = Date.now() - new Date(d.uploadedAt).getTime();
+    return age > 30 * 60 * 1000; // 30 minutes
+  }).length;
+
   if (loading) {
-    return <div className="text-center py-8">Загрузка...</div>;
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="text-cyan-400 font-mono animate-pulse">Загрузка...</div>
+      </div>
+    );
   }
 
   return (
-    <div>
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-2xl font-bold">Документы</h1>
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex justify-between items-center">
         <div>
-          <Input
-            type="file"
-            accept=".pdf,.docx,.doc,.txt,.md,.rtf"
-            onChange={handleUpload}
-            disabled={uploading}
-            className="max-w-xs"
-          />
+          <h1 className="text-2xl font-bold">Документы</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            Всего: {documents.length} | В обработке: {processingCount}
+            {stuckCount > 0 && <span className="text-yellow-500"> | Зависших: {stuckCount}</span>}
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          {/* Bulk actions */}
+          {(processingCount > 0 || stuckCount > 0) && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="sm" className="font-mono">
+                  Массовые действия
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                {stuckCount > 0 && (
+                  <DropdownMenuItem onClick={() => handleBulkAction('reset-stuck')}>
+                    Сбросить зависшие ({stuckCount})
+                  </DropdownMenuItem>
+                )}
+                {processingCount > 0 && (
+                  <DropdownMenuItem onClick={() => handleBulkAction('cancel-all-processing')}>
+                    Отменить все ({processingCount})
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+
+          {/* Upload */}
+          <div className="relative">
+            <Input
+              type="file"
+              accept=".pdf,.docx,.doc,.txt,.md,.rtf"
+              onChange={handleUpload}
+              disabled={uploading}
+              className="max-w-xs cursor-pointer"
+            />
+            {uploading && (
+              <div className="absolute inset-0 bg-black/50 flex items-center justify-center rounded">
+                <span className="text-cyan-400 font-mono text-sm animate-pulse">Загрузка...</span>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
+      {/* Documents table */}
       {documents.length === 0 ? (
-        <Card>
-          <CardContent className="py-8 text-center text-gray-500">
-            Документы ещё не загружены. Загрузите первый документ, чтобы начать.
+        <Card className="border-dashed">
+          <CardContent className="py-12 text-center">
+            <div className="text-4xl mb-4 opacity-20">📄</div>
+            <p className="text-gray-500">Документы ещё не загружены.</p>
+            <p className="text-sm text-gray-400 mt-1">Загрузите первый документ, чтобы начать.</p>
           </CardContent>
         </Card>
       ) : (
-        <div className="bg-white rounded-lg border">
+        <div className="bg-white rounded-lg border overflow-hidden">
           <Table>
             <TableHeader>
-              <TableRow>
-                <TableHead>Название</TableHead>
-                <TableHead>Статус</TableHead>
-                <TableHead>Домены</TableHead>
-                <TableHead>Правила</TableHead>
-                <TableHead>Вопросы</TableHead>
-                <TableHead>Загружен</TableHead>
-                <TableHead>Действия</TableHead>
+              <TableRow className="bg-gray-50">
+                <TableHead className="font-semibold">Название</TableHead>
+                <TableHead className="font-semibold">Статус</TableHead>
+                <TableHead className="font-semibold">Домены</TableHead>
+                <TableHead className="font-semibold text-center">Правила</TableHead>
+                <TableHead className="font-semibold text-center">Q&A</TableHead>
+                <TableHead className="font-semibold">Загружен</TableHead>
+                <TableHead className="font-semibold text-right">Действия</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {documents.map((doc) => (
-                <TableRow key={doc.id}>
+                <TableRow key={doc.id} className="hover:bg-gray-50">
                   <TableCell>
-                    <a
-                      href={`/admin/documents/${doc.id}`}
-                      className="text-blue-600 hover:underline"
+                    <button
+                      onClick={() => openProcessingModal(doc)}
+                      className="text-blue-600 hover:underline text-left"
                     >
                       {doc.title}
-                    </a>
-                    <div className="text-xs text-gray-500">{doc.filename}</div>
+                    </button>
+                    <div className="text-xs text-gray-400">{doc.filename}</div>
                   </TableCell>
                   <TableCell>
                     <div className="space-y-1">
                       {getStatusBadge(doc.parseStatus)}
                       {doc.parseStatus === 'PROCESSING' && (
                         <div className="text-xs text-gray-500">
-                          В обработке {formatProcessingAge(doc.uploadedAt)}
+                          {formatProcessingAge(doc.uploadedAt)}
                         </div>
                       )}
                     </div>
                     {doc.parseError && (
-                      <div className="text-xs text-red-500 mt-1">
+                      <div className="text-xs text-red-500 mt-1 max-w-xs truncate" title={doc.parseError}>
                         {doc.parseError}
                       </div>
                     )}
                   </TableCell>
                   <TableCell>
                     <div className="flex flex-wrap gap-1">
-                      {doc.domains.map((d) => (
+                      {doc.domains.slice(0, 3).map((d) => (
                         <Badge
                           key={d.domain.slug}
                           variant={d.isPrimary ? 'default' : 'secondary'}
+                          className="text-xs"
                         >
                           {d.domain.slug}
                         </Badge>
                       ))}
+                      {doc.domains.length > 3 && (
+                        <Badge variant="outline" className="text-xs">
+                          +{doc.domains.length - 3}
+                        </Badge>
+                      )}
                     </div>
                   </TableCell>
-                  <TableCell>{doc._count.rules}</TableCell>
-                  <TableCell>{doc._count.qaPairs}</TableCell>
+                  <TableCell className="text-center font-mono">{doc._count.rules}</TableCell>
+                  <TableCell className="text-center font-mono">{doc._count.qaPairs}</TableCell>
                   <TableCell className="text-sm text-gray-500">
-                    {new Date(doc.uploadedAt).toLocaleDateString()}
+                    {new Date(doc.uploadedAt).toLocaleDateString('ru-RU')}
                   </TableCell>
-                  <TableCell>
-                    <Link href={`/admin/documents/${doc.id}/process`}>
-                      <Button variant="outline" size="sm">
-                        Прогресс
+                  <TableCell className="text-right">
+                    <div className="flex items-center justify-end gap-1">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => openProcessingModal(doc)}
+                        className="font-mono text-xs"
+                      >
+                        {doc.parseStatus === 'COMPLETED' ? 'Просмотр' : 'Терминал'}
                       </Button>
-                    </Link>
+
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" size="sm" className="px-2">
+                            ⋮
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          {doc.parseStatus === 'PROCESSING' && (
+                            <DropdownMenuItem onClick={() => handleDocumentAction(doc.id, 'cancel')}>
+                              ✗ Отменить обработку
+                            </DropdownMenuItem>
+                          )}
+                          {doc.parseStatus === 'FAILED' && (
+                            <DropdownMenuItem onClick={() => handleDocumentAction(doc.id, 'retry')}>
+                              ↻ Повторить обработку
+                            </DropdownMenuItem>
+                          )}
+                          {doc.parseStatus === 'COMPLETED' && (
+                            <DropdownMenuItem onClick={() => handleDocumentAction(doc.id, 'reset')}>
+                              ↻ Сбросить и переобработать
+                            </DropdownMenuItem>
+                          )}
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            onClick={() => handleDocumentAction(doc.id, 'delete')}
+                            className="text-red-600"
+                          >
+                            🗑 Удалить документ
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
             </TableBody>
           </Table>
         </div>
+      )}
+
+      {/* Processing Modal */}
+      <ProcessingModal
+        isOpen={processingModal.isOpen}
+        onClose={() => {
+          setProcessingModal({ isOpen: false, documentId: null, documentTitle: '', autoStart: true });
+          fetchDocuments(); // Refresh list after closing
+        }}
+        documentId={processingModal.documentId}
+        documentTitle={processingModal.documentTitle}
+        autoStart={processingModal.autoStart}
+      />
+
+      {/* Toast */}
+      {toast && (
+        <Toast
+          message={toast.message}
+          type={toast.type}
+          onClose={() => setToast(null)}
+        />
       )}
     </div>
   );

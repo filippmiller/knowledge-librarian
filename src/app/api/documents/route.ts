@@ -17,6 +17,81 @@ import {
 } from '@/lib/ai/knowledge-extractor';
 import { createDocumentChunks } from '@/lib/ai/chunker';
 
+/**
+ * PATCH /api/documents
+ * Bulk operations on documents
+ */
+export async function PATCH(request: NextRequest): Promise<Response> {
+  const authError = await requireAdminAuth(request);
+  if (authError) return authError;
+
+  try {
+    const body = await request.json();
+    const { action } = body;
+
+    switch (action) {
+      case 'reset-stuck': {
+        // Reset all documents stuck in PROCESSING for more than 30 minutes
+        const stuckTimeout = 30 * 60 * 1000; // 30 minutes
+        const cutoff = new Date(Date.now() - stuckTimeout);
+
+        const result = await prisma.document.updateMany({
+          where: {
+            parseStatus: 'PROCESSING',
+            uploadedAt: { lt: cutoff },
+          },
+          data: {
+            parseStatus: 'FAILED',
+            parseError: 'Processing timed out. Reset by admin.',
+          },
+        });
+
+        // Also clear staged extractions for these documents
+        const stuckDocs = await prisma.document.findMany({
+          where: {
+            parseStatus: 'FAILED',
+            parseError: 'Processing timed out. Reset by admin.',
+          },
+          select: { id: true },
+        });
+
+        for (const doc of stuckDocs) {
+          await prisma.stagedExtraction.deleteMany({
+            where: { documentId: doc.id },
+          });
+        }
+
+        return NextResponse.json({
+          message: `Reset ${result.count} stuck documents`,
+          count: result.count,
+        });
+      }
+
+      case 'cancel-all-processing': {
+        // Cancel all documents currently processing
+        const result = await prisma.document.updateMany({
+          where: { parseStatus: 'PROCESSING' },
+          data: {
+            parseStatus: 'FAILED',
+            parseError: 'Processing cancelled by admin.',
+          },
+        });
+
+        return NextResponse.json({
+          message: `Cancelled ${result.count} processing documents`,
+          count: result.count,
+        });
+      }
+
+      default:
+        return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
+    }
+  } catch (error) {
+    console.error('Error in bulk document operation:', error);
+    return NextResponse.json({ error: 'Failed to perform bulk operation' }, { status: 500 });
+  }
+}
+
 export async function GET(request: NextRequest): Promise<Response> {
   const authError = await requireAdminAuth(request);
   if (authError) return authError;
