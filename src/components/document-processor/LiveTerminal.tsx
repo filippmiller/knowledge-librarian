@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, useMemo } from 'react';
+import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import type { TerminalLog } from '@/hooks/useDocumentProcessing';
@@ -16,7 +16,10 @@ interface LiveTerminalProps {
   };
   onClear?: () => void;
   onPause?: () => void;
+  onCopy?: () => string;
   isPaused?: boolean;
+  isStopped?: boolean;
+  isComplete?: boolean;
 }
 
 type LogLevel = 'DEBUG' | 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR' | 'SYSTEM';
@@ -203,12 +206,16 @@ export function LiveTerminal({
   metrics,
   onClear,
   onPause,
+  onCopy,
   isPaused,
+  isStopped,
+  isComplete,
 }: LiveTerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const [filter, setFilter] = useState<FilterLevel>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
+  const [copyFeedback, setCopyFeedback] = useState(false);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -226,6 +233,20 @@ export function LiveTerminal({
     }
   };
 
+  // Copy logs to clipboard
+  const handleCopy = useCallback(async () => {
+    if (onCopy) {
+      const text = onCopy();
+      try {
+        await navigator.clipboard.writeText(text);
+        setCopyFeedback(true);
+        setTimeout(() => setCopyFeedback(false), 2000);
+      } catch (err) {
+        console.error('Failed to copy:', err);
+      }
+    }
+  }, [onCopy]);
+
   // Filter logs
   const filteredLogs = useMemo(() => {
     return logs.filter(log => {
@@ -235,15 +256,25 @@ export function LiveTerminal({
     });
   }, [logs, filter, searchQuery]);
 
-  const connectionStatus = isConnected
-    ? (isProcessing ? 'STREAMING' : 'CONNECTED')
-    : 'DISCONNECTED';
+  // Determine connection status
+  let connectionStatus: string;
+  let statusColor: string;
 
-  const statusColor = {
-    STREAMING: 'text-green-400 bg-green-500/20',
-    CONNECTED: 'text-cyan-400 bg-cyan-500/20',
-    DISCONNECTED: 'text-red-400 bg-red-500/20',
-  }[connectionStatus];
+  if (isComplete) {
+    connectionStatus = 'COMPLETED';
+    statusColor = 'text-green-400 bg-green-500/20';
+  } else if (isStopped) {
+    connectionStatus = 'STOPPED';
+    statusColor = 'text-yellow-400 bg-yellow-500/20';
+  } else if (isConnected) {
+    connectionStatus = isProcessing ? 'STREAMING' : 'CONNECTED';
+    statusColor = isProcessing
+      ? 'text-green-400 bg-green-500/20'
+      : 'text-cyan-400 bg-cyan-500/20';
+  } else {
+    connectionStatus = 'DISCONNECTED';
+    statusColor = 'text-red-400 bg-red-500/20';
+  }
 
   return (
     <div className="terminal-container flex flex-col h-full rounded-lg border border-cyan-500/30 bg-[#0a0e14] overflow-hidden shadow-[0_0_30px_rgba(0,255,255,0.1)]">
@@ -297,6 +328,20 @@ export function LiveTerminal({
               className="h-7 px-2 text-xs font-mono text-cyan-400 hover:text-cyan-300 hover:bg-cyan-500/10"
             >
               {isPaused ? '▶ RESUME' : '⏸ PAUSE'}
+            </Button>
+          )}
+
+          {/* Copy button */}
+          {onCopy && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleCopy}
+              className={`h-7 px-2 text-xs font-mono hover:bg-cyan-500/10 ${
+                copyFeedback ? 'text-green-400' : 'text-cyan-400 hover:text-cyan-300'
+              }`}
+            >
+              {copyFeedback ? '✓ COPIED' : '📋 COPY'}
             </Button>
           )}
 
@@ -359,7 +404,7 @@ export function LiveTerminal({
           <div className="flex flex-col items-center justify-center h-full text-gray-500 font-mono">
             <div className="text-4xl mb-2 opacity-20">◈</div>
             <div className="text-sm">Ожидание данных...</div>
-            <div className="text-xs mt-1">Нажмите "Начать обработку" для запуска</div>
+            <div className="text-xs mt-1">Нажмите "Запустить" для начала обработки</div>
           </div>
         ) : (
           <div className="py-1">

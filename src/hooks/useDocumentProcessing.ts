@@ -50,6 +50,7 @@ export interface ProcessingState {
   isComplete: boolean;
   isPaused: boolean;
   isConnected: boolean;
+  isStopped: boolean; // User explicitly stopped
   error: string | null;
   phases: Phase[];
   extractedItems: ExtractedItem[];
@@ -99,26 +100,79 @@ function generateLogId(): string {
   return `log-${Date.now()}-${++logIdCounter}`;
 }
 
+// LocalStorage key for persistent logs
+const LOGS_STORAGE_KEY = 'librarian_terminal_logs';
+const MAX_STORED_LOGS = 500;
+
+// Save logs to localStorage
+function saveLogs(documentId: string, logs: TerminalLog[]) {
+  try {
+    const stored = JSON.parse(localStorage.getItem(LOGS_STORAGE_KEY) || '{}');
+    stored[documentId] = logs.slice(-MAX_STORED_LOGS).map(log => ({
+      ...log,
+      timestamp: log.timestamp.toISOString(),
+    }));
+    localStorage.setItem(LOGS_STORAGE_KEY, JSON.stringify(stored));
+  } catch (e) {
+    console.warn('Failed to save logs to localStorage:', e);
+  }
+}
+
+// Load logs from localStorage
+function loadLogs(documentId: string): TerminalLog[] {
+  try {
+    const stored = JSON.parse(localStorage.getItem(LOGS_STORAGE_KEY) || '{}');
+    const logs = stored[documentId] || [];
+    return logs.map((log: TerminalLog & { timestamp: string }) => ({
+      ...log,
+      timestamp: new Date(log.timestamp),
+    }));
+  } catch (e) {
+    console.warn('Failed to load logs from localStorage:', e);
+    return [];
+  }
+}
+
 export function useDocumentProcessing(documentId: string) {
-  const [state, setState] = useState<ProcessingState>({
+  // Load initial logs from localStorage
+  const [state, setState] = useState<ProcessingState>(() => ({
     isProcessing: false,
     isComplete: false,
     isPaused: false,
     isConnected: false,
+    isStopped: false,
     error: null,
     phases: initialPhases,
     extractedItems: [],
-    terminalLogs: [],
+    terminalLogs: documentId ? loadLogs(documentId) : [],
     metrics: initialMetrics,
-  });
+  }));
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const metricsIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const tokenCountRef = useRef(0);
-  const lastTokenTimeRef = useRef(Date.now());
   const tokensInLastSecondRef = useRef<number[]>([]);
+
+  // Refs to track completion/error state for reconnection logic (avoid stale closures)
+  const isCompleteRef = useRef(false);
+  const hasErrorRef = useRef(false);
+  const isStoppedRef = useRef(false);
+
+  // Sync refs with state
+  useEffect(() => {
+    isCompleteRef.current = state.isComplete;
+    hasErrorRef.current = !!state.error;
+    isStoppedRef.current = state.isStopped;
+  }, [state.isComplete, state.error, state.isStopped]);
+
+  // Save logs to localStorage when they change
+  useEffect(() => {
+    if (documentId && state.terminalLogs.length > 0) {
+      saveLogs(documentId, state.terminalLogs);
+    }
+  }, [documentId, state.terminalLogs]);
 
   // Add a log entry
   const addLog = useCallback((level: LogLevel, message: string, phase?: string, options?: { isJSON?: boolean; isStreaming?: boolean }) => {
@@ -184,7 +238,28 @@ export function useDocumentProcessing(documentId: string) {
       ...prev,
       terminalLogs: [],
     }));
-  }, []);
+    // Also clear from localStorage
+    try {
+      const stored = JSON.parse(localStorage.getItem(LOGS_STORAGE_KEY) || '{}');
+      delete stored[documentId];
+      localStorage.setItem(LOGS_STORAGE_KEY, JSON.stringify(stored));
+    } catch (e) {
+      console.warn('Failed to clear logs from localStorage:', e);
+    }
+  }, [documentId]);
+
+  // Get all logs as text for copying
+  const getLogsAsText = useCallback(() => {
+    return state.terminalLogs.map(log => {
+      const time = log.timestamp.toLocaleTimeString('ru-RU', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+      const phase = log.phase ? `[${log.phase}]` : '';
+      return `${time} [${log.level}] ${phase} ${log.message}`;
+    }).join('\n');
+  }, [state.terminalLogs]);
 
   // Pause/resume processing display (doesn't stop the stream)
   const togglePause = useCallback(() => {
@@ -192,6 +267,12 @@ export function useDocumentProcessing(documentId: string) {
   }, []);
 
   const connectEventSource = useCallback(() => {
+    // Don't reconnect if stopped by user
+    if (isStoppedRef.current) {
+      addLog('INFO', 'Не переподключаюсь - обработка остановлена пользователем');
+      return;
+    }
+
     addLog('SYSTEM', 'Устанавливаю соединение с сервером...');
 
     const eventSource = new EventSource(`/api/documents/${documentId}/process-stream`);
@@ -311,15 +392,27 @@ export function useDocumentProcessing(documentId: string) {
               const errorData = data.data as { message: string };
               newState.error = errorData.message;
               newState.isProcessing = false;
+              hasErrorRef.current = true;
               addLog('ERROR', `ОШИБКА: ${errorData.message}`, data.phase);
+
+              // Close the connection on error
+              eventSource.close();
               break;
             }
 
             case 'complete': {
               newState.isProcessing = false;
               newState.isComplete = true;
+              isCompleteRef.current = true;
+
               const totalTime = ((Date.now() - prev.metrics.startTime) / 1000).toFixed(1);
-              addLog('SUCCESS', `✓ Обработка завершена за ${totalTime}с. Всего токенов: ${tokenCountRef.current}`);
+              addLog('SUCCESS', '════════════════════════════════════════════════════════════');
+              addLog('SUCCESS', `✓ ОБРАБОТКА ЗАВЕРШЕНА`);
+              addLog('SUCCESS', `  Время: ${totalTime}с | Токены: ${tokenCountRef.current}`);
+              addLog('SUCCESS', '════════════════════════════════════════════════════════════');
+
+              // Close the connection on complete
+              eventSource.close();
               break;
             }
 
@@ -342,8 +435,9 @@ export function useDocumentProcessing(documentId: string) {
     eventSource.onerror = () => {
       setState((prev) => ({ ...prev, isConnected: false }));
 
-      // Don't reconnect if we completed or got an error
-      if (state.isComplete || state.error) {
+      // Don't reconnect if completed, errored, or stopped by user
+      if (isCompleteRef.current || hasErrorRef.current || isStoppedRef.current) {
+        addLog('INFO', 'Соединение закрыто (обработка завершена/остановлена)');
         eventSource.close();
         return;
       }
@@ -354,10 +448,10 @@ export function useDocumentProcessing(documentId: string) {
         const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 10000);
         reconnectAttemptsRef.current++;
 
-        addLog('WARNING', `Соединение потеряно. Попытка переподключения ${reconnectAttemptsRef.current}/${maxAttempts} через ${delay/1000}с...`);
+        addLog('WARNING', `Соединение потеряно. Попытка ${reconnectAttemptsRef.current}/${maxAttempts} через ${delay/1000}с...`);
 
         reconnectTimeoutRef.current = setTimeout(() => {
-          if (!state.isComplete && !state.error) {
+          if (!isCompleteRef.current && !hasErrorRef.current && !isStoppedRef.current) {
             addLog('INFO', 'Переподключение...');
             connectEventSource();
           }
@@ -373,19 +467,23 @@ export function useDocumentProcessing(documentId: string) {
 
       eventSource.close();
     };
-  }, [documentId, addLog, state.isComplete, state.error]);
+  }, [documentId, addLog]);
 
   const startProcessing = useCallback(async () => {
-    // Reset state
+    // Reset counters but keep logs (add separator)
     tokenCountRef.current = 0;
     tokensInLastSecondRef.current = [];
     reconnectAttemptsRef.current = 0;
+    isCompleteRef.current = false;
+    hasErrorRef.current = false;
+    isStoppedRef.current = false;
 
-    setState({
+    setState(prev => ({
       isProcessing: true,
       isComplete: false,
       isPaused: false,
       isConnected: false,
+      isStopped: false,
       error: null,
       phases: initialPhases.map((p) => ({
         ...p,
@@ -395,12 +493,41 @@ export function useDocumentProcessing(documentId: string) {
         endTime: undefined,
       })),
       extractedItems: [],
-      terminalLogs: [],
+      // KEEP existing logs and add a separator
+      terminalLogs: prev.terminalLogs.length > 0
+        ? [
+            ...prev.terminalLogs,
+            {
+              id: generateLogId(),
+              timestamp: new Date(),
+              level: 'SYSTEM' as LogLevel,
+              message: '',
+            },
+            {
+              id: generateLogId(),
+              timestamp: new Date(),
+              level: 'SYSTEM' as LogLevel,
+              message: '═══════════════════════════════════════════════════════════════',
+            },
+            {
+              id: generateLogId(),
+              timestamp: new Date(),
+              level: 'SYSTEM' as LogLevel,
+              message: '  НОВАЯ СЕССИЯ ОБРАБОТКИ',
+            },
+            {
+              id: generateLogId(),
+              timestamp: new Date(),
+              level: 'SYSTEM' as LogLevel,
+              message: '═══════════════════════════════════════════════════════════════',
+            },
+          ]
+        : [],
       metrics: {
         ...initialMetrics,
         startTime: Date.now(),
       },
-    });
+    }));
 
     // Close any existing connection
     if (eventSourceRef.current) {
@@ -428,21 +555,46 @@ export function useDocumentProcessing(documentId: string) {
     }
   }, [documentId, addLog, connectEventSource]);
 
-  const stopProcessing = useCallback(() => {
+  const stopProcessing = useCallback(async () => {
+    // Mark as stopped to prevent reconnection
+    isStoppedRef.current = true;
+
+    // Close the EventSource
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
       eventSourceRef.current = null;
     }
+
+    // Clear any pending reconnection
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
     }
+
+    // Update state
     setState((prev) => ({
       ...prev,
       isProcessing: false,
       isConnected: false,
+      isStopped: true,
     }));
-    addLog('WARNING', 'Обработка остановлена пользователем');
-  }, [addLog]);
+
+    addLog('WARNING', '════════════════════════════════════════════════════════════');
+    addLog('WARNING', '  ОБРАБОТКА ОСТАНОВЛЕНА ПОЛЬЗОВАТЕЛЕМ');
+    addLog('WARNING', '════════════════════════════════════════════════════════════');
+
+    // Also notify server to cancel (fire and forget)
+    try {
+      await fetch(`/api/documents/${documentId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'cancel' }),
+      });
+    } catch (e) {
+      // Ignore errors - this is best effort
+      console.warn('Failed to notify server of cancellation:', e);
+    }
+  }, [documentId, addLog]);
 
   const toggleItemSelection = useCallback((itemId: string) => {
     setState((prev) => ({
@@ -541,5 +693,6 @@ export function useDocumentProcessing(documentId: string) {
     commitSelected,
     clearLogs,
     togglePause,
+    getLogsAsText,
   };
 }
