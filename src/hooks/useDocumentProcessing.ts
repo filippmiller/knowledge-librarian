@@ -59,7 +59,7 @@ export interface ProcessingState {
 }
 
 interface SSEEvent {
-  type: 'phase_start' | 'prompt' | 'token' | 'item_extracted' | 'phase_complete' | 'error' | 'complete' | 'log' | 'metric';
+  type: 'phase_start' | 'prompt' | 'token' | 'item_extracted' | 'phase_complete' | 'error' | 'fatal_error' | 'complete' | 'log' | 'metric';
   phase?: string;
   data?: unknown;
   timestamp?: string;
@@ -394,8 +394,26 @@ export function useDocumentProcessing(documentId: string) {
               newState.isProcessing = false;
               hasErrorRef.current = true;
               addLog('ERROR', `ОШИБКА: ${errorData.message}`, data.phase);
+              addLog('ERROR', 'Обработка остановлена. Нажмите "Запустить" для повторной попытки.');
 
-              // Close the connection on error
+              // Close the connection on error - NO reconnection
+              eventSource.close();
+              break;
+            }
+
+            case 'fatal_error': {
+              const errorData = data.data as { message: string; fatal: boolean };
+              newState.error = errorData.message;
+              newState.isProcessing = false;
+              hasErrorRef.current = true;
+              addLog('ERROR', '════════════════════════════════════════════════════════════');
+              addLog('ERROR', `  КРИТИЧЕСКАЯ ОШИБКА (НЕ ПОВТОРЯТЬ)`);
+              addLog('ERROR', `  ${errorData.message}`);
+              addLog('ERROR', '════════════════════════════════════════════════════════════');
+              addLog('ERROR', 'Эта ошибка не может быть исправлена автоматически.');
+              addLog('ERROR', 'Проверьте квоту OpenAI API или настройки.');
+
+              // Close the connection - NEVER reconnect for fatal errors
               eventSource.close();
               break;
             }
@@ -435,34 +453,48 @@ export function useDocumentProcessing(documentId: string) {
     eventSource.onerror = () => {
       setState((prev) => ({ ...prev, isConnected: false }));
 
-      // Don't reconnect if completed, errored, or stopped by user
+      // CRITICAL: Check if we should NOT reconnect
+      // Never reconnect if:
+      // 1. We received an error from the server (hasErrorRef)
+      // 2. Processing completed successfully (isCompleteRef)
+      // 3. User explicitly stopped (isStoppedRef)
       if (isCompleteRef.current || hasErrorRef.current || isStoppedRef.current) {
-        addLog('INFO', 'Соединение закрыто (обработка завершена/остановлена)');
+        const reason = isCompleteRef.current ? 'завершено'
+          : hasErrorRef.current ? 'ошибка сервера'
+          : 'остановлено пользователем';
+        addLog('INFO', `Соединение закрыто (${reason}) - переподключение отключено`);
         eventSource.close();
         return;
       }
 
-      // Attempt reconnection with exponential backoff
-      const maxAttempts = 5;
+      // Only reconnect for pure connection drops (no error message received)
+      // Limited to 3 attempts maximum
+      const maxAttempts = 3;
       if (reconnectAttemptsRef.current < maxAttempts) {
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 10000);
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 5000);
         reconnectAttemptsRef.current++;
 
         addLog('WARNING', `Соединение потеряно. Попытка ${reconnectAttemptsRef.current}/${maxAttempts} через ${delay/1000}с...`);
 
         reconnectTimeoutRef.current = setTimeout(() => {
+          // Double-check before reconnecting
           if (!isCompleteRef.current && !hasErrorRef.current && !isStoppedRef.current) {
             addLog('INFO', 'Переподключение...');
             connectEventSource();
+          } else {
+            addLog('INFO', 'Переподключение отменено - статус изменился');
           }
         }, delay);
       } else {
+        // Max attempts reached - stop completely
         setState((prev) => ({
           ...prev,
           isProcessing: false,
-          error: prev.error || 'Соединение прервано после нескольких попыток',
+          error: prev.error || 'Соединение прервано. Нажмите "Запустить" для повторной попытки.',
         }));
-        addLog('ERROR', 'Превышено максимальное количество попыток переподключения');
+        hasErrorRef.current = true; // Prevent further reconnection attempts
+        addLog('ERROR', 'Превышено максимальное количество попыток переподключения (3)');
+        addLog('ERROR', 'Нажмите "Запустить" для повторной попытки.');
       }
 
       eventSource.close();

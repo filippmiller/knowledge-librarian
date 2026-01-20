@@ -25,6 +25,7 @@ type SSEEventType =
   | 'item_extracted'
   | 'phase_complete'
   | 'error'
+  | 'fatal_error'  // Non-recoverable errors (quota, auth, etc.) - client must NOT retry
   | 'complete';
 
 interface SSEEvent {
@@ -35,6 +36,29 @@ interface SSEEvent {
 
 function formatSSE(event: SSEEvent): string {
   return `data: ${JSON.stringify(event)}\n\n`;
+}
+
+// Check if error is fatal (should not be retried)
+function isFatalError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const lowerMessage = message.toLowerCase();
+
+  // OpenAI quota/billing errors
+  if (lowerMessage.includes('429') || lowerMessage.includes('quota')) return true;
+  if (lowerMessage.includes('rate limit')) return true;
+
+  // Auth errors
+  if (lowerMessage.includes('401') || lowerMessage.includes('unauthorized')) return true;
+  if (lowerMessage.includes('403') || lowerMessage.includes('forbidden')) return true;
+  if (lowerMessage.includes('invalid api key')) return true;
+
+  // Bad request (usually means invalid input, won't fix itself)
+  if (lowerMessage.includes('400') || lowerMessage.includes('bad request')) return true;
+
+  // Server errors from OpenAI
+  if (lowerMessage.includes('500') || lowerMessage.includes('502') || lowerMessage.includes('503')) return true;
+
+  return false;
 }
 
 export async function GET(
@@ -349,10 +373,29 @@ export async function GET(
       } catch (error) {
         const errorMessage =
           error instanceof Error ? error.message : 'Неизвестная ошибка';
+
+        // Determine if this is a fatal error that should not be retried
+        const fatal = isFatalError(error);
+
         send({
-          type: 'error',
-          data: { message: errorMessage },
+          type: fatal ? 'fatal_error' : 'error',
+          data: {
+            message: errorMessage,
+            fatal,
+            code: fatal ? 'FATAL' : 'ERROR',
+          },
         });
+
+        // Update document status to FAILED for fatal errors
+        if (fatal) {
+          await prisma.document.update({
+            where: { id: documentId },
+            data: {
+              parseStatus: 'FAILED',
+              parseError: errorMessage,
+            },
+          });
+        }
       } finally {
         controller.close();
       }
