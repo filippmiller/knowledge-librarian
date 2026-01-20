@@ -1207,6 +1207,220 @@ This uses the new streaming processing which:
 
 ---
 
+---
+
+## 13. RAG System Enhancements (January 20, 2026)
+
+### Overview
+
+Comprehensive upgrade to the RAG (Retrieval Augmented Generation) system to improve accuracy, efficiency, and reliability. This session implemented 8 major improvements based on systematic evaluation of 30 potential enhancements.
+
+### Improvements Implemented
+
+#### 1. pgvector Native Vector Search
+
+**Problem**: Embeddings stored as JSON arrays, requiring all chunks to be loaded into memory for cosine similarity calculation. Won't scale beyond ~10K chunks.
+
+**Solution**: Added PostgreSQL pgvector extension support for native vector similarity search.
+
+**Files Created/Modified**:
+- `prisma/enable-pgvector.sql` - SQL to enable pgvector extension
+- `prisma/schema.prisma` - Added `embeddingVector` column with `Unsupported("vector(1536)")` type
+- `src/lib/ai/vector-search.ts` - New module with pgvector search, fallback to in-memory
+
+**Key Features**:
+- Automatic fallback to in-memory search if pgvector unavailable
+- HNSW index creation for fast approximate nearest neighbor search
+- Migration function for existing JSON embeddings
+
+#### 2. Hybrid Search (Semantic + Keyword)
+
+**Problem**: Pure semantic search misses exact terminology matches important in Russian policy documents.
+
+**Solution**: Implemented hybrid search combining vector similarity with PostgreSQL full-text search using Reciprocal Rank Fusion (RRF).
+
+**Location**: `src/lib/ai/vector-search.ts`
+
+**Algorithm**:
+```
+RRF_score = w_semantic * (1 / (k + rank_semantic)) + w_keyword * (1 / (k + rank_keyword))
+```
+- Default semantic weight: 0.7
+- Default k constant: 60
+
+#### 3. Multi-Query Retrieval
+
+**Problem**: Single query may miss relevant documents due to phrasing differences.
+
+**Solution**: Generate multiple query variants using LLM, run searches in parallel, merge results.
+
+**Files Created**:
+- `src/lib/ai/query-expansion.ts` - Query expansion and entity extraction
+
+**Features**:
+- Automatic query rephrasing with synonyms
+- Russian morphology awareness (падежи, склонения)
+- Entity extraction (dates, prices, document types, services)
+
+#### 4. Confidence Thresholds with Clarifying Questions
+
+**Problem**: System would attempt to answer even when information was insufficient, leading to hallucinations.
+
+**Solution**: Four-tier confidence system with clarification prompts.
+
+**Thresholds**:
+- `HIGH (≥0.7)` - Answer confidently
+- `MEDIUM (≥0.5)` - Answer with caveat
+- `LOW (≥0.3)` - Suggest clarification
+- `INSUFFICIENT (<0.3)` - Ask for more information
+
+**Location**: `src/lib/ai/enhanced-answering-engine.ts`
+
+#### 5. Rule Conflict Detection
+
+**Problem**: New rules may contradict existing ones, leading to inconsistent answers.
+
+**Solution**: Automatic conflict detection during document processing using semantic similarity + LLM analysis.
+
+**File Created**: `src/lib/ai/rule-conflict-detector.ts`
+
+**Detection Types**:
+- `price_contradiction` - Different prices for same service
+- `procedure_contradiction` - Different procedures for same action
+- `timeline_contradiction` - Different timelines
+- `requirement_contradiction` - Different document requirements
+- `general_contradiction` - Other conflicts
+
+**Severity Levels**: critical, high, medium, low
+
+**Features**:
+- Automatic AIQuestion creation for detected conflicts
+- Expiring rule detection (dates approaching)
+- Potential duplicate warning
+
+#### 6. Rate Limiting
+
+**Problem**: Public `/api/ask` endpoint vulnerable to abuse.
+
+**Solution**: Token bucket rate limiter with configurable limits per endpoint.
+
+**File Created**: `src/lib/rate-limiter.ts`
+
+**Limits**:
+| Endpoint | Window | Max Requests |
+|----------|--------|--------------|
+| `/api/ask` | 1 minute | 20 |
+| Admin API | 1 minute | 100 |
+| Document upload | 1 hour | 10 |
+| Embedding generation | 1 minute | 50 |
+
+**Response Headers**:
+- `X-RateLimit-Remaining`
+- `X-RateLimit-Reset`
+- `Retry-After` (on 429)
+
+#### 7. Answer Feedback Mechanism
+
+**Problem**: No way to track answer quality or learn from mistakes.
+
+**Solution**: Feedback collection system with analytics.
+
+**Files Created**:
+- `prisma/schema.prisma` - Added `AnswerFeedback` model
+- `src/app/api/feedback/route.ts` - Feedback API
+
+**Feedback Types**:
+- `HELPFUL` / `PARTIALLY` / `NOT_HELPFUL` / `INCORRECT`
+- Categories: `MISSING_INFO`, `WRONG_INFO`, `OUTDATED_INFO`, `UNCLEAR`, `OFF_TOPIC`, `GREAT`
+
+**Features**:
+- Automatic AIQuestion creation for negative feedback
+- Satisfaction score calculation
+- Admin review workflow
+
+#### 8. Vector Search Admin API
+
+**Problem**: No way to manage pgvector setup and migration.
+
+**Solution**: Admin API for vector search operations.
+
+**File Created**: `src/app/api/admin/vector-search/route.ts`
+
+**Endpoints**:
+```
+GET  /api/admin/vector-search - Status of vector search capabilities
+POST /api/admin/vector-search - Run operations
+  - action: enable_pgvector
+  - action: migrate_embeddings
+  - action: create_index
+  - action: full_setup
+```
+
+### Files Summary
+
+| File | Purpose |
+|------|---------|
+| `prisma/enable-pgvector.sql` | SQL for enabling pgvector |
+| `prisma/schema.prisma` | Added embeddingVector, AnswerFeedback |
+| `src/lib/ai/vector-search.ts` | pgvector + hybrid search |
+| `src/lib/ai/query-expansion.ts` | Multi-query + entity extraction |
+| `src/lib/ai/enhanced-answering-engine.ts` | New answering engine |
+| `src/lib/ai/rule-conflict-detector.ts` | Conflict detection |
+| `src/lib/rate-limiter.ts` | Rate limiting |
+| `src/app/api/ask/route.ts` | Updated to use enhanced engine |
+| `src/app/api/feedback/route.ts` | Feedback API |
+| `src/app/api/admin/vector-search/route.ts` | Vector admin API |
+
+### Deployment Steps
+
+1. **Enable pgvector** (run once on database):
+   ```sql
+   CREATE EXTENSION IF NOT EXISTS vector;
+   ```
+
+2. **Push schema changes**:
+   ```bash
+   pnpm db:push
+   ```
+
+3. **Migrate embeddings** (via admin API or script):
+   ```bash
+   curl -X POST /api/admin/vector-search \
+     -H "Authorization: Basic ..." \
+     -d '{"action": "full_setup"}'
+   ```
+
+4. **Deploy**:
+   ```bash
+   railway up
+   ```
+
+### Ideas Evaluated But Not Implemented
+
+| Idea | Reason for Rejection |
+|------|---------------------|
+| Cross-encoder re-ranking | Latency hit, diminishing returns for policy docs |
+| HyDE (Hypothetical Document Embeddings) | Extra LLM call, marginal benefit |
+| Query expansion with synonyms | Russian morphology handles this better |
+| Spelling correction | LLMs handle typos well already |
+| Rule dependency graph | High effort, unclear benefit |
+| Multi-document synthesis | Risk of incorrectly merging rules |
+| OpenTelemetry tracing | Premature for current scale |
+| Connection pooling optimization | Prisma handles adequately |
+
+### Performance Impact
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Search scalability | ~10K chunks (memory) | Millions (pgvector) |
+| Query understanding | Single query | Multi-query + entities |
+| Relevance | Semantic only | Hybrid (semantic + keyword) |
+| Accuracy | No confidence check | 4-tier confidence + clarification |
+| Reliability | No rate limit | Token bucket limiting |
+| Improvement tracking | None | Feedback system |
+
+---
+
 ## Session Metadata
 
 - **Date**: January 19-20, 2026
@@ -1219,5 +1433,6 @@ This uses the new streaming processing which:
   5. Streaming document processing with verification
   6. Production testing and API key resolution
   7. Memory optimization for embedding generation
-- **Result**: All systems operational, streaming processing verified
+  8. RAG system enhancements (pgvector, hybrid search, multi-query, confidence thresholds, conflict detection, rate limiting, feedback)
+- **Result**: All systems operational, RAG significantly enhanced
 - **App URL**: https://avrora-library-production.up.railway.app

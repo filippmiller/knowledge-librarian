@@ -164,13 +164,14 @@ enum KnowledgeStatus {
 // ============================================
 
 model DocChunk {
-  id         String   @id @default(cuid())
-  documentId String
-  chunkIndex Int
-  content    String   @db.Text
-  embedding  Json?    // vector embeddings stored as JSON array
-  metadata   Json?    // additional context
-  createdAt  DateTime @default(now())
+  id              String   @id @default(cuid())
+  documentId      String
+  chunkIndex      Int
+  content         String   @db.Text
+  embedding       Json?    // vector embeddings stored as JSON array (legacy)
+  embeddingVector Unsupported("vector(1536)")?  // native pgvector for efficient search
+  metadata        Json?    // additional context
+  createdAt       DateTime @default(now())
 
   // Relations
   document Document      @relation(fields: [documentId], references: [id], onDelete: Cascade)
@@ -421,4 +422,45 @@ model AISettings {
   lastError    String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+}
+
+// ============================================
+// ANSWER FEEDBACK (FOR CONTINUOUS IMPROVEMENT)
+// ============================================
+
+model AnswerFeedback {
+  id            String   @id @default(cuid())
+  messageId     String?  // Link to ChatMessage if available
+  question      String   @db.Text
+  answer        String   @db.Text
+  rating        FeedbackRating
+  feedbackType  FeedbackType?
+  comment       String?  @db.Text
+  suggestedAnswer String? @db.Text  // User's suggested correct answer
+  confidence    Float?   // Original answer confidence
+  domainsUsed   Json?    // Domains used for this answer
+  createdAt     DateTime @default(now())
+  reviewedAt    DateTime?
+  reviewedBy    String?
+  resolution    String?  @db.Text
+
+  @@index([rating])
+  @@index([feedbackType])
+  @@index([createdAt])
+}
+
+enum FeedbackRating {
+  HELPFUL      // Answer was helpful
+  PARTIALLY    // Answer was partially helpful
+  NOT_HELPFUL  // Answer was not helpful
+  INCORRECT    // Answer was incorrect/wrong
+}
+
+enum FeedbackType {
+  MISSING_INFO      // Answer lacked important information
+  WRONG_INFO        // Answer contained incorrect information
+  OUTDATED_INFO     // Information was outdated
+  UNCLEAR           // Answer was unclear or confusing
+  OFF_TOPIC         // Answer was about wrong topic
+  GREAT             // Answer was great (positive feedback)
 }
