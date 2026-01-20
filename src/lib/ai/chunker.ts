@@ -76,6 +76,9 @@ export function splitTextIntoChunks(text: string): TextChunk[] {
   return chunks;
 }
 
+// Process embeddings in small batches to avoid memory issues
+const EMBEDDING_BATCH_SIZE = 5;
+
 export async function createDocumentChunks(
   documentId: string,
   text: string,
@@ -87,41 +90,52 @@ export async function createDocumentChunks(
     return [];
   }
 
-  // Generate embeddings for all chunks
-  const embeddings = await generateEmbeddings(chunks.map((c) => c.content));
+  const createdChunkIds: string[] = [];
 
-  // Store chunks with embeddings as JSON
-  const createdChunks = [];
+  // Process chunks in batches to reduce memory usage
+  for (let batchStart = 0; batchStart < chunks.length; batchStart += EMBEDDING_BATCH_SIZE) {
+    const batchEnd = Math.min(batchStart + EMBEDDING_BATCH_SIZE, chunks.length);
+    const batchChunks = chunks.slice(batchStart, batchEnd);
 
-  for (let i = 0; i < chunks.length; i++) {
-    const chunk = chunks[i];
-    const embedding = embeddings[i];
+    // Generate embeddings for this batch only
+    const batchEmbeddings = await generateEmbeddings(batchChunks.map((c) => c.content));
 
-    // Create chunk record with embedding as JSON
-    const created = await prisma.docChunk.create({
-      data: {
-        documentId,
-        chunkIndex: chunk.index,
-        content: chunk.content,
-        embedding: embedding, // Store as JSON array
-        metadata: chunk.metadata,
-      },
-    });
+    // Save batch to database immediately
+    for (let i = 0; i < batchChunks.length; i++) {
+      const chunk = batchChunks[i];
+      const embedding = batchEmbeddings[i];
 
-    // Link chunk to domains
-    for (const domainId of domainIds) {
-      await prisma.chunkDomain.create({
+      // Create chunk record with embedding as JSON
+      const created = await prisma.docChunk.create({
         data: {
-          chunkId: created.id,
-          domainId,
+          documentId,
+          chunkIndex: chunk.index,
+          content: chunk.content,
+          embedding: embedding,
+          metadata: chunk.metadata,
         },
       });
+
+      // Link chunk to domains
+      for (const domainId of domainIds) {
+        await prisma.chunkDomain.create({
+          data: {
+            chunkId: created.id,
+            domainId,
+          },
+        });
+      }
+
+      createdChunkIds.push(created.id);
     }
 
-    createdChunks.push(created);
+    // Allow garbage collection between batches
+    if (global.gc) {
+      global.gc();
+    }
   }
 
-  return createdChunks;
+  return createdChunkIds;
 }
 
 export async function searchSimilarChunks(

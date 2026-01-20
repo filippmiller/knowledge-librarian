@@ -246,17 +246,23 @@ export async function POST(
       results.aiQuestionsCreated++;
     }
 
-    // Process chunks
+    // Process chunks in batches to avoid memory issues
     const chunks = verifiedItems.filter((i) => i.itemType === 'CHUNK');
-    if (chunks.length > 0) {
-      // Generate embeddings for all chunks at once
-      const chunkContents = chunks.map(
+    const CHUNK_BATCH_SIZE = 5;
+
+    for (let batchStart = 0; batchStart < chunks.length; batchStart += CHUNK_BATCH_SIZE) {
+      const batchEnd = Math.min(batchStart + CHUNK_BATCH_SIZE, chunks.length);
+      const batchChunks = chunks.slice(batchStart, batchEnd);
+
+      // Generate embeddings for this batch only
+      const batchContents = batchChunks.map(
         (c) => (c.data as { content: string }).content
       );
-      const embeddings = await generateEmbeddings(chunkContents);
+      const batchEmbeddings = await generateEmbeddings(batchContents);
 
-      for (let i = 0; i < chunks.length; i++) {
-        const item = chunks[i];
+      // Save batch to database immediately
+      for (let i = 0; i < batchChunks.length; i++) {
+        const item = batchChunks[i];
         const data = item.data as {
           index: number;
           content: string;
@@ -268,7 +274,7 @@ export async function POST(
             documentId,
             chunkIndex: data.index,
             content: data.content,
-            embedding: embeddings[i],
+            embedding: batchEmbeddings[i],
             metadata: data.metadata,
           },
         });
