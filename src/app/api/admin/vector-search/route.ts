@@ -27,9 +27,11 @@ export async function GET(request: NextRequest) {
     // Count chunks with various embedding states
     const totalChunks = await prisma.docChunk.count();
 
-    const chunksWithJsonEmbedding = await prisma.docChunk.count({
-      where: { embedding: { not: null } },
-    });
+    // Count chunks with JSON embedding using raw query (Prisma Json filtering is complex)
+    const embeddingCountResult = await prisma.$queryRaw<[{ count: bigint }]>`
+      SELECT COUNT(*) as count FROM "DocChunk" WHERE "embedding" IS NOT NULL
+    `;
+    const chunksWithJsonEmbedding = Number(embeddingCountResult[0].count);
 
     let chunksWithVectorEmbedding = 0;
     if (pgvectorEnabled) {

@@ -137,20 +137,25 @@ async function searchSimilarChunksInMemory(
     },
   });
 
-  return chunks
-    .map(chunk => {
-      const chunkEmbedding = chunk.embedding as number[] | null;
-      if (!chunkEmbedding) return null;
+  const results: SearchResult[] = [];
 
-      return {
-        id: chunk.id,
-        content: chunk.content,
-        documentId: chunk.documentId,
-        similarity: cosineSimilarity(queryEmbedding, chunkEmbedding),
-        metadata: chunk.metadata as Record<string, unknown> | undefined,
-      };
-    })
-    .filter((r): r is SearchResult => r !== null && r.similarity > 0.3)
+  for (const chunk of chunks) {
+    const chunkEmbedding = chunk.embedding as number[] | null;
+    if (!chunkEmbedding) continue;
+
+    const similarity = cosineSimilarity(queryEmbedding, chunkEmbedding);
+    if (similarity <= 0.3) continue;
+
+    results.push({
+      id: chunk.id,
+      content: chunk.content,
+      documentId: chunk.documentId,
+      similarity,
+      metadata: chunk.metadata as Record<string, unknown> | undefined,
+    });
+  }
+
+  return results
     .sort((a, b) => b.similarity - a.similarity)
     .slice(0, limit);
 }

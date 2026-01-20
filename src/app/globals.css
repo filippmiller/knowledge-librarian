@@ -123,3 +123,188 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* ===== TERMINAL CYBERPUNK STYLES ===== */
+
+/* Terminal container glow effect */
+.terminal-container {
+  box-shadow:
+    0 0 30px rgba(0, 255, 255, 0.1),
+    inset 0 0 60px rgba(0, 0, 0, 0.3);
+}
+
+.terminal-container::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(0, 255, 255, 0.5), transparent);
+}
+
+/* Terminal scanline effect */
+.terminal-body {
+  background:
+    linear-gradient(rgba(0, 0, 0, 0) 50%, rgba(0, 0, 0, 0.1) 50%),
+    linear-gradient(90deg, rgba(255, 0, 0, 0.03), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.03));
+  background-size: 100% 4px, 100% 100%;
+}
+
+/* Log entry flash animation */
+@keyframes terminal-flash {
+  0% {
+    background-color: rgba(0, 255, 255, 0.15);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.animate-terminal-flash {
+  animation: terminal-flash 0.5s ease-out;
+}
+
+/* Typing cursor animation */
+@keyframes terminal-cursor {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+.terminal-cursor {
+  animation: terminal-cursor 0.8s step-end infinite;
+}
+
+/* Custom scrollbar for terminal */
+.terminal-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.terminal-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.terminal-body::-webkit-scrollbar-thumb {
+  background: rgba(0, 255, 255, 0.2);
+  border-radius: 4px;
+}
+
+.terminal-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 255, 255, 0.4);
+}
+
+/* JSON syntax highlighting classes */
+.json-highlight {
+  display: inline;
+}
+
+/* Glitch effect for errors */
+@keyframes glitch {
+  0% {
+    transform: translate(0);
+  }
+  20% {
+    transform: translate(-2px, 2px);
+  }
+  40% {
+    transform: translate(-2px, -2px);
+  }
+  60% {
+    transform: translate(2px, 2px);
+  }
+  80% {
+    transform: translate(2px, -2px);
+  }
+  100% {
+    transform: translate(0);
+  }
+}
+
+.terminal-error {
+  animation: glitch 0.3s ease-in-out;
+}
+
+/* Neon glow text effect */
+.neon-text {
+  text-shadow:
+    0 0 5px currentColor,
+    0 0 10px currentColor,
+    0 0 20px currentColor;
+}
+
+/* Progress bar glow */
+.terminal-progress {
+  box-shadow:
+    0 0 10px currentColor,
+    inset 0 0 5px rgba(255, 255, 255, 0.2);
+}
+
+/* Phase indicator pulse */
+@keyframes phase-pulse {
+  0%, 100% {
+    box-shadow: 0 0 5px currentColor;
+  }
+  50% {
+    box-shadow: 0 0 15px currentColor, 0 0 25px currentColor;
+  }
+}
+
+.phase-active {
+  animation: phase-pulse 1.5s ease-in-out infinite;
+}
+
+/* Split view resizer */
+.split-resizer {
+  background: linear-gradient(180deg, transparent, rgba(0, 255, 255, 0.3), transparent);
+  cursor: col-resize;
+  transition: background 0.2s;
+}
+
+.split-resizer:hover {
+  background: linear-gradient(180deg, transparent, rgba(0, 255, 255, 0.6), transparent);
+}
+
+/* Data flow animation */
+@keyframes data-flow {
+  0% {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+}
+
+.data-flow-particle {
+  animation: data-flow 2s linear infinite;
+}
+
+/* Matrix rain effect (optional background) */
+@keyframes matrix-rain {
+  0% {
+    transform: translateY(-100vh);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(100vh);
+    opacity: 0;
+  }
+}
+
+/* Toast notification styles */
+.toast-cyberpunk {
+  background: rgba(10, 14, 20, 0.95);
+  border: 1px solid rgba(0, 255, 255, 0.3);
+  box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
+}
