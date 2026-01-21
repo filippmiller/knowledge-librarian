@@ -6,8 +6,8 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-body);
+  --font-mono: var(--font-code);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -79,6 +79,11 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
+  --brand-1: oklch(0.72 0.16 170);
+  --brand-2: oklch(0.78 0.12 85);
+  --brand-3: oklch(0.62 0.2 28);
+  --ink-1: oklch(0.18 0.02 250);
+  --surface-1: oklch(0.985 0.01 85);
 }
 
 .dark {
@@ -307,4 +312,74 @@
   background: rgba(10, 14, 20, 0.95);
   border: 1px solid rgba(0, 255, 255, 0.3);
   box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
+}
+
+@keyframes float-soft {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes fade-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@layer utilities {
+  .font-display {
+    font-family: var(--font-display);
+    letter-spacing: -0.02em;
+  }
+
+  .bg-hero {
+    background:
+      radial-gradient(circle at 15% 15%, oklch(0.72 0.16 170 / 0.35), transparent 45%),
+      radial-gradient(circle at 85% 18%, oklch(0.78 0.12 85 / 0.35), transparent 45%),
+      radial-gradient(circle at 70% 85%, oklch(0.62 0.2 28 / 0.3), transparent 45%),
+      linear-gradient(180deg, oklch(0.985 0.01 90) 0%, oklch(0.975 0.01 95) 45%, oklch(1 0 0) 100%);
+  }
+
+  .bg-grid {
+    background-image:
+      linear-gradient(rgba(15, 23, 42, 0.08) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(15, 23, 42, 0.08) 1px, transparent 1px);
+    background-size: 52px 52px;
+  }
+
+  .text-gradient {
+    background: linear-gradient(120deg, oklch(0.18 0.02 250), oklch(0.45 0.16 176), oklch(0.63 0.2 28));
+    -webkit-background-clip: text;
+    color: transparent;
+  }
+
+  .glass-panel {
+    background: rgba(255, 255, 255, 0.72);
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    box-shadow: 0 30px 60px -45px rgba(15, 23, 42, 0.35);
+    backdrop-filter: blur(18px);
+  }
+
+  .shadow-elevated {
+    box-shadow:
+      0 30px 60px -45px rgba(15, 23, 42, 0.35),
+      0 16px 30px -24px rgba(15, 23, 42, 0.25);
+  }
+
+  .animate-fade-rise {
+    animation: fade-rise 0.7s ease both;
+  }
+
+  .animate-float-soft {
+    animation: float-soft 6s ease-in-out infinite;
+  }
 }
