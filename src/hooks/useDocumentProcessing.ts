@@ -411,7 +411,7 @@ export function useDocumentProcessing(documentId: string) {
               addLog('ERROR', `  ${errorData.message}`);
               addLog('ERROR', '════════════════════════════════════════════════════════════');
               addLog('ERROR', 'Эта ошибка не может быть исправлена автоматически.');
-              addLog('ERROR', 'Проверьте квоту OpenAI API или настройки.');
+              addLog('ERROR', 'Проверьте квоту AI API или настройки провайдера.');
 
               // Close the connection - NEVER reconnect for fatal errors
               eventSource.close();

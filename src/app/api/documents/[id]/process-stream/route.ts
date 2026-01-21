@@ -43,7 +43,7 @@ function isFatalError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   const lowerMessage = message.toLowerCase();
 
-  // OpenAI quota/billing errors
+  // AI provider quota/billing errors
   if (lowerMessage.includes('429') || lowerMessage.includes('quota')) return true;
   if (lowerMessage.includes('rate limit')) return true;
 
@@ -55,7 +55,7 @@ function isFatalError(error: unknown): boolean {
   // Bad request (usually means invalid input, won't fix itself)
   if (lowerMessage.includes('400') || lowerMessage.includes('bad request')) return true;
 
-  // Server errors from OpenAI
+  // Server errors from AI provider
   if (lowerMessage.includes('500') || lowerMessage.includes('502') || lowerMessage.includes('503')) return true;
 
   return false;

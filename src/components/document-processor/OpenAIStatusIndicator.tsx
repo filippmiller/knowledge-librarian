@@ -24,7 +24,7 @@ export function OpenAIStatusIndicator({
     return (
       <Badge variant="secondary">
         <span className="w-2 h-2 bg-green-500 rounded-full mr-2 inline-block" />
-        Подключено к OpenAI
+        Подключено к AI
       </Badge>
     );
   }

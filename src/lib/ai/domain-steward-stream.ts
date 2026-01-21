@@ -1,6 +1,5 @@
-import { streamChatCompletion, CHAT_MODEL } from '@/lib/openai';
+import { streamChatCompletionTokens, type ChatMessage } from '@/lib/ai/chat-provider';
 import prisma from '@/lib/db';
-import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 
 export interface DomainClassificationStream {
   primaryDomainSlug: string;
@@ -100,7 +99,7 @@ export async function* streamDomainClassification(
     .map((d) => `- ${d.slug}: ${d.title}${d.description ? ` (${d.description})` : ''}`)
     .join('\n');
 
-  const messages: ChatCompletionMessageParam[] = [
+  const messages: ChatMessage[] = [
     { role: 'system', content: DOMAIN_STEWARD_SYSTEM_PROMPT_RU },
     {
       role: 'user',
@@ -137,8 +136,7 @@ ${documentText.slice(0, 8000)}
     },
   ];
 
-  const stream = await streamChatCompletion({
-    model: CHAT_MODEL,
+  const stream = streamChatCompletionTokens({
     messages,
     temperature: 0.3,
     responseFormat: 'json_object',
@@ -146,8 +144,7 @@ ${documentText.slice(0, 8000)}
 
   let fullContent = '';
 
-  for await (const chunk of stream) {
-    const content = chunk.choices[0]?.delta?.content || '';
+  for await (const content of stream) {
     if (content) {
       fullContent += content;
       yield { type: 'token', data: content };

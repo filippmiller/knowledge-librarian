@@ -1,4 +1,4 @@
-import { openai, CHAT_MODEL } from '@/lib/openai';
+import { createChatCompletion } from '@/lib/ai/chat-provider';
 import prisma from '@/lib/db';
 import { searchSimilarChunks } from './chunker';
 
@@ -59,17 +59,14 @@ const ANSWERING_PROMPT = `Ты - ИИ-библиотекарь знаний дл
 - Отметь, если информация может быть устаревшей`;
 
 export async function classifyIntent(question: string): Promise<IntentClassification> {
-  const response = await openai.chat.completions.create({
-    model: CHAT_MODEL,
+  const content = await createChatCompletion({
     messages: [
       { role: 'system', content: INTENT_CLASSIFIER_PROMPT },
       { role: 'user', content: question },
     ],
-    response_format: { type: 'json_object' },
+    responseFormat: 'json_object',
     temperature: 0.1,
   });
-
-  const content = response.choices[0].message.content;
   if (!content) {
     return { intent: 'general_info', domains: [], confidence: 0.5 };
   }
@@ -120,24 +117,22 @@ export async function answerQuestion(
   const context = buildContext(chunks, rules, qaPairs);
 
   // Step 5: Generate answer
-  const response = await openai.chat.completions.create({
-    model: CHAT_MODEL,
-    messages: [
-      { role: 'system', content: ANSWERING_PROMPT },
-      {
-        role: 'user',
-        content: `Question: ${question}
+  const answer =
+    (await createChatCompletion({
+      messages: [
+        { role: 'system', content: ANSWERING_PROMPT },
+        {
+          role: 'user',
+          content: `Question: ${question}
 
 Available Knowledge:
 ${context}
 
 Provide a helpful answer based ONLY on the knowledge above. If the information is not available, say so.`,
-      },
-    ],
-    temperature: 0.3,
-  });
-
-  const answer = response.choices[0].message.content || 'Не удалось сформировать ответ';
+        },
+      ],
+      temperature: 0.3,
+    })) || 'Не удалось сформировать ответ';
 
   // Build citations
   const citations = rules.slice(0, 3).map((r) => ({

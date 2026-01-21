@@ -5,7 +5,7 @@
  * Critical for maintaining accuracy - conflicting rules lead to wrong answers.
  */
 
-import { openai, CHAT_MODEL } from '@/lib/openai';
+import { createChatCompletion } from '@/lib/ai/chat-provider';
 import prisma from '@/lib/db';
 import { generateEmbedding } from '@/lib/openai';
 
@@ -176,8 +176,7 @@ async function analyzeRuleConflict(
   suggestedResolution: string;
 }> {
   try {
-    const response = await openai.chat.completions.create({
-      model: CHAT_MODEL,
+    const content = await createChatCompletion({
       messages: [
         { role: 'system', content: CONFLICT_DETECTION_PROMPT },
         {
@@ -193,11 +192,9 @@ async function analyzeRuleConflict(
 Проанализируй, есть ли конфликт между этими правилами.`,
         },
       ],
-      response_format: { type: 'json_object' },
+      responseFormat: 'json_object',
       temperature: 0.1,
     });
-
-    const content = response.choices[0].message.content;
     if (!content) {
       return { hasConflict: false, explanation: '', suggestedResolution: '' };
     }

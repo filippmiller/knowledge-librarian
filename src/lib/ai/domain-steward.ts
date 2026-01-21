@@ -1,4 +1,4 @@
-import { openai, CHAT_MODEL } from '@/lib/openai';
+import { createChatCompletion } from '@/lib/ai/chat-provider';
 import prisma from '@/lib/db';
 
 export interface DomainClassification {
@@ -62,8 +62,7 @@ export async function classifyDocumentDomains(
     .map((d) => `- ${d.slug}: ${d.title}${d.description ? ` (${d.description})` : ''}`)
     .join('\n');
 
-  const response = await openai.chat.completions.create({
-    model: CHAT_MODEL,
+  const content = await createChatCompletion({
     messages: [
       { role: 'system', content: DOMAIN_STEWARD_SYSTEM_PROMPT },
       {
@@ -100,11 +99,9 @@ Respond with JSON in this exact format:
 }`,
       },
     ],
-    response_format: { type: 'json_object' },
+    responseFormat: 'json_object',
     temperature: 0.3,
   });
-
-  const content = response.choices[0].message.content;
   if (!content) {
     throw new Error('Empty response from Domain Steward');
   }

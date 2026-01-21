@@ -10,8 +10,9 @@ export const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY || '',
 });
 
-export const EMBEDDING_MODEL = 'text-embedding-3-small';
-export const CHAT_MODEL = 'gpt-4o';
+export const EMBEDDING_MODEL =
+  process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small';
+export const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || 'gpt-4o';
 export const EMBEDDING_DIMENSIONS = 1536;
 
 export async function generateEmbedding(text: string): Promise<number[]> {

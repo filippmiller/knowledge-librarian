@@ -5,7 +5,7 @@
  * Implements Multi-Query Retrieval pattern for RAG systems.
  */
 
-import { openai, CHAT_MODEL } from '@/lib/openai';
+import { createChatCompletion } from '@/lib/ai/chat-provider';
 
 export interface ExpandedQueries {
   original: string;
@@ -38,17 +38,14 @@ const QUERY_EXPANSION_PROMPT = `Ты - эксперт по пониманию з
 
 export async function expandQuery(question: string): Promise<ExpandedQueries> {
   try {
-    const response = await openai.chat.completions.create({
-      model: CHAT_MODEL,
+    const content = await createChatCompletion({
       messages: [
         { role: 'system', content: QUERY_EXPANSION_PROMPT },
         { role: 'user', content: question },
       ],
-      response_format: { type: 'json_object' },
+      responseFormat: 'json_object',
       temperature: 0.3,
     });
-
-    const content = response.choices[0].message.content;
     if (!content) {
       return { original: question, variants: [], isAmbiguous: false };
     }
@@ -92,17 +89,14 @@ const ENTITY_EXTRACTION_PROMPT = `Извлеки из вопроса польз�
 
 export async function extractEntities(question: string): Promise<ExtractedEntities> {
   try {
-    const response = await openai.chat.completions.create({
-      model: CHAT_MODEL,
+    const content = await createChatCompletion({
       messages: [
         { role: 'system', content: ENTITY_EXTRACTION_PROMPT },
         { role: 'user', content: question },
       ],
-      response_format: { type: 'json_object' },
+      responseFormat: 'json_object',
       temperature: 0.1,
     });
-
-    const content = response.choices[0].message.content;
     if (!content) {
       return { dates: [], prices: [], documentTypes: [], services: [] };
     }

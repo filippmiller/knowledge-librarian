@@ -1,4 +1,4 @@
-import { openai, CHAT_MODEL } from '@/lib/openai';
+import { createChatCompletion } from '@/lib/ai/chat-provider';
 import prisma from '@/lib/db';
 
 export interface ExtractedRule {
@@ -67,8 +67,7 @@ export async function extractKnowledge(
     ? Math.max(...existingRuleCodes.map(c => parseInt(c.replace('R-', '')))) + 1
     : 1;
 
-  const response = await openai.chat.completions.create({
-    model: CHAT_MODEL,
+  const content = await createChatCompletion({
     messages: [
       { role: 'system', content: EXTRACTION_SYSTEM_PROMPT },
       {
@@ -110,11 +109,9 @@ Respond with JSON in this exact format:
 }`,
       },
     ],
-    response_format: { type: 'json_object' },
+    responseFormat: 'json_object',
     temperature: 0.2,
   });
-
-  const content = response.choices[0].message.content;
   if (!content) {
     throw new Error('Empty response from Knowledge Extractor');
   }

@@ -137,12 +137,37 @@ export default function AISettingsPage() {
         </div>
       )}
 
+      <Card>
+        <CardHeader>
+          <CardTitle>Провайдер чата</CardTitle>
+          <CardDescription>
+            Для ответов используется Anthropic при наличии `ANTHROPIC_API_KEY`. Настройка выполняется через переменные окружения.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="text-sm text-gray-600 space-y-2">
+          <p>
+            Переменные: <code>AI_PROVIDER</code>, <code>ANTHROPIC_API_KEY</code>, <code>ANTHROPIC_MODEL</code>, <code>ANTHROPIC_MAX_TOKENS</code>.
+          </p>
+          <p>
+            Ключ можно получить на{' '}
+            <a
+              href="https://console.anthropic.com/settings/keys"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-blue-600 hover:underline"
+            >
+              console.anthropic.com
+            </a>
+          </p>
+        </CardContent>
+      </Card>
+
       {/* OpenAI API Settings */}
       <Card>
         <CardHeader>
-          <CardTitle>OpenAI API</CardTitle>
+          <CardTitle>OpenAI (эмбеддинги)</CardTitle>
           <CardDescription>
-            Настройки подключения к OpenAI для обработки документов и генерации ответов
+            Настройки подключения к OpenAI для эмбеддингов и семантического поиска
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
@@ -251,10 +276,8 @@ export default function AISettingsPage() {
             API ключ используется для:
           </p>
           <ul className="list-disc list-inside space-y-1">
-            <li>Классификации документов по доменам</li>
-            <li>Извлечения знаний (правил, вопросов-ответов)</li>
             <li>Создания эмбеддингов для поиска</li>
-            <li>Генерации ответов на вопросы пользователей</li>
+            <li>Чат-операций только если выбран провайдер OpenAI</li>
           </ul>
           <p className="mt-4 text-xs text-gray-500">
             Ключ хранится в зашифрованном виде. Для получения API ключа перейдите на{' '}

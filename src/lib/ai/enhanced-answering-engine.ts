@@ -9,7 +9,7 @@
  * 5. Conversation context tracking
  */
 
-import { openai, CHAT_MODEL } from '@/lib/openai';
+import { createChatCompletion } from '@/lib/ai/chat-provider';
 import prisma from '@/lib/db';
 import { hybridSearch, HybridSearchResult } from './vector-search';
 import { expandQuery, ExtractedEntities, extractEntities } from './query-expansion';
@@ -115,17 +115,14 @@ const ENHANCED_ANSWERING_PROMPT = `Ты - ИИ-библиотекарь знан
 - Упомяни исключения, если есть`;
 
 async function classifyIntent(question: string): Promise<IntentClassification> {
-  const response = await openai.chat.completions.create({
-    model: CHAT_MODEL,
+  const content = await createChatCompletion({
     messages: [
       { role: 'system', content: INTENT_CLASSIFIER_PROMPT },
       { role: 'user', content: question },
     ],
-    response_format: { type: 'json_object' },
+    responseFormat: 'json_object',
     temperature: 0.1,
   });
-
-  const content = response.choices[0].message.content;
   if (!content) {
     return { intent: 'general_info', domains: [], confidence: 0.5 };
   }
@@ -276,13 +273,13 @@ export async function answerQuestionEnhanced(
 ТЕКУЩИЙ УРОВЕНЬ УВЕРЕННОСТИ: ${confidenceLevel}
 ${needsClarification ? 'РЕКОМЕНДУЕТСЯ УТОЧНЕНИЕ' : ''}`;
 
-  const response = await openai.chat.completions.create({
-    model: CHAT_MODEL,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      {
-        role: 'user',
-        content: `Вопрос: ${question}
+  const answer =
+    (await createChatCompletion({
+      messages: [
+        { role: 'system', content: systemPrompt },
+        {
+          role: 'user',
+          content: `Вопрос: ${question}
 
 Доступные знания:
 ${context}
@@ -290,12 +287,10 @@ ${context}
 ${confidenceLevel === 'insufficient'
   ? 'Информации недостаточно. Ответь, что не нашёл релевантной информации, и предложи уточнить вопрос.'
   : 'Предоставь полезный ответ на основе ТОЛЬКО приведённых знаний.'}`,
-      },
-    ],
-    temperature: 0.3,
-  });
-
-  const answer = response.choices[0].message.content || 'Не удалось сформировать ответ';
+        },
+      ],
+      temperature: 0.3,
+    })) || 'Не удалось сформировать ответ';
 
   // Build citations with relevance scores
   const citations = rules.slice(0, 5).map((r, i) => ({
@@ -436,8 +431,7 @@ async function checkIfFollowUp(
   question: string,
   context: string
 ): Promise<{ isFollowUp: boolean; expandedQuestion?: string }> {
-  const response = await openai.chat.completions.create({
-    model: CHAT_MODEL,
+  const content = await createChatCompletion({
     messages: [
       {
         role: 'system',
@@ -458,11 +452,9 @@ ${context}
 Текущий вопрос: ${question}`,
       },
     ],
-    response_format: { type: 'json_object' },
+    responseFormat: 'json_object',
     temperature: 0.1,
   });
-
-  const content = response.choices[0].message.content;
   if (!content) return { isFollowUp: false };
 
   return JSON.parse(content);
