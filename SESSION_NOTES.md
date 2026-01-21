@@ -1436,3 +1436,88 @@ POST /api/admin/vector-search - Run operations
   8. RAG system enhancements (pgvector, hybrid search, multi-query, confidence thresholds, conflict detection, rate limiting, feedback)
 - **Result**: All systems operational, RAG significantly enhanced
 - **App URL**: https://avrora-library-production.up.railway.app
+
+---
+
+# Session Notes - January 21, 2026
+
+## Executive Summary
+
+This session delivered a "Stripe-level" UI/UX refresh for the public landing page, the knowledge playground, and the admin shell. The work introduced an editorial typography system, a soft glassmorphism-inspired surface treatment, and layered hero backgrounds with subtle motion to create a premium, modern experience.
+
+---
+
+## 1. Design System Updates
+
+### Typography
+- Switched to IBM Plex Sans, Serif, and Mono via `next/font` to create a more distinctive, editorial hierarchy.
+- Introduced `font-display` utility for expressive hero and brand headings.
+
+### Visual Language
+- Added multi-layer gradient hero background and a subtle grid texture for depth.
+- Introduced glass panel surfaces with blur, border, and elevation shadows.
+- Added animation utilities for gentle float and fade-rise transitions.
+
+### Global Utilities Added
+- `bg-hero`, `bg-grid`, `glass-panel`, `shadow-elevated`
+- `text-gradient`, `animate-fade-rise`, `animate-float-soft`
+
+---
+
+## 2. Landing Page Overhaul (`src/app/page.tsx`)
+
+### Hero & CTA
+- Rebuilt the hero into a two-column layout with a bold headline, gradient accent text, and layered CTA buttons.
+- Added a "live session" preview card to simulate a real knowledge query experience.
+
+### Feature & Workflow Sections
+- Introduced feature cards with icons and hover lift.
+- Added a three-step workflow card to communicate the end-to-end process.
+- Added a final call-to-action card to drive users to the playground.
+
+---
+
+## 3. Playground Redesign (`src/app/playground/page.tsx`)
+
+### Input Experience
+- Rebuilt the prompt area with glass styling and a custom toggle switch for debug mode.
+- Added suggestion chips for faster onboarding and repeat queries.
+
+### Answer Visualization
+- Added a confidence meter with color-coded status.
+- Structured answers, domains, and sources into clear cards with hierarchy.
+- Debug content now appears in a dedicated section with refined tabs.
+
+### History
+- Added scrollable history with clearer typographic hierarchy and hover affordances.
+
+---
+
+## 4. Admin Shell Update (`src/app/admin/layout.tsx`)
+
+- Updated header and navigation to match the new visual system.
+- Switched nav items to pill-style buttons with active-state elevation.
+
+---
+
+## 5. Files Changed
+
+| File | Purpose |
+|------|---------|
+| `src/app/layout.tsx` | Switched to IBM Plex fonts and updated metadata |
+| `src/app/globals.css` | Added typography hooks, background layers, glass utilities, motion |
+| `src/app/page.tsx` | Complete redesign of landing page |
+| `src/app/playground/page.tsx` | Full playground UI/UX refresh |
+| `src/app/admin/layout.tsx` | Admin shell restyle |
+
+---
+
+## 6. Commit History
+
+- `3397ef1` - Revamp UI for home and playground
+
+---
+
+## 7. Testing
+
+- Not run (UI-only changes).
