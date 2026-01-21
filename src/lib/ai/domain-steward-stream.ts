@@ -153,8 +153,16 @@ ${documentText.slice(0, 8000)}
 
   // Parse the final result
   try {
-    const result = JSON.parse(fullContent) as DomainStewardStreamResult;
-    yield { type: 'result', data: result };
+    const result = JSON.parse(fullContent) as Partial<DomainStewardStreamResult>;
+    if (
+      !result ||
+      !Array.isArray(result.documentDomains) ||
+      !Array.isArray(result.newDomainSuggestions) ||
+      !Array.isArray(result.questionsForHuman)
+    ) {
+      throw new Error('Domain Steward returned invalid JSON');
+    }
+    yield { type: 'result', data: result as DomainStewardStreamResult };
   } catch (error) {
     throw new Error(`Не удалось распарсить ответ: ${fullContent.slice(0, 200)}`);
   }
@@ -169,3 +177,4 @@ export async function getExistingDomainsForStream() {
     },
   });
 }
+

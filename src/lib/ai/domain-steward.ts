@@ -106,8 +106,17 @@ Respond with JSON in this exact format:
     throw new Error('Empty response from Domain Steward');
   }
 
-  const result = JSON.parse(content) as DomainStewardResult;
-  return result;
+  const result = JSON.parse(content) as Partial<DomainStewardResult>;
+  if (
+    !result ||
+    !Array.isArray(result.documentDomains) ||
+    !Array.isArray(result.newDomainSuggestions) ||
+    !Array.isArray(result.questionsForHuman)
+  ) {
+    throw new Error('Domain Steward returned invalid JSON');
+  }
+
+  return result as DomainStewardResult;
 }
 
 export async function getExistingDomains() {

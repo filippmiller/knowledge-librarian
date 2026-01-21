@@ -37,8 +37,25 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const body = await request.json();
-    const { question, sessionId, includeDebug, useConversationContext } = body;
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch (error) {
+      console.error('Invalid JSON body:', error);
+      return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+    }
+
+    if (!body || typeof body !== 'object') {
+      return NextResponse.json({ error: 'Invalid request body' }, { status: 400 });
+    }
+
+    const { question, sessionId, includeDebug, useConversationContext } =
+      body as {
+        question?: unknown;
+        sessionId?: string;
+        includeDebug?: boolean;
+        useConversationContext?: boolean;
+      };
 
     if (!question || typeof question !== 'string') {
       return NextResponse.json({ error: 'Question is required' }, { status: 400 });

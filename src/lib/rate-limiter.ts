@@ -139,6 +139,13 @@ export const RATE_LIMITS = {
     maxRequests: 50,
     keyPrefix: 'embed',
   } as RateLimitConfig,
+
+  // Librarian search - public endpoint with rate limiting
+  librarianSearch: {
+    windowMs: 60 * 1000,   // 1 minute
+    maxRequests: 30,       // 30 searches per minute
+    keyPrefix: 'librarian-search',
+  } as RateLimitConfig,
 };
 
 /**

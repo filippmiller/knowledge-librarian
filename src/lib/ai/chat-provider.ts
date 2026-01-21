@@ -65,13 +65,13 @@ function chunkText(text: string, size: number) {
 
 function normalizeJsonResponse(raw: string): string {
   const trimmed = raw.trim();
-  if (!trimmed) return trimmed;
+  if (!trimmed) return '{}';
 
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
   if (fenced) {
-    return coerceJsonQuotes(extractJsonSubstring(fenced[1].trim()));
+    return normalizeJsonCandidate(extractJsonSubstring(fenced[1].trim()));
   }
-  return coerceJsonQuotes(extractJsonSubstring(trimmed));
+  return normalizeJsonCandidate(extractJsonSubstring(trimmed));
 }
 
 function extractJsonSubstring(raw: string): string {
@@ -124,18 +124,28 @@ function extractJsonSubstring(raw: string): string {
   return raw.slice(startIndex).trim();
 }
 
-function coerceJsonQuotes(candidate: string): string {
+function normalizeJsonCandidate(candidate: string): string {
   const cleaned = candidate.trim();
   if (!cleaned) return cleaned;
 
+  const sanitized = coerceJsonSyntax(cleaned);
   try {
-    JSON.parse(cleaned);
-    return cleaned;
+    const parsed = JSON.parse(sanitized);
+    if (!parsed || typeof parsed !== 'object') {
+      return '{}';
+    }
+    return JSON.stringify(parsed);
   } catch {
-    return cleaned
-      .replace(/([,{]\s*)'([^']+?)'\s*:/g, '$1"$2":')
-      .replace(/:\s*'([^']*?)'/g, ': "$1"');
+    return '{}';
   }
+}
+
+function coerceJsonSyntax(candidate: string): string {
+  return candidate
+    .replace(/,\s*([}\]])/g, '$1')
+    .replace(/([,{]\s*)'([^']+?)'\s*:/g, '$1"$2":')
+    .replace(/:\s*'([^']*?)'/g, ': "$1"')
+    .replace(/([{,]\s*)([A-Za-z0-9_]+)\s*:/g, '$1"$2":');
 }
 
 export async function createChatCompletion(

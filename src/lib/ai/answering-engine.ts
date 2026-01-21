@@ -72,7 +72,15 @@ export async function classifyIntent(question: string): Promise<IntentClassifica
   }
 
   try {
-    return JSON.parse(content);
+    const parsed = JSON.parse(content) as Partial<IntentClassification>;
+    const intent = typeof parsed.intent === 'string' ? parsed.intent : 'general_info';
+    const domains = Array.isArray(parsed.domains)
+      ? parsed.domains.filter((domain) => typeof domain === 'string')
+      : [];
+    const confidence =
+      typeof parsed.confidence === 'number' ? parsed.confidence : 0.5;
+
+    return { intent, domains, confidence };
   } catch (error) {
     console.error('Intent classification parse failed:', error);
     return { intent: 'general_info', domains: [], confidence: 0.5 };

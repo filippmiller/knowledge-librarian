@@ -116,7 +116,17 @@ Respond with JSON in this exact format:
     throw new Error('Empty response from Knowledge Extractor');
   }
 
-  return JSON.parse(content) as KnowledgeExtractionResult;
+  const result = JSON.parse(content) as Partial<KnowledgeExtractionResult>;
+  if (
+    !result ||
+    !Array.isArray(result.rules) ||
+    !Array.isArray(result.qaPairs) ||
+    !Array.isArray(result.uncertainties)
+  ) {
+    throw new Error('Knowledge Extractor returned invalid JSON');
+  }
+
+  return result as KnowledgeExtractionResult;
 }
 
 export async function saveExtractedRules(

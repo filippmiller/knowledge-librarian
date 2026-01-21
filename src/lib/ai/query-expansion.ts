@@ -50,7 +50,10 @@ export async function expandQuery(question: string): Promise<ExpandedQueries> {
       return { original: question, variants: [], isAmbiguous: false };
     }
 
-    const parsed = JSON.parse(content);
+    const parsed = JSON.parse(content) as Partial<ExpandedQueries> | null;
+    if (!parsed || typeof parsed !== 'object') {
+      return { original: question, variants: [], isAmbiguous: false };
+    }
     return {
       original: question,
       variants: parsed.variants || [],
@@ -101,7 +104,13 @@ export async function extractEntities(question: string): Promise<ExtractedEntiti
       return { dates: [], prices: [], documentTypes: [], services: [] };
     }
 
-    return JSON.parse(content);
+    const parsed = JSON.parse(content) as Partial<ExtractedEntities>;
+    return {
+      dates: Array.isArray(parsed.dates) ? parsed.dates : [],
+      prices: Array.isArray(parsed.prices) ? parsed.prices : [],
+      documentTypes: Array.isArray(parsed.documentTypes) ? parsed.documentTypes : [],
+      services: Array.isArray(parsed.services) ? parsed.services : [],
+    };
   } catch (error) {
     console.error('Entity extraction failed:', error);
     return { dates: [], prices: [], documentTypes: [], services: [] };

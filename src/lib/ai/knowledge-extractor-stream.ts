@@ -156,8 +156,16 @@ ${documentText.slice(0, 12000)}
 
   // Parse the final result
   try {
-    const result = JSON.parse(fullContent) as KnowledgeExtractionStreamResult;
-    yield { type: 'result', data: result };
+    const result = JSON.parse(fullContent) as Partial<KnowledgeExtractionStreamResult>;
+    if (
+      !result ||
+      !Array.isArray(result.rules) ||
+      !Array.isArray(result.qaPairs) ||
+      !Array.isArray(result.uncertainties)
+    ) {
+      throw new Error('Knowledge Extractor returned invalid JSON');
+    }
+    yield { type: 'result', data: result as KnowledgeExtractionStreamResult };
   } catch (error) {
     throw new Error(`Не удалось распарсить ответ: ${fullContent.slice(0, 200)}`);
   }
@@ -170,3 +178,4 @@ export async function getExistingRuleCodesForStream(): Promise<string[]> {
   });
   return rules.map((r) => r.ruleCode);
 }
+

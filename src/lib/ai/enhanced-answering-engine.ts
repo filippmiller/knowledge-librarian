@@ -128,7 +128,17 @@ async function classifyIntent(question: string): Promise<IntentClassification> {
   }
 
   try {
-    return JSON.parse(content);
+    const parsed = JSON.parse(content) as Partial<IntentClassification>;
+    const intent = typeof parsed.intent === 'string' ? parsed.intent : 'general_info';
+    const domains = Array.isArray(parsed.domains)
+      ? parsed.domains.filter((domain) => typeof domain === 'string')
+      : [];
+    const confidence =
+      typeof parsed.confidence === 'number' ? parsed.confidence : 0.5;
+    const reasoning =
+      typeof parsed.reasoning === 'string' ? parsed.reasoning : undefined;
+
+    return reasoning ? { intent, domains, confidence, reasoning } : { intent, domains, confidence };
   } catch (error) {
     console.error('Intent classification parse failed:', error);
     return { intent: 'general_info', domains: [], confidence: 0.5 };
@@ -463,7 +473,16 @@ ${context}
   if (!content) return { isFollowUp: false };
 
   try {
-    return JSON.parse(content);
+    const parsed = JSON.parse(content) as {
+      isFollowUp?: boolean;
+      expandedQuestion?: string | null;
+    };
+    const isFollowUp = parsed?.isFollowUp === true;
+    const expandedQuestion =
+      typeof parsed?.expandedQuestion === 'string' ? parsed.expandedQuestion : undefined;
+    return expandedQuestion
+      ? { isFollowUp, expandedQuestion }
+      : { isFollowUp };
   } catch (error) {
     console.error('Follow-up detection parse failed:', error);
     return { isFollowUp: false };

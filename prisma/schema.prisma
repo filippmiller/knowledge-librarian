@@ -58,10 +58,11 @@ model Domain {
   childDomains   Domain[] @relation("DomainHierarchy")
 
   // Relations
-  documents      DocumentDomain[]
-  rules          RuleDomain[]
-  qaPairs        QADomain[]
-  chunks         ChunkDomain[]
+  documents        DocumentDomain[]
+  rules            RuleDomain[]
+  qaPairs          QADomain[]
+  chunks           ChunkDomain[]
+  librarianEntries LibrarianEntry[]
 
   @@index([parentDomainId])
   @@index([slug])
@@ -168,8 +169,7 @@ model DocChunk {
   documentId      String
   chunkIndex      Int
   content         String   @db.Text
-  embedding       Json?    // vector embeddings stored as JSON array (legacy)
-  embeddingVector Unsupported("vector(1536)")?  // native pgvector for efficient search
+  embedding       Json?    // vector embeddings stored as JSON array
   metadata        Json?    // additional context
   createdAt       DateTime @default(now())
 
@@ -463,4 +463,139 @@ enum FeedbackType {
   UNCLEAR           // Answer was unclear or confusing
   OFF_TOPIC         // Answer was about wrong topic
   GREAT             // Answer was great (positive feedback)
+}
+
+// ============================================
+// LIBRARIAN KNOWLEDGE MANAGEMENT SYSTEM
+// ============================================
+
+// Verification lifecycle for knowledge entries
+enum VerificationStatus {
+  UNVERIFIED   // New entry, not yet reviewed
+  VERIFIED     // Reviewed and confirmed accurate
+  CANONICAL    // Authoritative source of truth
+  DISPUTED     // Conflicting information flagged
+  STALE        // Outdated, needs refresh
+}
+
+// Types of knowledge entries
+enum LibrarianEntryType {
+  FACT         // Factual statement
+  PROCEDURE    // Process or workflow
+  RULE         // Business rule
+  DEFINITION   // Term definition
+  REFERENCE    // External reference
+}
+
+// Source of knowledge entries
+enum LibrarianSourceType {
+  MANUAL       // Human-entered
+  AI_EXTRACTED // Extracted by AI from documents
+  RULE_IMPORT  // Imported from Rule model
+  QA_IMPORT    // Imported from QAPair model
+  AGENT        // Created by an AI agent
+}
+
+// Agent activity types for compliance tracking
+enum AgentActivityType {
+  SEARCH       // Knowledge search
+  INGEST       // Knowledge creation
+  UPDATE       // Knowledge update
+  VERIFY       // Verification action
+  DISPUTE      // Dispute flagging
+}
+
+// Librarian change types for audit log
+enum LibrarianChangeType {
+  CREATE
+  UPDATE
+  VERIFY
+  DISPUTE
+  REVALIDATE
+  ARCHIVE
+}
+
+// Core knowledge entries with verification lifecycle
+model LibrarianEntry {
+  id                 String              @id @default(cuid())
+  title              String
+  content            String              @db.Text
+  contentHash        String              @unique // SHA-256 for deduplication
+  domainId           String?
+  entryType          LibrarianEntryType  @default(FACT)
+  verificationStatus VerificationStatus  @default(UNVERIFIED)
+  freshnessScore     Float               @default(1.0) // 0.0 - 1.0, decays over time
+  lastValidatedAt    DateTime            @default(now())
+  expiresAt          DateTime?
+  evidence           Json?               // { commit_hash, files_changed, functions_affected, test_results }
+  sourceType         LibrarianSourceType @default(MANUAL)
+  sourceId           String?             // Reference to Rule.id, QAPair.id, etc.
+  embedding          Json?               // vector embeddings as JSON array
+  keywords           String[]            // Extracted keywords for filtering
+  entities           Json?               // { files: [], functions: [], tables: [], endpoints: [] }
+  createdBy          String?             // Agent ID or user ID
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  // Relations
+  domain  Domain?           @relation(fields: [domainId], references: [id])
+  changes LibrarianChange[]
+
+  @@index([verificationStatus])
+  @@index([freshnessScore])
+  @@index([domainId])
+  @@index([entryType])
+  @@index([createdAt])
+}
+
+// Agent compliance and activity tracking
+model LibrarianAgentActivity {
+  id            String            @id @default(cuid())
+  agentId       String
+  activityType  AgentActivityType
+  entryId       String?
+  details       Json?             // { query, results, duration_ms, etc. }
+  rulesFollowed String[]          // List of rule IDs followed
+  rulesViolated String[]          // List of rule IDs violated
+  createdAt     DateTime          @default(now())
+
+  @@index([agentId])
+  @@index([activityType])
+  @@index([createdAt])
+}
+
+// Search analytics for optimization
+model LibrarianSearchMetrics {
+  id              String   @id @default(cuid())
+  query           String   @db.Text
+  queryHash       String   // For aggregation
+  resultCount     Int
+  avgRelevance    Float
+  topResultId     String?
+  searchTimeMs    Int
+  embeddingTimeMs Int?
+  clickedResultId String?
+  wasHelpful      Boolean?
+  createdAt       DateTime @default(now())
+
+  @@index([queryHash])
+  @@index([createdAt])
+}
+
+// Audit log for Librarian changes
+model LibrarianChange {
+  id         String              @id @default(cuid())
+  entryId    String
+  changeType LibrarianChangeType
+  oldValue   Json?
+  newValue   Json?
+  reason     String              @db.Text
+  changedBy  String              // Agent ID or user ID
+  createdAt  DateTime            @default(now())
+
+  entry LibrarianEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+
+  @@index([entryId])
+  @@index([changeType])
+  @@index([createdAt])
 }
