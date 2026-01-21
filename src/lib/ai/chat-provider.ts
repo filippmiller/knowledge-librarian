@@ -63,6 +63,30 @@ function chunkText(text: string, size: number) {
   return chunks;
 }
 
+function normalizeJsonResponse(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return trimmed;
+
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenced) {
+    return fenced[1].trim();
+  }
+
+  const firstBrace = trimmed.indexOf('{');
+  const lastBrace = trimmed.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    return trimmed.slice(firstBrace, lastBrace + 1).trim();
+  }
+
+  const firstBracket = trimmed.indexOf('[');
+  const lastBracket = trimmed.lastIndexOf(']');
+  if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
+    return trimmed.slice(firstBracket, lastBracket + 1).trim();
+  }
+
+  return trimmed;
+}
+
 export async function createChatCompletion(
   options: ChatCompletionOptions
 ): Promise<string> {
@@ -112,7 +136,10 @@ export async function createChatCompletion(
       ? data.content.map((part) => part.text || '').join('')
       : '';
 
-    return content.trim();
+    const trimmed = content.trim();
+    return options.responseFormat === 'json_object'
+      ? normalizeJsonResponse(trimmed)
+      : trimmed;
   }
 
   const response = await openai.chat.completions.create({
@@ -125,7 +152,10 @@ export async function createChatCompletion(
     }),
   });
 
-  return response.choices[0]?.message?.content?.trim() || '';
+  const content = response.choices[0]?.message?.content?.trim() || '';
+  return options.responseFormat === 'json_object'
+    ? normalizeJsonResponse(content)
+    : content;
 }
 
 export async function* streamChatCompletionTokens(
@@ -140,4 +170,3 @@ export async function* streamChatCompletionTokens(
     }
   }
 }
-
