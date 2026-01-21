@@ -71,7 +71,12 @@ export async function classifyIntent(question: string): Promise<IntentClassifica
     return { intent: 'general_info', domains: [], confidence: 0.5 };
   }
 
-  return JSON.parse(content);
+  try {
+    return JSON.parse(content);
+  } catch (error) {
+    console.error('Intent classification parse failed:', error);
+    return { intent: 'general_info', domains: [], confidence: 0.5 };
+  }
 }
 
 export async function answerQuestion(

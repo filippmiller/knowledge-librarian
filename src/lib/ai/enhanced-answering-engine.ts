@@ -127,7 +127,12 @@ async function classifyIntent(question: string): Promise<IntentClassification> {
     return { intent: 'general_info', domains: [], confidence: 0.5 };
   }
 
-  return JSON.parse(content);
+  try {
+    return JSON.parse(content);
+  } catch (error) {
+    console.error('Intent classification parse failed:', error);
+    return { intent: 'general_info', domains: [], confidence: 0.5 };
+  }
 }
 
 /**
@@ -457,5 +462,10 @@ ${context}
   });
   if (!content) return { isFollowUp: false };
 
-  return JSON.parse(content);
+  try {
+    return JSON.parse(content);
+  } catch (error) {
+    console.error('Follow-up detection parse failed:', error);
+    return { isFollowUp: false };
+  }
 }
