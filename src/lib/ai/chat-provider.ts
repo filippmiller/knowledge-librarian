@@ -42,7 +42,7 @@ function buildAnthropicPayload(options: ChatCompletionOptions) {
 
   const responseFormatInstruction =
     options.responseFormat === 'json_object'
-      ? 'Respond with valid JSON only. Do not wrap in markdown or add commentary.'
+      ? 'Respond with valid JSON only. Use double quotes for all keys and string values. Do not wrap in markdown or add commentary.'
       : null;
 
   const system = [...systemParts, responseFormatInstruction]
@@ -69,9 +69,9 @@ function normalizeJsonResponse(raw: string): string {
 
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
   if (fenced) {
-    return extractJsonSubstring(fenced[1].trim());
+    return coerceJsonQuotes(extractJsonSubstring(fenced[1].trim()));
   }
-  return extractJsonSubstring(trimmed);
+  return coerceJsonQuotes(extractJsonSubstring(trimmed));
 }
 
 function extractJsonSubstring(raw: string): string {
@@ -122,6 +122,20 @@ function extractJsonSubstring(raw: string): string {
   }
 
   return raw.slice(startIndex).trim();
+}
+
+function coerceJsonQuotes(candidate: string): string {
+  const cleaned = candidate.trim();
+  if (!cleaned) return cleaned;
+
+  try {
+    JSON.parse(cleaned);
+    return cleaned;
+  } catch {
+    return cleaned
+      .replace(/([,{]\s*)'([^']+?)'\s*:/g, '$1"$2":')
+      .replace(/:\s*'([^']*?)'/g, ': "$1"');
+  }
 }
 
 export async function createChatCompletion(
