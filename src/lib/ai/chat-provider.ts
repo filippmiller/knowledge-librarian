@@ -69,22 +69,59 @@ function normalizeJsonResponse(raw: string): string {
 
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
   if (fenced) {
-    return fenced[1].trim();
+    return extractJsonSubstring(fenced[1].trim());
+  }
+  return extractJsonSubstring(trimmed);
+}
+
+function extractJsonSubstring(raw: string): string {
+  const startIndex = raw.search(/[{[]/);
+  if (startIndex === -1) return raw.trim();
+
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+
+  for (let i = startIndex; i < raw.length; i += 1) {
+    const char = raw[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === '{' || char === '[') {
+      stack.push(char);
+      continue;
+    }
+
+    if (char === '}' || char === ']') {
+      const last = stack[stack.length - 1];
+      if ((char === '}' && last === '{') || (char === ']' && last === '[')) {
+        stack.pop();
+        if (stack.length === 0) {
+          return raw.slice(startIndex, i + 1).trim();
+        }
+      }
+    }
   }
 
-  const firstBrace = trimmed.indexOf('{');
-  const lastBrace = trimmed.lastIndexOf('}');
-  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-    return trimmed.slice(firstBrace, lastBrace + 1).trim();
-  }
-
-  const firstBracket = trimmed.indexOf('[');
-  const lastBracket = trimmed.lastIndexOf(']');
-  if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
-    return trimmed.slice(firstBracket, lastBracket + 1).trim();
-  }
-
-  return trimmed;
+  return raw.slice(startIndex).trim();
 }
 
 export async function createChatCompletion(
