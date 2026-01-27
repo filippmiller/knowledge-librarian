@@ -149,25 +149,39 @@ export async function POST(request: NextRequest): Promise<Response> {
     const filename = file.name;
     const mimeType = file.type || detectMimeType(filename);
 
-    // Create document record
+    // Step 1: Parse document text FIRST (required for SSE processing)
+    console.log(`[Upload] Parsing document: ${filename}`);
+    let rawText: string;
+    try {
+      rawText = await parseDocument(buffer, mimeType, filename);
+      console.log(`[Upload] Parsed ${rawText.length} characters from ${filename}`);
+    } catch (parseError) {
+      console.error(`[Upload] Failed to parse ${filename}:`, parseError);
+      return NextResponse.json({ 
+        error: `Failed to parse document: ${parseError instanceof Error ? parseError.message : 'Unknown error'}` 
+      }, { status: 400 });
+    }
+
+    // Step 2: Create document record WITH rawText
     const document = await prisma.document.create({
       data: {
         title: title || filename,
         filename,
         mimeType,
         rawBytes: buffer,
+        rawText, // Include parsed text so SSE can proceed
         parseStatus: 'PROCESSING',
       },
     });
 
-    // NOTE: We don't start background processing here because the UI immediately 
-    // opens the Librarian Terminal (SSE stream) which handles the processing.
-    // Running both simultaneously causes high memory usage and OOM crashes.
-    // processDocument(document.id, buffer, mimeType, filename).catch(console.error);
+    console.log(`[Upload] Document created: ${document.id}`);
+
+    // NOTE: AI processing is handled by the Librarian Terminal (SSE stream).
+    // The SSE endpoint now has rawText available to proceed with domain classification.
 
     return NextResponse.json({
       id: document.id,
-      message: 'Document uploaded, processing started',
+      message: 'Document uploaded and parsed, ready for processing',
     });
   } catch (error) {
     console.error('Error uploading document:', error);
