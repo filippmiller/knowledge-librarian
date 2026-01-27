@@ -5,6 +5,11 @@ import path from 'path';
 test.describe('Production Document Upload Test', () => {
   test.use({
     baseURL: 'https://avrora-library-production.up.railway.app',
+    // Set up HTTP Basic Auth
+    httpCredentials: {
+      username: 'filippmiller@gmail.com',
+      password: 'Airbus380+',
+    },
   });
 
   test('Upload and process sample document', async ({ page }) => {
@@ -21,7 +26,7 @@ test.describe('Production Document Upload Test', () => {
       console.log(`[Network Error]: ${request.url()} - ${request.failure()?.errorText}`);
     });
 
-    // Go to admin panel
+    // Go to admin panel with Basic Auth
     console.log('Navigating to admin panel...');
     await page.goto('/admin');
     await page.waitForLoadState('networkidle');
