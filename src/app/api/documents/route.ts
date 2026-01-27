@@ -160,8 +160,10 @@ export async function POST(request: NextRequest): Promise<Response> {
       },
     });
 
-    // Process document asynchronously
-    processDocument(document.id, buffer, mimeType, filename).catch(console.error);
+    // NOTE: We don't start background processing here because the UI immediately 
+    // opens the Librarian Terminal (SSE stream) which handles the processing.
+    // Running both simultaneously causes high memory usage and OOM crashes.
+    // processDocument(document.id, buffer, mimeType, filename).catch(console.error);
 
     return NextResponse.json({
       id: document.id,

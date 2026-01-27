@@ -223,11 +223,88 @@ export async function* streamChatCompletionTokens(
   options: ChatCompletionOptions,
   chunkSize = 120
 ): AsyncGenerator<string> {
-  const content = await createChatCompletion(options);
+  const provider = getProvider();
+  const temperature = options.temperature ?? DEFAULT_TEMPERATURE;
 
-  for (const chunk of chunkText(content, chunkSize)) {
-    if (chunk) {
-      yield chunk;
+  if (provider === 'anthropic') {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      throw new Error('ANTHROPIC_API_KEY is not set');
+    }
+
+    const { system, messages } = buildAnthropicPayload(options);
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: options.model || DEFAULT_ANTHROPIC_MODEL,
+        system,
+        messages,
+        temperature,
+        max_tokens: options.maxTokens ?? DEFAULT_ANTHROPIC_MAX_TOKENS,
+        stream: true,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(
+        `Anthropic API error (${response.status}): ${errorBody || 'Unknown error'}`
+      );
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('Failed to get response body reader');
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const content = line.slice(6).trim();
+          if (content === '[DONE]') break;
+          try {
+            const data = JSON.parse(content);
+            if (data.type === 'content_block_delta' && data.delta?.text) {
+              yield data.delta.text;
+            }
+          } catch (e) {
+            // Ignore parse errors for non-json lines
+          }
+        }
+      }
+    }
+    return;
+  }
+
+  // OpenAI streaming
+  const stream = await openai.chat.completions.create({
+    model: options.model || DEFAULT_OPENAI_MODEL,
+    messages: options.messages,
+    temperature,
+    ...(options.maxTokens && { max_tokens: options.maxTokens }),
+    ...(options.responseFormat && {
+      response_format: { type: options.responseFormat },
+    }),
+    stream: true,
+  });
+
+  for await (const chunk of stream) {
+    const content = chunk.choices[0]?.delta?.content || '';
+    if (content) {
+      yield content;
     }
   }
 }
