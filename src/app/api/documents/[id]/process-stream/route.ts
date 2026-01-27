@@ -69,6 +69,10 @@ export async function GET(
   if (authError) return authError;
 
   const { id: documentId } = await params;
+  
+  // Check for resume mode (reconnection should resume, not restart)
+  const url = new URL(request.url);
+  const shouldResume = url.searchParams.get('resume') === 'true';
 
   // Check if document exists
   const document = await prisma.document.findUnique({
@@ -107,263 +111,386 @@ export async function GET(
         controller.enqueue(encoder.encode(formatSSE(event)));
       };
 
+      // SSE keepalive - send heartbeat every 15 seconds to prevent Railway proxy timeout
+      const heartbeatInterval = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(': heartbeat\n\n'));
+        } catch {
+          // Controller closed, stop heartbeat
+          clearInterval(heartbeatInterval);
+        }
+      }, 15000);
+
       try {
-        // Clear existing staged extractions for this document
-        await prisma.stagedExtraction.deleteMany({
+        // Check existing progress for resume capability
+        const existingStaged = await prisma.stagedExtraction.groupBy({
+          by: ['phase'],
           where: { documentId },
+          _count: { id: true },
         });
+        
+        const completedPhases = new Set(
+          existingStaged
+            .filter(g => g._count.id > 0)
+            .map(g => g.phase)
+        );
+
+        // Only clear if not resuming or no prior progress
+        if (!shouldResume || completedPhases.size === 0) {
+          await prisma.stagedExtraction.deleteMany({
+            where: { documentId },
+          });
+          completedPhases.clear();
+        }
 
         // ========== PHASE 1: Domain Classification ==========
-        send({
-          type: 'phase_start',
-          phase: 'DOMAIN_CLASSIFICATION',
-          data: { title: 'Классификация доменов' },
-        });
-
-        const existingDomains = await getExistingDomainsForStream();
-
-        // Send prompts
-        send({
-          type: 'prompt',
-          phase: 'DOMAIN_CLASSIFICATION',
-          data: {
-            humanReadable: getDomainPrompt(document.title),
-            technical: getDomainTechnicalPrompt(document.rawText!, existingDomains),
-          },
-        });
-
-        // Stream domain classification
-        let domainResult: DomainStewardStreamResult | null = null;
-        for await (const event of streamDomainClassification(
-          document.rawText!,
-          existingDomains
-        )) {
-          if (event.type === 'token') {
-            send({
-              type: 'token',
-              phase: 'DOMAIN_CLASSIFICATION',
-              data: event.data,
-            });
-          } else if (event.type === 'result') {
-            domainResult = event.data as DomainStewardStreamResult;
-          }
-        }
-
-        // Save domain classification results to staged
-        if (domainResult) {
-          // Save domain assignments
-          for (const domain of domainResult.documentDomains) {
-            const staged = await prisma.stagedExtraction.create({
-              data: {
-                documentId,
-                phase: 'DOMAIN_CLASSIFICATION',
-                itemType: 'DOMAIN_ASSIGNMENT',
-                data: domain as object,
-              },
-            });
+        if (completedPhases.has('DOMAIN_CLASSIFICATION')) {
+          // Resume: re-emit existing results
+          send({
+            type: 'phase_start',
+            phase: 'DOMAIN_CLASSIFICATION',
+            data: { title: 'Классификация доменов (восстановлено)' },
+          });
+          
+          const existingDomainResults = await prisma.stagedExtraction.findMany({
+            where: { documentId, phase: 'DOMAIN_CLASSIFICATION' },
+          });
+          
+          for (const staged of existingDomainResults) {
             send({
               type: 'item_extracted',
               phase: 'DOMAIN_CLASSIFICATION',
               data: {
                 id: staged.id,
-                itemType: 'DOMAIN_ASSIGNMENT',
-                content: domain,
+                itemType: staged.itemType,
+                content: staged.data,
               },
             });
           }
+          
+          send({
+            type: 'phase_complete',
+            phase: 'DOMAIN_CLASSIFICATION',
+            data: { success: true, resumed: true },
+          });
+        } else {
+          send({
+            type: 'phase_start',
+            phase: 'DOMAIN_CLASSIFICATION',
+            data: { title: 'Классификация доменов' },
+          });
 
-          // Save domain suggestions
-          for (const suggestion of domainResult.newDomainSuggestions) {
-            const staged = await prisma.stagedExtraction.create({
-              data: {
-                documentId,
+          const existingDomains = await getExistingDomainsForStream();
+
+          // Send prompts
+          send({
+            type: 'prompt',
+            phase: 'DOMAIN_CLASSIFICATION',
+            data: {
+              humanReadable: getDomainPrompt(document.title),
+              technical: getDomainTechnicalPrompt(document.rawText!, existingDomains),
+            },
+          });
+
+          // Stream domain classification
+          let domainResult: DomainStewardStreamResult | null = null;
+          for await (const event of streamDomainClassification(
+            document.rawText!,
+            existingDomains
+          )) {
+            if (event.type === 'token') {
+              send({
+                type: 'token',
                 phase: 'DOMAIN_CLASSIFICATION',
-                itemType: 'DOMAIN_SUGGESTION',
-                data: suggestion as object,
-              },
-            });
-            send({
-              type: 'item_extracted',
-              phase: 'DOMAIN_CLASSIFICATION',
-              data: {
-                id: staged.id,
-                itemType: 'DOMAIN_SUGGESTION',
-                content: suggestion,
-              },
-            });
+                data: event.data,
+              });
+            } else if (event.type === 'result') {
+              domainResult = event.data as DomainStewardStreamResult;
+            }
           }
-        }
 
-        send({
-          type: 'phase_complete',
-          phase: 'DOMAIN_CLASSIFICATION',
-          data: { success: true },
-        });
+          // Save domain classification results to staged
+          if (domainResult) {
+            // Save domain assignments
+            for (const domain of domainResult.documentDomains) {
+              const staged = await prisma.stagedExtraction.create({
+                data: {
+                  documentId,
+                  phase: 'DOMAIN_CLASSIFICATION',
+                  itemType: 'DOMAIN_ASSIGNMENT',
+                  data: domain as object,
+                },
+              });
+              send({
+                type: 'item_extracted',
+                phase: 'DOMAIN_CLASSIFICATION',
+                data: {
+                  id: staged.id,
+                  itemType: 'DOMAIN_ASSIGNMENT',
+                  content: domain,
+                },
+              });
+            }
+
+            // Save domain suggestions
+            for (const suggestion of domainResult.newDomainSuggestions) {
+              const staged = await prisma.stagedExtraction.create({
+                data: {
+                  documentId,
+                  phase: 'DOMAIN_CLASSIFICATION',
+                  itemType: 'DOMAIN_SUGGESTION',
+                  data: suggestion as object,
+                },
+              });
+              send({
+                type: 'item_extracted',
+                phase: 'DOMAIN_CLASSIFICATION',
+                data: {
+                  id: staged.id,
+                  itemType: 'DOMAIN_SUGGESTION',
+                  content: suggestion,
+                },
+              });
+            }
+          }
+
+          send({
+            type: 'phase_complete',
+            phase: 'DOMAIN_CLASSIFICATION',
+            data: { success: true },
+          });
+        }
 
         // ========== PHASE 2: Knowledge Extraction ==========
-        send({
-          type: 'phase_start',
-          phase: 'KNOWLEDGE_EXTRACTION',
-          data: { title: 'Извлечение знаний' },
-        });
-
-        const existingRuleCodes = await getExistingRuleCodesForStream();
-        const startCode =
-          existingRuleCodes.length > 0
-            ? Math.max(...existingRuleCodes.map((c) => parseInt(c.replace('R-', '')))) + 1
-            : 1;
-
-        // Send prompts
-        send({
-          type: 'prompt',
-          phase: 'KNOWLEDGE_EXTRACTION',
-          data: {
-            humanReadable: getKnowledgePrompt(document.title),
-            technical: getKnowledgeTechnicalPrompt(document.rawText!, startCode),
-          },
-        });
-
-        // Stream knowledge extraction
-        let knowledgeResult: KnowledgeExtractionStreamResult | null = null;
-        for await (const event of streamKnowledgeExtraction(
-          document.rawText!,
-          existingRuleCodes
-        )) {
-          if (event.type === 'token') {
+        if (completedPhases.has('KNOWLEDGE_EXTRACTION')) {
+          // Resume: re-emit existing results
+          send({
+            type: 'phase_start',
+            phase: 'KNOWLEDGE_EXTRACTION',
+            data: { title: 'Извлечение знаний (восстановлено)' },
+          });
+          
+          const existingKnowledgeResults = await prisma.stagedExtraction.findMany({
+            where: { documentId, phase: 'KNOWLEDGE_EXTRACTION' },
+          });
+          
+          for (const staged of existingKnowledgeResults) {
             send({
-              type: 'token',
+              type: 'item_extracted',
               phase: 'KNOWLEDGE_EXTRACTION',
-              data: event.data,
+              data: {
+                id: staged.id,
+                itemType: staged.itemType,
+                content: staged.data,
+              },
             });
-          } else if (event.type === 'result') {
-            knowledgeResult = event.data as KnowledgeExtractionStreamResult;
           }
+          
+          send({
+            type: 'phase_complete',
+            phase: 'KNOWLEDGE_EXTRACTION',
+            data: { success: true, resumed: true },
+          });
+        } else {
+          send({
+            type: 'phase_start',
+            phase: 'KNOWLEDGE_EXTRACTION',
+            data: { title: 'Извлечение знаний' },
+          });
+
+          const existingRuleCodes = await getExistingRuleCodesForStream();
+          const startCode =
+            existingRuleCodes.length > 0
+              ? Math.max(...existingRuleCodes.map((c) => parseInt(c.replace('R-', '')))) + 1
+              : 1;
+
+          // Send prompts
+          send({
+            type: 'prompt',
+            phase: 'KNOWLEDGE_EXTRACTION',
+            data: {
+              humanReadable: getKnowledgePrompt(document.title),
+              technical: getKnowledgeTechnicalPrompt(document.rawText!, startCode),
+            },
+          });
+
+          // Stream knowledge extraction
+          let knowledgeResult: KnowledgeExtractionStreamResult | null = null;
+          for await (const event of streamKnowledgeExtraction(
+            document.rawText!,
+            existingRuleCodes
+          )) {
+            if (event.type === 'token') {
+              send({
+                type: 'token',
+                phase: 'KNOWLEDGE_EXTRACTION',
+                data: event.data,
+              });
+            } else if (event.type === 'result') {
+              knowledgeResult = event.data as KnowledgeExtractionStreamResult;
+            }
+          }
+
+          // Save knowledge extraction results to staged
+          if (knowledgeResult) {
+            // Save rules
+            for (const rule of knowledgeResult.rules) {
+              const staged = await prisma.stagedExtraction.create({
+                data: {
+                  documentId,
+                  phase: 'KNOWLEDGE_EXTRACTION',
+                  itemType: 'RULE',
+                  data: rule as object,
+                },
+              });
+              send({
+                type: 'item_extracted',
+                phase: 'KNOWLEDGE_EXTRACTION',
+                data: {
+                  id: staged.id,
+                  itemType: 'RULE',
+                  content: rule,
+                },
+              });
+            }
+
+            // Save QA pairs
+            for (const qa of knowledgeResult.qaPairs) {
+              const staged = await prisma.stagedExtraction.create({
+                data: {
+                  documentId,
+                  phase: 'KNOWLEDGE_EXTRACTION',
+                  itemType: 'QA_PAIR',
+                  data: qa as object,
+                },
+              });
+              send({
+                type: 'item_extracted',
+                phase: 'KNOWLEDGE_EXTRACTION',
+                data: {
+                  id: staged.id,
+                  itemType: 'QA_PAIR',
+                  content: qa,
+                },
+              });
+            }
+
+            // Save uncertainties
+            for (const uncertainty of knowledgeResult.uncertainties) {
+              const staged = await prisma.stagedExtraction.create({
+                data: {
+                  documentId,
+                  phase: 'KNOWLEDGE_EXTRACTION',
+                  itemType: 'UNCERTAINTY',
+                  data: uncertainty as object,
+                },
+              });
+              send({
+                type: 'item_extracted',
+                phase: 'KNOWLEDGE_EXTRACTION',
+                data: {
+                  id: staged.id,
+                  itemType: 'UNCERTAINTY',
+                  content: uncertainty,
+                },
+              });
+            }
+          }
+
+          send({
+            type: 'phase_complete',
+            phase: 'KNOWLEDGE_EXTRACTION',
+            data: { success: true },
+          });
         }
-
-        // Save knowledge extraction results to staged
-        if (knowledgeResult) {
-          // Save rules
-          for (const rule of knowledgeResult.rules) {
-            const staged = await prisma.stagedExtraction.create({
-              data: {
-                documentId,
-                phase: 'KNOWLEDGE_EXTRACTION',
-                itemType: 'RULE',
-                data: rule as object,
-              },
-            });
-            send({
-              type: 'item_extracted',
-              phase: 'KNOWLEDGE_EXTRACTION',
-              data: {
-                id: staged.id,
-                itemType: 'RULE',
-                content: rule,
-              },
-            });
-          }
-
-          // Save QA pairs
-          for (const qa of knowledgeResult.qaPairs) {
-            const staged = await prisma.stagedExtraction.create({
-              data: {
-                documentId,
-                phase: 'KNOWLEDGE_EXTRACTION',
-                itemType: 'QA_PAIR',
-                data: qa as object,
-              },
-            });
-            send({
-              type: 'item_extracted',
-              phase: 'KNOWLEDGE_EXTRACTION',
-              data: {
-                id: staged.id,
-                itemType: 'QA_PAIR',
-                content: qa,
-              },
-            });
-          }
-
-          // Save uncertainties
-          for (const uncertainty of knowledgeResult.uncertainties) {
-            const staged = await prisma.stagedExtraction.create({
-              data: {
-                documentId,
-                phase: 'KNOWLEDGE_EXTRACTION',
-                itemType: 'UNCERTAINTY',
-                data: uncertainty as object,
-              },
-            });
-            send({
-              type: 'item_extracted',
-              phase: 'KNOWLEDGE_EXTRACTION',
-              data: {
-                id: staged.id,
-                itemType: 'UNCERTAINTY',
-                content: uncertainty,
-              },
-            });
-          }
-        }
-
-        send({
-          type: 'phase_complete',
-          phase: 'KNOWLEDGE_EXTRACTION',
-          data: { success: true },
-        });
 
         // ========== PHASE 3: Chunking ==========
-        send({
-          type: 'phase_start',
-          phase: 'CHUNKING',
-          data: { title: 'Разбиение на чанки' },
-        });
-
-        send({
-          type: 'prompt',
-          phase: 'CHUNKING',
-          data: {
-            humanReadable: `Разбиваю документ "${document.title}" на чанки для поиска.`,
-            technical: `Размер чанка: 1000 символов\nПерекрытие: 200 символов`,
-          },
-        });
-
-        // Split into chunks (this is synchronous, no streaming)
-        const chunks = splitTextIntoChunks(document.rawText!);
-
-        // Save chunks to staged
-        for (const chunk of chunks) {
-          const staged = await prisma.stagedExtraction.create({
-            data: {
-              documentId,
-              phase: 'CHUNKING',
-              itemType: 'CHUNK',
-              data: {
-                index: chunk.index,
-                content: chunk.content,
-                metadata: chunk.metadata,
-              },
-            },
-          });
+        if (completedPhases.has('CHUNKING')) {
+          // Resume: re-emit existing results
           send({
-            type: 'item_extracted',
+            type: 'phase_start',
+            phase: 'CHUNKING',
+            data: { title: 'Разбиение на чанки (восстановлено)' },
+          });
+          
+          const existingChunks = await prisma.stagedExtraction.findMany({
+            where: { documentId, phase: 'CHUNKING' },
+          });
+          
+          for (const staged of existingChunks) {
+            const chunkData = staged.data as { index?: number; content?: string };
+            send({
+              type: 'item_extracted',
+              phase: 'CHUNKING',
+              data: {
+                id: staged.id,
+                itemType: 'CHUNK',
+                content: {
+                  index: chunkData.index,
+                  preview: (chunkData.content || '').slice(0, 100) + '...',
+                },
+              },
+            });
+          }
+          
+          send({
+            type: 'phase_complete',
+            phase: 'CHUNKING',
+            data: { success: true, chunkCount: existingChunks.length, resumed: true },
+          });
+        } else {
+          send({
+            type: 'phase_start',
+            phase: 'CHUNKING',
+            data: { title: 'Разбиение на чанки' },
+          });
+
+          send({
+            type: 'prompt',
             phase: 'CHUNKING',
             data: {
-              id: staged.id,
-              itemType: 'CHUNK',
-              content: {
-                index: chunk.index,
-                preview: chunk.content.slice(0, 100) + '...',
-              },
+              humanReadable: `Разбиваю документ "${document.title}" на чанки для поиска.`,
+              technical: `Размер чанка: 1000 символов\nПерекрытие: 200 символов`,
             },
           });
-        }
 
-        send({
-          type: 'phase_complete',
-          phase: 'CHUNKING',
-          data: { success: true, chunkCount: chunks.length },
-        });
+          // Split into chunks (this is synchronous, no streaming)
+          const chunks = splitTextIntoChunks(document.rawText!);
+
+          // Save chunks to staged
+          for (const chunk of chunks) {
+            const staged = await prisma.stagedExtraction.create({
+              data: {
+                documentId,
+                phase: 'CHUNKING',
+                itemType: 'CHUNK',
+                data: {
+                  index: chunk.index,
+                  content: chunk.content,
+                  metadata: chunk.metadata,
+                },
+              },
+            });
+            send({
+              type: 'item_extracted',
+              phase: 'CHUNKING',
+              data: {
+                id: staged.id,
+                itemType: 'CHUNK',
+                content: {
+                  index: chunk.index,
+                  preview: chunk.content.slice(0, 100) + '...',
+                },
+              },
+            });
+          }
+
+          send({
+            type: 'phase_complete',
+            phase: 'CHUNKING',
+            data: { success: true, chunkCount: chunks.length },
+          });
+        }
 
         // ========== Complete ==========
         send({
@@ -397,6 +524,7 @@ export async function GET(
           });
         }
       } finally {
+        clearInterval(heartbeatInterval);
         controller.close();
       }
     },

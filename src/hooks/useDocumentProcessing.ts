@@ -266,7 +266,7 @@ export function useDocumentProcessing(documentId: string) {
     setState(prev => ({ ...prev, isPaused: !prev.isPaused }));
   }, []);
 
-  const connectEventSource = useCallback(() => {
+  const connectEventSource = useCallback((isReconnection = false) => {
     // Don't reconnect if stopped by user
     if (isStoppedRef.current) {
       addLog('INFO', 'Не переподключаюсь - обработка остановлена пользователем');
@@ -275,7 +275,12 @@ export function useDocumentProcessing(documentId: string) {
 
     addLog('SYSTEM', 'Устанавливаю соединение с сервером...');
 
-    const eventSource = new EventSource(`/api/documents/${documentId}/process-stream`);
+    // Use resume=true for reconnections to continue from last completed phase
+    const url = isReconnection 
+      ? `/api/documents/${documentId}/process-stream?resume=true`
+      : `/api/documents/${documentId}/process-stream`;
+    
+    const eventSource = new EventSource(url);
     eventSourceRef.current = eventSource;
 
     eventSource.onopen = () => {
@@ -479,8 +484,8 @@ export function useDocumentProcessing(documentId: string) {
         reconnectTimeoutRef.current = setTimeout(() => {
           // Double-check before reconnecting
           if (!isCompleteRef.current && !hasErrorRef.current && !isStoppedRef.current) {
-            addLog('INFO', 'Переподключение...');
-            connectEventSource();
+            addLog('INFO', 'Переподключение (продолжение с сохранённого прогресса)...');
+            connectEventSource(true); // isReconnection = true to use resume mode
           } else {
             addLog('INFO', 'Переподключение отменено - статус изменился');
           }
