@@ -15,38 +15,56 @@ function getKey(): Buffer {
   return padded;
 }
 
+// URL-safe base64 encoding helpers
+function toBase64Url(buffer: Buffer): string {
+  return buffer.toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=/g, '');
+}
+
+function fromBase64Url(str: string): Buffer {
+  // Add padding back if needed
+  let padded = str.replace(/-/g, '+').replace(/_/g, '/');
+  while (padded.length % 4) padded += '=';
+  return Buffer.from(padded, 'base64');
+}
+
 export function encrypt(text: string): string {
   const iv = crypto.randomBytes(16);
   const key = getKey();
   const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
 
-  let encrypted = cipher.update(text, 'utf8', 'hex');
-  encrypted += cipher.final('hex');
+  let encrypted = cipher.update(text, 'utf8');
+  encrypted = Buffer.concat([encrypted, cipher.final()]);
 
   const authTag = cipher.getAuthTag();
 
-  // Return IV + AuthTag + Encrypted data as hex
-  return iv.toString('hex') + ':' + authTag.toString('hex') + ':' + encrypted;
+  // Combine IV + AuthTag + Encrypted data into single buffer, then base64url encode
+  const combined = Buffer.concat([iv, authTag, encrypted]);
+  return toBase64Url(combined);
 }
 
 export function decrypt(encryptedData: string): string {
-  const parts = encryptedData.split(':');
-  if (parts.length !== 3) {
-    throw new Error('Invalid encrypted data format');
+  try {
+    const combined = fromBase64Url(encryptedData);
+    
+    // IV is first 16 bytes, authTag is next 16 bytes, rest is encrypted data
+    const iv = combined.subarray(0, 16);
+    const authTag = combined.subarray(16, 32);
+    const encrypted = combined.subarray(32);
+
+    const key = getKey();
+    const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
+    decipher.setAuthTag(authTag);
+
+    let decrypted = decipher.update(encrypted);
+    decrypted = Buffer.concat([decrypted, decipher.final()]);
+
+    return decrypted.toString('utf8');
+  } catch (error) {
+    throw new Error(`Decryption failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
-
-  const iv = Buffer.from(parts[0], 'hex');
-  const authTag = Buffer.from(parts[1], 'hex');
-  const encrypted = parts[2];
-
-  const key = getKey();
-  const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
-  decipher.setAuthTag(authTag);
-
-  let decrypted = decipher.update(encrypted, 'hex', 'utf8');
-  decrypted += decipher.final('utf8');
-
-  return decrypted;
 }
 
 export function maskApiKey(key: string): string {
