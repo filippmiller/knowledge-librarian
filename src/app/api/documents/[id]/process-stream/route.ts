@@ -441,11 +441,13 @@ export async function GET(
             }
           }
 
+          console.log('[process-stream] Sending phase_complete for KNOWLEDGE_EXTRACTION...');
           send({
             type: 'phase_complete',
             phase: 'KNOWLEDGE_EXTRACTION',
             data: { success: true },
           });
+          console.log('[process-stream] phase_complete sent!');
           
           // Force garbage collection after phase 2 (most memory-intensive)
           if (global.gc) {
@@ -454,6 +456,9 @@ export async function GET(
           }
         }
 
+        console.log('[process-stream] Starting PHASE 3: CHUNKING...');
+        console.log(`[process-stream] completedPhases has CHUNKING: ${completedPhases.has('CHUNKING')}`);
+        
         // ========== PHASE 3: Chunking ==========
         if (completedPhases.has('CHUNKING')) {
           // Resume: re-emit existing results
@@ -489,11 +494,13 @@ export async function GET(
             data: { success: true, chunkCount: existingChunks.length, resumed: true },
           });
         } else {
+          console.log('[process-stream] CHUNKING not in completedPhases, starting fresh chunking...');
           send({
             type: 'phase_start',
             phase: 'CHUNKING',
             data: { title: 'Разбиение на чанки' },
           });
+          console.log('[process-stream] CHUNKING phase_start sent!');
 
           send({
             type: 'prompt',
@@ -504,8 +511,10 @@ export async function GET(
             },
           });
 
+          console.log('[process-stream] Calling splitTextIntoChunks...');
           // Split into chunks (this is synchronous, no streaming)
           const chunks = splitTextIntoChunks(document.rawText!);
+          console.log(`[process-stream] splitTextIntoChunks returned ${chunks.length} chunks`);
 
           // Save chunks to staged
           for (const chunk of chunks) {
