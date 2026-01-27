@@ -154,7 +154,8 @@ export default function DocumentProcessPage() {
   const handleCommit = useCallback(async (): Promise<{ success: boolean; error?: string; result?: unknown }> => {
     const result = await commitSelected();
     if (result.success) {
-      showToast('Данные успешно сохранены в базу знаний', 'success');
+      const message = (result.result as any)?.message || 'Данные успешно сохранены в базу знаний';
+      showToast(message, 'success');
     } else {
       showToast(result.error || 'Ошибка сохранения', 'error');
     }

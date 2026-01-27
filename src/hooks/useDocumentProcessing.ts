@@ -741,6 +741,15 @@ export function useDocumentProcessing(documentId: string) {
 
       const result = await commitResponse.json();
       addLog('SUCCESS', `✓ Успешно сохранено ${selectedIds.length} элементов в базу знаний`);
+
+      // Remove committed items from state to prevent re-saving
+      setState(prev => ({
+        ...prev,
+        extractedItems: prev.extractedItems.filter(
+          item => !selectedIds.includes(item.id)
+        ),
+      }));
+
       return { success: true, result };
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Неизвестная ошибка';

@@ -35,9 +35,21 @@ export async function POST(
     });
 
     if (verifiedItems.length === 0) {
+      console.log('[COMMIT] No verified items found - likely already saved');
       return NextResponse.json(
-        { error: 'Нет подтверждённых элементов для сохранения' },
-        { status: 400 }
+        {
+          success: true,
+          message: 'Все элементы уже сохранены',
+          results: {
+            domainsLinked: 0,
+            domainSuggestionsCreated: 0,
+            rulesCreated: 0,
+            qaPairsCreated: 0,
+            aiQuestionsCreated: 0,
+            chunksCreated: 0,
+          }
+        },
+        { status: 200 }
       );
     }
 
