@@ -154,6 +154,10 @@ export async function POST(
       results.domainSuggestionsCreated++;
     }
 
+    // Deduplicate domain IDs to prevent unique constraint violations
+    const uniqueDomainIds = [...new Set(domainIds)];
+    console.log(`[COMMIT] Deduplicated domains: ${domainIds.length} -> ${uniqueDomainIds.length} unique`);
+
     // Track rule codes for QA linking
     const ruleCodeToId = new Map<string, string>();
 
@@ -182,10 +186,19 @@ export async function POST(
 
       ruleCodeToId.set(data.ruleCode, created.id);
 
-      // Link rule to domains
-      for (const domainId of domainIds) {
-        await prisma.ruleDomain.create({
-          data: {
+      // Link rule to domains (using deduplicated list)
+      for (const domainId of uniqueDomainIds) {
+        await prisma.ruleDomain.upsert({
+          where: {
+            ruleId_domainId: {
+              ruleId: created.id,
+              domainId,
+            },
+          },
+          update: {
+            confidence: data.confidence,
+          },
+          create: {
             ruleId: created.id,
             domainId,
             confidence: data.confidence,
@@ -221,10 +234,17 @@ export async function POST(
         },
       });
 
-      // Link QA to domains
-      for (const domainId of domainIds) {
-        await prisma.qADomain.create({
-          data: {
+      // Link QA to domains (using deduplicated list)
+      for (const domainId of uniqueDomainIds) {
+        await prisma.qADomain.upsert({
+          where: {
+            qaId_domainId: {
+              qaId: created.id,
+              domainId,
+            },
+          },
+          update: {},
+          create: {
             qaId: created.id,
             domainId,
           },
@@ -295,10 +315,17 @@ export async function POST(
           },
         });
 
-        // Link chunk to domains
-        for (const domainId of domainIds) {
-          await prisma.chunkDomain.create({
-            data: {
+        // Link chunk to domains (using deduplicated list)
+        for (const domainId of uniqueDomainIds) {
+          await prisma.chunkDomain.upsert({
+            where: {
+              chunkId_domainId: {
+                chunkId: created.id,
+                domainId,
+              },
+            },
+            update: {},
+            create: {
               chunkId: created.id,
               domainId,
             },
