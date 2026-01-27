@@ -70,11 +70,14 @@ export function normalizeJsonResponse(raw: string): string {
   let trimmed = raw.trim();
   if (!trimmed) return '{}';
 
-  // Handle markdown blocks
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  // Handle markdown blocks (various formats: ```json, ***json, **json, *json, etc.)
+  const fenced = trimmed.match(/[`*]{2,}(?:json)?\s*([\s\S]*?)\s*[`*]{2,}/i);
   if (fenced) {
     trimmed = fenced[1].trim();
   }
+  
+  // Also handle cases where markdown tag is at start but not closed (e.g., "***json {...")
+  trimmed = trimmed.replace(/^[`*]{1,}(?:json)?\s*/i, '');
 
   // Find the first JSON-like start
   const startIndex = trimmed.search(/[{[]/);
