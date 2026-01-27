@@ -32,10 +32,12 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 export function splitTextIntoChunks(text: string): TextChunk[] {
+  console.log(`[Chunker] splitTextIntoChunks called with ${text.length} chars`);
   const chunks: TextChunk[] = [];
   let startChar = 0;
   let index = 0;
 
+  console.log(`[Chunker] Starting while loop...`);
   // Process text in streaming fashion to reduce memory pressure
   while (startChar < text.length) {
     let endChar = startChar + CHUNK_SIZE;
@@ -82,7 +84,8 @@ export function splitTextIntoChunks(text: string): TextChunk[] {
     }
   }
 
-  console.log(`[Chunker] Created ${chunks.length} chunks from ${text.length} characters`);
+  console.log(`[Chunker] While loop complete. Created ${chunks.length} chunks from ${text.length} characters`);
+  console.log(`[Chunker] Returning chunks array...`);
   return chunks;
 }
 
