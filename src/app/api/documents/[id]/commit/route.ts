@@ -53,10 +53,13 @@ export async function POST(
     // Collect domain IDs for linking rules and QAs
     const domainIds: string[] = [];
 
+    console.log(`[COMMIT] Processing ${verifiedItems.length} verified items`);
+
     // Process domain assignments
     const domainAssignments = verifiedItems.filter(
       (i) => i.itemType === 'DOMAIN_ASSIGNMENT'
     );
+    console.log(`[COMMIT] Found ${domainAssignments.length} domain assignments`);
     for (const item of domainAssignments) {
       const data = item.data as {
         primaryDomainSlug: string;
@@ -156,6 +159,7 @@ export async function POST(
 
     // Process rules
     const rules = verifiedItems.filter((i) => i.itemType === 'RULE');
+    console.log(`[COMMIT] Found ${rules.length} rules to process`);
     for (const item of rules) {
       const data = item.data as {
         ruleCode: string;
@@ -192,8 +196,11 @@ export async function POST(
       results.rulesCreated++;
     }
 
+    console.log(`[COMMIT] Completed rules: ${results.rulesCreated}`);
+
     // Process QA pairs
     const qaPairs = verifiedItems.filter((i) => i.itemType === 'QA_PAIR');
+    console.log(`[COMMIT] Found ${qaPairs.length} QA pairs to process`);
     for (const item of qaPairs) {
       const data = item.data as {
         question: string;
@@ -227,6 +234,8 @@ export async function POST(
       results.qaPairsCreated++;
     }
 
+    console.log(`[COMMIT] Completed QA pairs: ${results.qaPairsCreated}`);
+
     // Process uncertainties
     const uncertainties = verifiedItems.filter((i) => i.itemType === 'UNCERTAINTY');
     for (const item of uncertainties) {
@@ -246,19 +255,26 @@ export async function POST(
       results.aiQuestionsCreated++;
     }
 
+    console.log(`[COMMIT] Completed AI questions: ${results.aiQuestionsCreated}`);
+
     // Process chunks in batches to avoid memory issues
     const chunks = verifiedItems.filter((i) => i.itemType === 'CHUNK');
+    console.log(`[COMMIT] Found ${chunks.length} chunks to process`);
     const CHUNK_BATCH_SIZE = 5;
 
     for (let batchStart = 0; batchStart < chunks.length; batchStart += CHUNK_BATCH_SIZE) {
       const batchEnd = Math.min(batchStart + CHUNK_BATCH_SIZE, chunks.length);
       const batchChunks = chunks.slice(batchStart, batchEnd);
 
+      console.log(`[COMMIT] Processing chunk batch ${Math.floor(batchStart / CHUNK_BATCH_SIZE) + 1}/${Math.ceil(chunks.length / CHUNK_BATCH_SIZE)}`);
+
       // Generate embeddings for this batch only
       const batchContents = batchChunks.map(
         (c) => (c.data as { content: string }).content
       );
+      console.log(`[COMMIT] Generating embeddings for ${batchContents.length} chunks...`);
       const batchEmbeddings = await generateEmbeddings(batchContents);
+      console.log(`[COMMIT] Generated ${batchEmbeddings.length} embeddings`);
 
       // Save batch to database immediately
       for (let i = 0; i < batchChunks.length; i++) {
@@ -313,9 +329,18 @@ export async function POST(
       results,
     });
   } catch (error) {
-    console.error('Error committing staged data:', error);
+    console.error('[COMMIT ERROR] Full error details:', error);
+    console.error('[COMMIT ERROR] Error name:', error instanceof Error ? error.name : 'Unknown');
+    console.error('[COMMIT ERROR] Error message:', error instanceof Error ? error.message : String(error));
+    console.error('[COMMIT ERROR] Error stack:', error instanceof Error ? error.stack : 'No stack');
+
+    const errorMessage = error instanceof Error ? error.message : String(error);
     return NextResponse.json(
-      { error: 'Не удалось сохранить данные' },
+      {
+        error: 'Не удалось сохранить данные',
+        details: errorMessage,
+        phase: 'commit'
+      },
       { status: 500 }
     );
   }
