@@ -63,39 +63,48 @@ function chunkText(text: string, size: number) {
   return chunks;
 }
 
-function normalizeJsonResponse(raw: string): string {
-  const trimmed = raw.trim();
+/**
+ * Robustly normalize and parse JSON from AI responses, even if truncated or wrapped in markdown.
+ */
+export function normalizeJsonResponse(raw: string): string {
+  let trimmed = raw.trim();
   if (!trimmed) return '{}';
 
+  // Handle markdown blocks
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
   if (fenced) {
-    return normalizeJsonCandidate(extractJsonSubstring(fenced[1].trim()));
+    trimmed = fenced[1].trim();
   }
-  return normalizeJsonCandidate(extractJsonSubstring(trimmed));
+
+  // Find the first JSON-like start
+  const startIndex = trimmed.search(/[{[]/);
+  if (startIndex === -1) return '{}';
+  trimmed = trimmed.slice(startIndex);
+
+  // Attempt to fix truncated JSON by closing open brackets/braces
+  const balanced = balanceJson(trimmed);
+
+  const sanitized = coerceJsonSyntax(balanced);
+  return sanitized;
 }
 
-function extractJsonSubstring(raw: string): string {
-  const startIndex = raw.search(/[{[]/);
-  if (startIndex === -1) return raw.trim();
-
-  const stack: string[] = [];
+function balanceJson(json: string): string {
+  const stack: ('{' | '[')[] = [];
   let inString = false;
   let escaped = false;
+  let lastValidIndex = 0;
 
-  for (let i = startIndex; i < raw.length; i += 1) {
-    const char = raw[i];
+  for (let i = 0; i < json.length; i++) {
+    const char = json[i];
 
     if (inString) {
       if (escaped) {
         escaped = false;
-        continue;
-      }
-      if (char === '\\') {
+      } else if (char === '\\') {
         escaped = true;
-        continue;
-      }
-      if (char === '"') {
+      } else if (char === '"') {
         inString = false;
+        lastValidIndex = i + 1;
       }
       continue;
     }
@@ -107,6 +116,7 @@ function extractJsonSubstring(raw: string): string {
 
     if (char === '{' || char === '[') {
       stack.push(char);
+      lastValidIndex = i + 1;
       continue;
     }
 
@@ -114,38 +124,51 @@ function extractJsonSubstring(raw: string): string {
       const last = stack[stack.length - 1];
       if ((char === '}' && last === '{') || (char === ']' && last === '[')) {
         stack.pop();
-        if (stack.length === 0) {
-          return raw.slice(startIndex, i + 1).trim();
-        }
+        lastValidIndex = i + 1;
       }
+      continue;
+    }
+
+    if (/\s/.test(char) || char === ',' || char === ':' || /[0-9.-]/.test(char) || char === 't' || char === 'f' || char === 'n') {
+      // Potentially valid middle characters, though basic check
     }
   }
 
-  return raw.slice(startIndex).trim();
-}
+  let result = json.slice(0, lastValidIndex);
 
-function normalizeJsonCandidate(candidate: string): string {
-  const cleaned = candidate.trim();
-  if (!cleaned) return cleaned;
-
-  const sanitized = coerceJsonSyntax(cleaned);
-  try {
-    const parsed = JSON.parse(sanitized);
-    if (!parsed || typeof parsed !== 'object') {
-      return '{}';
-    }
-    return JSON.stringify(parsed);
-  } catch {
-    return '{}';
+  // If we are still in a string, close it
+  if (inString) {
+    result += '"';
   }
+
+  // Close remaining open structures in reverse order
+  for (let i = stack.length - 1; i >= 0; i--) {
+    result += stack[i] === '{' ? '}' : ']';
+  }
+
+  return result;
 }
 
 function coerceJsonSyntax(candidate: string): string {
-  return candidate
-    .replace(/,\s*([}\]])/g, '$1')
-    .replace(/([,{]\s*)'([^']+?)'\s*:/g, '$1"$2":')
-    .replace(/:\s*'([^']*?)'/g, ': "$1"')
-    .replace(/([{,]\s*)([A-Za-z0-9_]+)\s*:/g, '$1"$2":');
+  try {
+    // Try to parse as-is first
+    JSON.parse(candidate);
+    return candidate;
+  } catch {
+    // Basic cleanup and try again
+    const sanitized = candidate
+      .replace(/,\s*([}\]])/g, '$1')
+      .replace(/([,{]\s*)'([^']+?)'\s*:/g, '$1"$2":')
+      .replace(/:\s*'([^']*?)'/g, ': "$1"')
+      .replace(/([{,]\s*)([A-Za-z0-9_]+)\s*:/g, '$1"$2":');
+
+    try {
+      JSON.parse(sanitized);
+      return sanitized;
+    } catch {
+      return '{}';
+    }
+  }
 }
 
 export async function createChatCompletion(

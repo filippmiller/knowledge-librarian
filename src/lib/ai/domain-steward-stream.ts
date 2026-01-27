@@ -140,6 +140,7 @@ ${documentText.slice(0, 8000)}
     messages,
     temperature: 0.3,
     responseFormat: 'json_object',
+    maxTokens: 2048,
   });
 
   let fullContent = '';
@@ -153,7 +154,9 @@ ${documentText.slice(0, 8000)}
 
   // Parse the final result
   try {
-    const result = JSON.parse(fullContent) as Partial<DomainStewardStreamResult>;
+    const { normalizeJsonResponse } = await import('@/lib/ai/chat-provider');
+    const cleaned = normalizeJsonResponse(fullContent);
+    const result = JSON.parse(cleaned) as Partial<DomainStewardStreamResult>;
     if (
       !result ||
       !Array.isArray(result.documentDomains) ||
@@ -164,7 +167,7 @@ ${documentText.slice(0, 8000)}
     }
     yield { type: 'result', data: result as DomainStewardStreamResult };
   } catch (error) {
-    throw new Error(`Не удалось распарсить ответ: ${fullContent.slice(0, 200)}`);
+    throw new Error(`Не удалось распарсить ответ: ${fullContent.slice(0, 200)}... Ошибка: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -177,4 +180,3 @@ export async function getExistingDomainsForStream() {
     },
   });
 }
-

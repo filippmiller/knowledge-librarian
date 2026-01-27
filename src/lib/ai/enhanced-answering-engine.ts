@@ -115,6 +115,7 @@ const ENHANCED_ANSWERING_PROMPT = `Ты - ИИ-библиотекарь знан
 - Упомяни исключения, если есть`;
 
 async function classifyIntent(question: string): Promise<IntentClassification> {
+  const { createChatCompletion, normalizeJsonResponse } = await import('@/lib/ai/chat-provider');
   const content = await createChatCompletion({
     messages: [
       { role: 'system', content: INTENT_CLASSIFIER_PROMPT },
@@ -122,13 +123,15 @@ async function classifyIntent(question: string): Promise<IntentClassification> {
     ],
     responseFormat: 'json_object',
     temperature: 0.1,
+    maxTokens: 1024,
   });
   if (!content) {
     return { intent: 'general_info', domains: [], confidence: 0.5 };
   }
 
   try {
-    const parsed = JSON.parse(content) as Partial<IntentClassification>;
+    const cleaned = normalizeJsonResponse(content);
+    const parsed = JSON.parse(cleaned) as Partial<IntentClassification>;
     const intent = typeof parsed.intent === 'string' ? parsed.intent : 'general_info';
     const domains = Array.isArray(parsed.domains)
       ? parsed.domains.filter((domain) => typeof domain === 'string')
@@ -300,8 +303,8 @@ ${needsClarification ? 'РЕКОМЕНДУЕТСЯ УТОЧНЕНИЕ' : ''}`;
 ${context}
 
 ${confidenceLevel === 'insufficient'
-  ? 'Информации недостаточно. Ответь, что не нашёл релевантной информации, и предложи уточнить вопрос.'
-  : 'Предоставь полезный ответ на основе ТОЛЬКО приведённых знаний.'}`,
+              ? 'Информации недостаточно. Ответь, что не нашёл релевантной информации, и предложи уточнить вопрос.'
+              : 'Предоставь полезный ответ на основе ТОЛЬКО приведённых знаний.'}`,
         },
       ],
       temperature: 0.3,
@@ -446,6 +449,7 @@ async function checkIfFollowUp(
   question: string,
   context: string
 ): Promise<{ isFollowUp: boolean; expandedQuestion?: string }> {
+  const { createChatCompletion, normalizeJsonResponse } = await import('@/lib/ai/chat-provider');
   const content = await createChatCompletion({
     messages: [
       {
@@ -469,11 +473,13 @@ ${context}
     ],
     responseFormat: 'json_object',
     temperature: 0.1,
+    maxTokens: 1024,
   });
   if (!content) return { isFollowUp: false };
 
   try {
-    const parsed = JSON.parse(content) as {
+    const cleaned = normalizeJsonResponse(content);
+    const parsed = JSON.parse(cleaned) as {
       isFollowUp?: boolean;
       expandedQuestion?: string | null;
     };

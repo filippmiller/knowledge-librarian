@@ -143,6 +143,7 @@ ${documentText.slice(0, 12000)}
     messages,
     temperature: 0.2,
     responseFormat: 'json_object',
+    maxTokens: 4096,
   });
 
   let fullContent = '';
@@ -156,7 +157,9 @@ ${documentText.slice(0, 12000)}
 
   // Parse the final result
   try {
-    const result = JSON.parse(fullContent) as Partial<KnowledgeExtractionStreamResult>;
+    const { normalizeJsonResponse } = await import('@/lib/ai/chat-provider');
+    const cleaned = normalizeJsonResponse(fullContent);
+    const result = JSON.parse(cleaned) as Partial<KnowledgeExtractionStreamResult>;
     if (
       !result ||
       !Array.isArray(result.rules) ||
@@ -167,7 +170,7 @@ ${documentText.slice(0, 12000)}
     }
     yield { type: 'result', data: result as KnowledgeExtractionStreamResult };
   } catch (error) {
-    throw new Error(`Не удалось распарсить ответ: ${fullContent.slice(0, 200)}`);
+    throw new Error(`Не удалось распарсить ответ: ${fullContent.slice(0, 200)}... Ошибка: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
