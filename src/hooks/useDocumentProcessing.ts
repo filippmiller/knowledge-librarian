@@ -266,7 +266,33 @@ export function useDocumentProcessing(documentId: string) {
     setState(prev => ({ ...prev, isPaused: !prev.isPaused }));
   }, []);
 
-  const connectEventSource = useCallback((isReconnection = false) => {
+  // Store token for reconnections
+  const tokenRef = useRef<string | null>(null);
+
+  const fetchProcessingToken = useCallback(async (): Promise<string | null> => {
+    try {
+      addLog('DEBUG', 'Получаю токен для SSE соединения...');
+      const response = await fetch(`/api/documents/${documentId}/token`, {
+        method: 'POST',
+        credentials: 'include', // Include Basic Auth credentials
+      });
+      
+      if (!response.ok) {
+        addLog('ERROR', `Не удалось получить токен: ${response.status}`);
+        return null;
+      }
+      
+      const data = await response.json();
+      tokenRef.current = data.token;
+      addLog('DEBUG', 'Токен получен успешно');
+      return data.token;
+    } catch (error) {
+      addLog('ERROR', `Ошибка получения токена: ${error}`);
+      return null;
+    }
+  }, [documentId, addLog]);
+
+  const connectEventSource = useCallback(async (isReconnection = false) => {
     // Don't reconnect if stopped by user
     if (isStoppedRef.current) {
       addLog('INFO', 'Не переподключаюсь - обработка остановлена пользователем');
@@ -275,10 +301,29 @@ export function useDocumentProcessing(documentId: string) {
 
     addLog('SYSTEM', 'Устанавливаю соединение с сервером...');
 
-    // Use resume=true for reconnections to continue from last completed phase
-    const url = isReconnection 
-      ? `/api/documents/${documentId}/process-stream?resume=true`
-      : `/api/documents/${documentId}/process-stream`;
+    // Get token for SSE auth (reuse existing token for reconnections)
+    let token = tokenRef.current;
+    if (!token || !isReconnection) {
+      token = await fetchProcessingToken();
+      if (!token) {
+        addLog('ERROR', 'Не удалось установить соединение: ошибка авторизации');
+        setState(prev => ({ 
+          ...prev, 
+          error: 'Ошибка авторизации. Обновите страницу и попробуйте снова.',
+          isProcessing: false 
+        }));
+        hasErrorRef.current = true;
+        return;
+      }
+    }
+
+    // Build URL with token and resume flag
+    const params = new URLSearchParams();
+    params.set('token', token);
+    if (isReconnection) {
+      params.set('resume', 'true');
+    }
+    const url = `/api/documents/${documentId}/process-stream?${params.toString()}`;
     
     const eventSource = new EventSource(url);
     eventSourceRef.current = eventSource;
@@ -481,11 +526,11 @@ export function useDocumentProcessing(documentId: string) {
 
         addLog('WARNING', `Соединение потеряно. Попытка ${reconnectAttemptsRef.current}/${maxAttempts} через ${delay/1000}с...`);
 
-        reconnectTimeoutRef.current = setTimeout(() => {
+        reconnectTimeoutRef.current = setTimeout(async () => {
           // Double-check before reconnecting
           if (!isCompleteRef.current && !hasErrorRef.current && !isStoppedRef.current) {
             addLog('INFO', 'Переподключение (продолжение с сохранённого прогресса)...');
-            connectEventSource(true); // isReconnection = true to use resume mode
+            await connectEventSource(true); // isReconnection = true to use resume mode
           } else {
             addLog('INFO', 'Переподключение отменено - статус изменился');
           }
@@ -580,16 +625,15 @@ export function useDocumentProcessing(documentId: string) {
     addLog('SYSTEM', `  Started: ${new Date().toLocaleString('ru-RU')}`);
     addLog('SYSTEM', '═══════════════════════════════════════════════════════════════');
 
-    try {
-      connectEventSource();
-    } catch (err) {
+    // Connect EventSource (async)
+    connectEventSource().catch((err) => {
       setState((prev) => ({
         ...prev,
         isProcessing: false,
         error: err instanceof Error ? err.message : 'Неизвестная ошибка',
       }));
       addLog('ERROR', `Критическая ошибка: ${err}`);
-    }
+    });
   }, [documentId, addLog, connectEventSource]);
 
   const stopProcessing = useCallback(async () => {

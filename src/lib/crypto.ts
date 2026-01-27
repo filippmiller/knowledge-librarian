@@ -53,3 +53,45 @@ export function maskApiKey(key: string): string {
   if (!key || key.length < 8) return '****';
   return key.slice(0, 7) + '...' + key.slice(-4);
 }
+
+// Processing token for SSE authentication
+// Token is valid for 10 minutes and tied to a specific document
+
+interface ProcessingTokenPayload {
+  documentId: string;
+  exp: number; // expiration timestamp
+  nonce: string;
+}
+
+const TOKEN_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
+
+export function createProcessingToken(documentId: string): string {
+  const payload: ProcessingTokenPayload = {
+    documentId,
+    exp: Date.now() + TOKEN_EXPIRY_MS,
+    nonce: crypto.randomBytes(8).toString('hex'),
+  };
+  
+  return encrypt(JSON.stringify(payload));
+}
+
+export function verifyProcessingToken(token: string, expectedDocumentId: string): { valid: boolean; error?: string } {
+  try {
+    const decrypted = decrypt(token);
+    const payload: ProcessingTokenPayload = JSON.parse(decrypted);
+    
+    // Check expiration
+    if (Date.now() > payload.exp) {
+      return { valid: false, error: 'Token expired' };
+    }
+    
+    // Check document ID matches
+    if (payload.documentId !== expectedDocumentId) {
+      return { valid: false, error: 'Token document mismatch' };
+    }
+    
+    return { valid: true };
+  } catch (error) {
+    return { valid: false, error: 'Invalid token' };
+  }
+}

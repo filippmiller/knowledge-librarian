@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import prisma from '@/lib/db';
 import { requireAdminAuth } from '@/lib/auth';
+import { verifyProcessingToken } from '@/lib/crypto';
 import {
   streamDomainClassification,
   getExistingDomainsForStream,
@@ -65,13 +66,30 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ): Promise<Response> {
-  const authError = await requireAdminAuth(request);
-  if (authError) return authError;
-
   const { id: documentId } = await params;
   
-  // Check for resume mode (reconnection should resume, not restart)
+  // Check for token-based auth (used by EventSource which can't send headers)
   const url = new URL(request.url);
+  const token = url.searchParams.get('token');
+  
+  if (token) {
+    // Token-based authentication for SSE
+    const tokenResult = verifyProcessingToken(token, documentId);
+    if (!tokenResult.valid) {
+      console.error('[process-stream] Token auth failed:', tokenResult.error);
+      return new Response(JSON.stringify({ error: `Auth failed: ${tokenResult.error}` }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    console.log('[process-stream] Token auth successful for document:', documentId);
+  } else {
+    // Fall back to Basic Auth for direct API calls
+    const authError = await requireAdminAuth(request);
+    if (authError) return authError;
+  }
+  
+  // Check for resume mode (reconnection should resume, not restart)
   const shouldResume = url.searchParams.get('resume') === 'true';
 
   // Check if document exists
