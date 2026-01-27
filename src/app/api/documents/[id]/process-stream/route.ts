@@ -368,8 +368,12 @@ export async function GET(
 
           // Save knowledge extraction results to staged
           if (knowledgeResult) {
+            console.log(`[process-stream] Saving ${knowledgeResult.rules.length} rules to staged...`);
+            
             // Save rules
-            for (const rule of knowledgeResult.rules) {
+            for (let i = 0; i < knowledgeResult.rules.length; i++) {
+              const rule = knowledgeResult.rules[i];
+              console.log(`[process-stream] Saving rule ${i + 1}/${knowledgeResult.rules.length}: ${rule.ruleCode}`);
               const staged = await prisma.stagedExtraction.create({
                 data: {
                   documentId,
@@ -389,8 +393,11 @@ export async function GET(
               });
             }
 
+            console.log(`[process-stream] Rules saved! Now saving ${knowledgeResult.qaPairs.length} QA pairs...`);
+            
             // Save QA pairs
-            for (const qa of knowledgeResult.qaPairs) {
+            for (let i = 0; i < knowledgeResult.qaPairs.length; i++) {
+              const qa = knowledgeResult.qaPairs[i];
               const staged = await prisma.stagedExtraction.create({
                 data: {
                   documentId,
@@ -410,6 +417,8 @@ export async function GET(
               });
             }
 
+            console.log(`[process-stream] QA pairs saved! Now saving ${knowledgeResult.uncertainties.length} uncertainties...`);
+            
             // Save uncertainties
             for (const uncertainty of knowledgeResult.uncertainties) {
               const staged = await prisma.stagedExtraction.create({
