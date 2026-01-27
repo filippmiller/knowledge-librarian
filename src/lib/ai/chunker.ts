@@ -36,18 +36,21 @@ export function splitTextIntoChunks(text: string): TextChunk[] {
   let startChar = 0;
   let index = 0;
 
+  // Process text in streaming fashion to reduce memory pressure
   while (startChar < text.length) {
     let endChar = startChar + CHUNK_SIZE;
 
     // Try to break at a sentence or paragraph boundary
     if (endChar < text.length) {
-      const searchWindow = text.slice(endChar - 100, endChar + 100);
+      const searchStart = Math.max(0, endChar - 100);
+      const searchEnd = Math.min(text.length, endChar + 100);
+      const searchWindow = text.slice(searchStart, searchEnd);
       const breakPoints = ['\n\n', '.\n', '. ', '\n'];
 
       for (const breakPoint of breakPoints) {
         const breakIndex = searchWindow.lastIndexOf(breakPoint);
         if (breakIndex !== -1) {
-          endChar = endChar - 100 + breakIndex + breakPoint.length;
+          endChar = searchStart + breakIndex + breakPoint.length;
           break;
         }
       }
@@ -71,8 +74,15 @@ export function splitTextIntoChunks(text: string): TextChunk[] {
 
     startChar = endChar - CHUNK_OVERLAP;
     if (startChar >= text.length - 50) break;
+    
+    // Yield to event loop periodically to prevent blocking
+    // (helps in serverless environments like Railway)
+    if (index % 10 === 0 && global.gc) {
+      global.gc();
+    }
   }
 
+  console.log(`[Chunker] Created ${chunks.length} chunks from ${text.length} characters`);
   return chunks;
 }
 

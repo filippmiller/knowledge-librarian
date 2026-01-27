@@ -277,6 +277,12 @@ export async function GET(
             phase: 'DOMAIN_CLASSIFICATION',
             data: { success: true },
           });
+          
+          // Force garbage collection after phase 1
+          if (global.gc) {
+            global.gc();
+            console.log('[process-stream] Forced GC after DOMAIN_CLASSIFICATION');
+          }
         }
 
         // ========== PHASE 2: Knowledge Extraction ==========
@@ -332,7 +338,7 @@ export async function GET(
             },
           });
 
-          // Stream knowledge extraction
+          // Stream knowledge extraction (now with batch processing)
           let knowledgeResult: KnowledgeExtractionStreamResult | null = null;
           for await (const event of streamKnowledgeExtraction(
             document.rawText!,
@@ -344,10 +350,21 @@ export async function GET(
                 phase: 'KNOWLEDGE_EXTRACTION',
                 data: event.data,
               });
+            } else if (event.type === 'batch_progress') {
+              // Report batch progress to client
+              const progressData = event.data as { current: number; total: number };
+              send({
+                type: 'token',
+                phase: 'KNOWLEDGE_EXTRACTION',
+                data: `\n[Batch ${progressData.current}/${progressData.total}]\n`,
+              });
+              console.log(`[process-stream] Knowledge extraction batch ${progressData.current}/${progressData.total}`);
             } else if (event.type === 'result') {
               knowledgeResult = event.data as KnowledgeExtractionStreamResult;
             }
           }
+          
+          console.log(`[process-stream] Knowledge extraction complete: ${knowledgeResult?.rules.length || 0} rules, ${knowledgeResult?.qaPairs.length || 0} QAs`);
 
           // Save knowledge extraction results to staged
           if (knowledgeResult) {
@@ -420,6 +437,12 @@ export async function GET(
             phase: 'KNOWLEDGE_EXTRACTION',
             data: { success: true },
           });
+          
+          // Force garbage collection after phase 2 (most memory-intensive)
+          if (global.gc) {
+            global.gc();
+            console.log('[process-stream] Forced GC after KNOWLEDGE_EXTRACTION');
+          }
         }
 
         // ========== PHASE 3: Chunking ==========
@@ -508,6 +531,12 @@ export async function GET(
             phase: 'CHUNKING',
             data: { success: true, chunkCount: chunks.length },
           });
+          
+          // Force garbage collection after phase 3
+          if (global.gc) {
+            global.gc();
+            console.log('[process-stream] Forced GC after CHUNKING');
+          }
         }
 
         // ========== Complete ==========
