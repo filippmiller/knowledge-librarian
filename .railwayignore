@@ -1,0 +1,7 @@
+﻿# Ignore problematic files
+nul
+NUL
+*.log
+node_modules
+.next
+test-results
