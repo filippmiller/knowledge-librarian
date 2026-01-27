@@ -1,4 +1,4 @@
-import { createChatCompletion } from '@/lib/ai/chat-provider';
+import { createChatCompletion, normalizeJsonResponse } from '@/lib/ai/chat-provider';
 import prisma from '@/lib/db';
 
 export interface DomainClassification {
@@ -67,46 +67,48 @@ export async function classifyDocumentDomains(
       { role: 'system', content: DOMAIN_STEWARD_SYSTEM_PROMPT },
       {
         role: 'user',
-        content: `Analyze this document and classify it into appropriate domains.
+        content: `Проанализируй этот документ и классифицируй его по подходящим доменам.
 
-Available domains:
+Доступные домены:
 ${domainList}
 
-Document content:
+Содержимое документа:
 ${documentText.slice(0, 8000)}
 
-Respond with JSON in this exact format:
+Ответь в формате JSON точно по этой схеме:
 {
   "documentDomains": [
     {
-      "primaryDomainSlug": "string",
-      "secondaryDomainSlugs": ["string"],
+      "primaryDomainSlug": "строка",
+      "secondaryDomainSlugs": ["строка"],
       "confidence": 0.0-1.0,
-      "reason": "string"
+      "reason": "строка на русском языке"
     }
   ],
   "newDomainSuggestions": [
     {
-      "suggestedSlug": "string",
-      "title": "string",
-      "description": "string",
-      "parentSlug": "string or null",
+      "suggestedSlug": "строка",
+      "title": "строка на русском",
+      "description": "строка на русском",
+      "parentSlug": "строка или null",
       "confidence": 0.0-1.0,
-      "reason": "string"
+      "reason": "строка на русском языке"
     }
   ],
-  "questionsForHuman": ["string"]
+  "questionsForHuman": ["строка на русском"]
 }`,
       },
     ],
     responseFormat: 'json_object',
     temperature: 0.3,
+    maxTokens: 2048,
   });
   if (!content) {
     throw new Error('Empty response from Domain Steward');
   }
 
-  const result = JSON.parse(content) as Partial<DomainStewardResult>;
+  const cleaned = normalizeJsonResponse(content);
+  const result = JSON.parse(cleaned) as Partial<DomainStewardResult>;
   if (
     !result ||
     !Array.isArray(result.documentDomains) ||

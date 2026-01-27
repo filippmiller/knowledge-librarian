@@ -48,3 +48,13 @@ next-env.d.ts
 # Playwright
 test-results/
 playwright-report/
+.env
+.env.*
+*.p12
+*.key
+*.crt
+credentials*.json
+service-account*.json
+sessions/
+logs/
+*.log

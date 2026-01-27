@@ -1,4 +1,4 @@
-import { createChatCompletion } from '@/lib/ai/chat-provider';
+import { createChatCompletion, normalizeJsonResponse } from '@/lib/ai/chat-provider';
 import prisma from '@/lib/db';
 
 export interface ExtractedRule {
@@ -72,38 +72,38 @@ export async function extractKnowledge(
       { role: 'system', content: EXTRACTION_SYSTEM_PROMPT },
       {
         role: 'user',
-        content: `Extract knowledge from this document.
-Start rule numbering from R-${startCode}.
+        content: `Извлеки знания из этого документа.
+Начни нумерацию правил с R-${startCode}.
 
-Document content:
+Содержимое документа:
 ${documentText.slice(0, 12000)}
 
-Respond with JSON in this exact format:
+Ответь в формате JSON точно по этой схеме:
 {
   "rules": [
     {
       "ruleCode": "R-${startCode}",
-      "title": "Short descriptive title",
-      "body": "Full rule description",
+      "title": "Краткое название правила на русском",
+      "body": "Полное описание правила на русском",
       "confidence": 0.0-1.0,
       "sourceSpan": {
-        "quote": "Exact quote from document",
-        "locationHint": "Section or context"
+        "quote": "Точная цитата из документа",
+        "locationHint": "Раздел или контекст"
       }
     }
   ],
   "qaPairs": [
     {
-      "question": "Natural question",
-      "answer": "Clear answer based on extracted rules",
-      "linkedRuleCode": "R-X or null"
+      "question": "Вопрос на русском",
+      "answer": "Чёткий ответ на русском на основе извлечённых правил",
+      "linkedRuleCode": "R-X или null"
     }
   ],
   "uncertainties": [
     {
       "type": "ambiguous|outdated|conflicting|missing_context",
-      "description": "What is uncertain",
-      "suggestedQuestion": "Question to ask the admin"
+      "description": "Описание неясности на русском",
+      "suggestedQuestion": "Вопрос администратору на русском"
     }
   ]
 }`,
@@ -111,12 +111,14 @@ Respond with JSON in this exact format:
     ],
     responseFormat: 'json_object',
     temperature: 0.2,
+    maxTokens: 4096,
   });
   if (!content) {
     throw new Error('Empty response from Knowledge Extractor');
   }
 
-  const result = JSON.parse(content) as Partial<KnowledgeExtractionResult>;
+  const cleaned = normalizeJsonResponse(content);
+  const result = JSON.parse(cleaned) as Partial<KnowledgeExtractionResult>;
   if (
     !result ||
     !Array.isArray(result.rules) ||
