@@ -5,9 +5,9 @@ import path from 'path';
 test.describe('Production Document Upload Test', () => {
   test.use({
     baseURL: 'https://avrora-library-production.up.railway.app',
-    // Set up HTTP Basic Auth
+    // Set up HTTP Basic Auth (usernames from prisma/seed.ts)
     httpCredentials: {
-      username: 'filippmiller@gmail.com',
+      username: 'filipp',
       password: 'Airbus380+',
     },
   });

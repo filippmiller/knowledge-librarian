@@ -87,7 +87,8 @@ export function splitTextIntoChunks(text: string): TextChunk[] {
 }
 
 // Process embeddings in small batches to avoid memory issues
-const EMBEDDING_BATCH_SIZE = 5;
+// Reduced for Railway free tier
+const EMBEDDING_BATCH_SIZE = 3;
 
 export async function createDocumentChunks(
   documentId: string,

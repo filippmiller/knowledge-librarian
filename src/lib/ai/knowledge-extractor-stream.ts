@@ -89,8 +89,9 @@ ${documentText.slice(0, 500)}${documentText.length > 500 ? '...' : ''}
 }
 
 // Memory-efficient batch processing constants
-const BATCH_SIZE = 3000; // Process 3000 characters at a time to avoid OOM
-const BATCH_OVERLAP = 300; // Overlap to avoid missing rules at boundaries
+// Ultra-conservative for Railway free tier (512MB RAM)
+const BATCH_SIZE = 2000; // Process 2000 characters at a time to avoid OOM
+const BATCH_OVERLAP = 200; // Overlap to avoid missing rules at boundaries
 
 export async function* streamKnowledgeExtraction(
   documentText: string,
