@@ -74,6 +74,12 @@ export function splitTextIntoChunks(text: string): TextChunk[] {
       index++;
     }
 
+    // If we reached the end of text, break to avoid infinite loop
+    if (endChar >= text.length) {
+      console.log(`[Chunker] Reached end of text, breaking loop`);
+      break;
+    }
+    
     startChar = endChar - CHUNK_OVERLAP;
     if (startChar >= text.length - 50) break;
     
