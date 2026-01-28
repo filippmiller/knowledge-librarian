@@ -24,7 +24,7 @@ export interface HybridSearchResult extends SearchResult {
 }
 
 /**
- * Check if pgvector extension is available
+ * Check if pgvector extension AND embeddingVector column are available
  */
 let pgvectorAvailable: boolean | null = null;
 
@@ -32,13 +32,46 @@ async function checkPgvectorAvailable(): Promise<boolean> {
   if (pgvectorAvailable !== null) return pgvectorAvailable;
 
   try {
-    await prisma.$queryRaw`SELECT 1 FROM pg_extension WHERE extname = 'vector'`;
+    // Check both: extension exists AND column exists
+    const extCheck = await prisma.$queryRaw<Array<{ exists: boolean }>>`
+      SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'vector') as exists
+    `;
+    
+    if (!extCheck[0]?.exists) {
+      console.log('[vector-search] pgvector extension not found, using in-memory search');
+      pgvectorAvailable = false;
+      return false;
+    }
+
+    // Check if embeddingVector column exists in DocChunk table
+    const colCheck = await prisma.$queryRaw<Array<{ exists: boolean }>>`
+      SELECT EXISTS(
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'DocChunk' AND column_name = 'embeddingVector'
+      ) as exists
+    `;
+    
+    if (!colCheck[0]?.exists) {
+      console.log('[vector-search] embeddingVector column not found, using in-memory search');
+      pgvectorAvailable = false;
+      return false;
+    }
+
+    console.log('[vector-search] pgvector is fully available');
     pgvectorAvailable = true;
-  } catch {
+  } catch (error) {
+    console.error('[vector-search] Error checking pgvector availability:', error);
     pgvectorAvailable = false;
   }
 
   return pgvectorAvailable;
+}
+
+/**
+ * Reset pgvector availability check (useful after migrations)
+ */
+export function resetPgvectorCheck(): void {
+  pgvectorAvailable = null;
 }
 
 /**
@@ -50,51 +83,58 @@ export async function searchSimilarChunksPgvector(
   limit: number = 5,
   minSimilarity: number = 0.3
 ): Promise<SearchResult[]> {
-  const embeddingStr = `[${queryEmbedding.join(',')}]`;
+  try {
+    const embeddingStr = `[${queryEmbedding.join(',')}]`;
 
-  // Build domain filter
-  let domainFilter = '';
-  if (domainSlugs.length > 0) {
-    const slugList = domainSlugs.map(s => `'${s}'`).join(',');
-    domainFilter = `
-      AND c.id IN (
-        SELECT cd."chunkId"
-        FROM "ChunkDomain" cd
-        JOIN "Domain" d ON d.id = cd."domainId"
-        WHERE d.slug IN (${slugList})
-      )
+    // Build domain filter
+    let domainFilter = '';
+    if (domainSlugs.length > 0) {
+      const slugList = domainSlugs.map(s => `'${s}'`).join(',');
+      domainFilter = `
+        AND c.id IN (
+          SELECT cd."chunkId"
+          FROM "ChunkDomain" cd
+          JOIN "Domain" d ON d.id = cd."domainId"
+          WHERE d.slug IN (${slugList})
+        )
+      `;
+    }
+
+    // Use cosine distance operator <=> (returns 1 - similarity)
+    const results = await prisma.$queryRaw<Array<{
+      id: string;
+      content: string;
+      documentId: string;
+      similarity: number;
+      metadata: Prisma.JsonValue;
+    }>>`
+      SELECT
+        c.id,
+        c.content,
+        c."documentId",
+        1 - (c."embeddingVector" <=> ${embeddingStr}::vector) as similarity,
+        c.metadata
+      FROM "DocChunk" c
+      WHERE c."embeddingVector" IS NOT NULL
+      ${Prisma.raw(domainFilter)}
+      AND 1 - (c."embeddingVector" <=> ${embeddingStr}::vector) >= ${minSimilarity}
+      ORDER BY c."embeddingVector" <=> ${embeddingStr}::vector
+      LIMIT ${limit}
     `;
+
+    return results.map(r => ({
+      id: r.id,
+      content: r.content,
+      documentId: r.documentId,
+      similarity: Number(r.similarity),
+      metadata: r.metadata as Record<string, unknown> | undefined,
+    }));
+  } catch (error) {
+    // If pgvector query fails, reset availability flag so we use in-memory next time
+    console.error('[vector-search] pgvector search failed, will fall back to in-memory:', error);
+    pgvectorAvailable = false;
+    throw error; // Re-throw so caller can handle fallback
   }
-
-  // Use cosine distance operator <=> (returns 1 - similarity)
-  const results = await prisma.$queryRaw<Array<{
-    id: string;
-    content: string;
-    documentId: string;
-    similarity: number;
-    metadata: Prisma.JsonValue;
-  }>>`
-    SELECT
-      c.id,
-      c.content,
-      c."documentId",
-      1 - (c."embeddingVector" <=> ${embeddingStr}::vector) as similarity,
-      c.metadata
-    FROM "DocChunk" c
-    WHERE c."embeddingVector" IS NOT NULL
-    ${Prisma.raw(domainFilter)}
-    AND 1 - (c."embeddingVector" <=> ${embeddingStr}::vector) >= ${minSimilarity}
-    ORDER BY c."embeddingVector" <=> ${embeddingStr}::vector
-    LIMIT ${limit}
-  `;
-
-  return results.map(r => ({
-    id: r.id,
-    content: r.content,
-    documentId: r.documentId,
-    similarity: Number(r.similarity),
-    metadata: r.metadata as Record<string, unknown> | undefined,
-  }));
 }
 
 /**
@@ -174,7 +214,13 @@ export async function searchSimilarChunks(
   const usePgvector = await checkPgvectorAvailable();
 
   if (usePgvector) {
-    return searchSimilarChunksPgvector(queryEmbedding, domainSlugs, limit);
+    try {
+      return await searchSimilarChunksPgvector(queryEmbedding, domainSlugs, limit);
+    } catch (error) {
+      // Fallback to in-memory if pgvector fails unexpectedly
+      console.warn('[vector-search] Falling back to in-memory search due to pgvector error');
+      return searchSimilarChunksInMemory(queryEmbedding, domainSlugs, limit);
+    }
   } else {
     return searchSimilarChunksInMemory(queryEmbedding, domainSlugs, limit);
   }

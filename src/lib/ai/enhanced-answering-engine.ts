@@ -207,28 +207,51 @@ export async function answerQuestionEnhanced(
   sessionId?: string,
   includeDebug: boolean = false
 ): Promise<EnhancedAnswerResult> {
+  console.log('[enhanced-answering] Starting for question:', question.substring(0, 100));
+  
   // Step 1: Expand query and extract entities in parallel
-  const [expandedQueries, entities, intentResult] = await Promise.all([
-    expandQuery(question),
-    extractEntities(question),
-    classifyIntent(question),
-  ]);
+  console.log('[enhanced-answering] Step 1: Query expansion and intent classification...');
+  let expandedQueries, entities, intentResult;
+  try {
+    [expandedQueries, entities, intentResult] = await Promise.all([
+      expandQuery(question),
+      extractEntities(question),
+      classifyIntent(question),
+    ]);
+    console.log('[enhanced-answering] Step 1 completed. Intent:', intentResult.intent, 'Domains:', intentResult.domains);
+  } catch (error) {
+    console.error('[enhanced-answering] Step 1 failed:', error);
+    throw error;
+  }
 
   // Step 2: Build query list for multi-query retrieval
   const allQueries = [question, ...expandedQueries.variants];
+  console.log('[enhanced-answering] Step 2: Built', allQueries.length, 'query variants');
 
   // Step 3: Run hybrid multi-query search
-  const chunks = await multiQuerySearch(
-    allQueries,
-    intentResult.domains,
-    10
-  );
+  console.log('[enhanced-answering] Step 3: Running hybrid search...');
+  let chunks;
+  try {
+    chunks = await multiQuerySearch(
+      allQueries,
+      intentResult.domains,
+      10
+    );
+    console.log('[enhanced-answering] Step 3 completed. Found', chunks.length, 'chunks');
+  } catch (error) {
+    console.error('[enhanced-answering] Step 3 (hybrid search) failed:', error);
+    throw error;
+  }
 
   // Step 4: Select context chunks dynamically
   const contextChunks = selectContextChunks(chunks, 5);
+  console.log('[enhanced-answering] Step 4: Selected', contextChunks.length, 'context chunks');
 
   // Step 5: Get relevant active rules
-  const rules = await prisma.rule.findMany({
+  console.log('[enhanced-answering] Step 5: Fetching rules and QA pairs...');
+  let rules;
+  try {
+    rules = await prisma.rule.findMany({
     where: {
       status: 'ACTIVE',
       domains: intentResult.domains.length > 0
@@ -241,17 +264,29 @@ export async function answerQuestionEnhanced(
     take: 10,
     orderBy: { confidence: 'desc' },
   });
+  console.log('[enhanced-answering] Found', rules.length, 'rules');
+  } catch (error) {
+    console.error('[enhanced-answering] Step 5 (rules fetch) failed:', error);
+    throw error;
+  }
 
   // Step 6: Get relevant Q&A pairs
-  const qaPairs = await prisma.qAPair.findMany({
-    where: {
-      status: 'ACTIVE',
-      domains: intentResult.domains.length > 0
-        ? { some: { domain: { slug: { in: intentResult.domains } } } }
-        : undefined,
-    },
-    take: 5,
-  });
+  let qaPairs;
+  try {
+    qaPairs = await prisma.qAPair.findMany({
+      where: {
+        status: 'ACTIVE',
+        domains: intentResult.domains.length > 0
+          ? { some: { domain: { slug: { in: intentResult.domains } } } }
+          : undefined,
+      },
+      take: 5,
+    });
+    console.log('[enhanced-answering] Found', qaPairs.length, 'QA pairs');
+  } catch (error) {
+    console.error('[enhanced-answering] Step 6 (QA pairs fetch) failed:', error);
+    throw error;
+  }
 
   // Step 7: Calculate overall confidence
   const searchConfidence = contextChunks.length > 0
@@ -284,6 +319,7 @@ export async function answerQuestionEnhanced(
   }
 
   // Step 9: Build context and generate answer
+  console.log('[enhanced-answering] Step 9: Generating answer with confidence level:', confidenceLevel);
   const context = buildEnhancedContext(contextChunks, rules, qaPairs, confidenceLevel);
 
   const systemPrompt = ENHANCED_ANSWERING_PROMPT + `
@@ -291,8 +327,10 @@ export async function answerQuestionEnhanced(
 ТЕКУЩИЙ УРОВЕНЬ УВЕРЕННОСТИ: ${confidenceLevel}
 ${needsClarification ? 'РЕКОМЕНДУЕТСЯ УТОЧНЕНИЕ' : ''}`;
 
-  const answer =
-    (await createChatCompletion({
+  let answer: string;
+  try {
+    answer =
+      (await createChatCompletion({
       messages: [
         { role: 'system', content: systemPrompt },
         {
@@ -309,6 +347,11 @@ ${confidenceLevel === 'insufficient'
       ],
       temperature: 0.3,
     })) || 'Не удалось сформировать ответ';
+    console.log('[enhanced-answering] Answer generated successfully, length:', answer.length);
+  } catch (error) {
+    console.error('[enhanced-answering] Step 9 (answer generation) failed:', error);
+    throw error;
+  }
 
   // Build citations with relevance scores
   const citations = rules.slice(0, 5).map((r, i) => ({

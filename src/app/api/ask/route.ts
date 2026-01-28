@@ -69,21 +69,28 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    console.log('[ASK] Received question:', question);
+
     // Get or create session
     let currentSessionId = sessionId;
     if (!currentSessionId) {
+      console.log('[ASK] Creating new session...');
       const session = await getOrCreateSession('API');
       currentSessionId = session.id;
+      console.log('[ASK] Created session:', currentSessionId);
     }
 
     // Save user message
+    console.log('[ASK] Saving user message...');
     await saveChatMessage(currentSessionId, 'USER', question);
 
     // Generate answer using enhanced engine
     // Use conversation context if session exists and flag is set
+    console.log('[ASK] Generating answer...');
     const result = useConversationContext && sessionId
       ? await answerWithContext(question, currentSessionId, includeDebug === true)
       : await answerQuestionEnhanced(question, currentSessionId, includeDebug === true);
+    console.log('[ASK] Answer generated successfully');
 
     // Save assistant message with enhanced metadata
     await saveChatMessage(currentSessionId, 'ASSISTANT', result.answer, {
