@@ -451,6 +451,7 @@ export default function DocumentsPage() {
 
       {/* Processing Modal */}
       <ProcessingModal
+        key={processingModal.documentId || 'none'}
         isOpen={processingModal.isOpen}
         onClose={() => {
           setProcessingModal({ isOpen: false, documentId: null, documentTitle: '', autoStart: true });
