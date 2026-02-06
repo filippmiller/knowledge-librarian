@@ -112,7 +112,15 @@ export async function GET(request: NextRequest): Promise<Response> {
     });
 
     const documents = await prisma.document.findMany({
-      include: {
+      select: {
+        id: true,
+        title: true,
+        filename: true,
+        mimeType: true,
+        parseStatus: true,
+        parseError: true,
+        uploadedAt: true,
+        // Explicitly exclude rawText and rawBytes - they can be megabytes each
         domains: {
           include: {
             domain: { select: { slug: true, title: true } },
