@@ -518,13 +518,14 @@ export function useDocumentProcessing(documentId: string) {
       }
 
       // Only reconnect for pure connection drops (no error message received)
-      // Limited to 3 attempts maximum
-      const maxAttempts = 3;
+      // Limited to 5 attempts maximum with exponential backoff
+      const maxAttempts = 5;
       if (reconnectAttemptsRef.current < maxAttempts) {
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 5000);
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 10000);
         reconnectAttemptsRef.current++;
 
         addLog('WARNING', `Соединение потеряно. Попытка ${reconnectAttemptsRef.current}/${maxAttempts} через ${delay/1000}с...`);
+        addLog('INFO', 'Обработка продолжается на сервере. Переподключение для наблюдения за прогрессом.');
 
         reconnectTimeoutRef.current = setTimeout(async () => {
           // Double-check before reconnecting
@@ -536,22 +537,34 @@ export function useDocumentProcessing(documentId: string) {
           }
         }, delay);
       } else {
-        // Max attempts reached - stop completely
+        // Max attempts reached - but processing may still be running on server
         setState((prev) => ({
           ...prev,
           isProcessing: false,
-          error: prev.error || 'Соединение прервано. Нажмите "Запустить" для повторной попытки.',
+          error: prev.error || 'Соединение прервано. Обработка может продолжаться на сервере. Нажмите "Запустить" для переподключения.',
         }));
         hasErrorRef.current = true; // Prevent further reconnection attempts
-        addLog('ERROR', 'Превышено максимальное количество попыток переподключения (3)');
-        addLog('ERROR', 'Нажмите "Запустить" для повторной попытки.');
+        addLog('ERROR', 'Превышено максимальное количество попыток переподключения (5)');
+        addLog('INFO', 'Обработка продолжается на сервере. Нажмите "Запустить" для переподключения.');
       }
 
       eventSource.close();
     };
   }, [documentId, addLog]);
 
+  // Guard against React Strict Mode double-firing and concurrent starts
+  const isStartingRef = useRef(false);
+
   const startProcessing = useCallback(async () => {
+    // Prevent concurrent starts (React Strict Mode calls effects twice in dev)
+    if (isStartingRef.current) {
+      console.log('[useDocumentProcessing] Ignoring duplicate startProcessing call');
+      return;
+    }
+    isStartingRef.current = true;
+    // Reset after a tick to allow future manual starts
+    setTimeout(() => { isStartingRef.current = false; }, 1000);
+
     // Reset counters but keep logs (add separator)
     tokenCountRef.current = 0;
     tokensInLastSecondRef.current = [];
@@ -757,6 +770,20 @@ export function useDocumentProcessing(documentId: string) {
       return { success: false, error: message };
     }
   }, [documentId, state.extractedItems, addLog]);
+
+  // Reconnect when tab becomes visible again (browser may have killed the connection)
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && state.isProcessing && !state.isConnected && !isStoppedRef.current && !isCompleteRef.current && !hasErrorRef.current) {
+        addLog('INFO', 'Вкладка снова активна - переподключение...');
+        reconnectAttemptsRef.current = 0; // Reset attempts on tab reactivation
+        connectEventSource(true);
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [state.isProcessing, state.isConnected, connectEventSource, addLog]);
 
   // Cleanup on unmount
   useEffect(() => {

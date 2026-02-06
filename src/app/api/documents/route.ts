@@ -145,8 +145,22 @@ export async function POST(request: NextRequest): Promise<Response> {
       return NextResponse.json({ error: 'No file provided' }, { status: 400 });
     }
 
-    const buffer = Buffer.from(await file.arrayBuffer());
     const filename = file.name;
+
+    // Check for duplicate uploads - prevent re-uploading same file
+    const existingDoc = await prisma.document.findFirst({
+      where: { filename },
+      select: { id: true, title: true, parseStatus: true },
+    });
+
+    if (existingDoc) {
+      return NextResponse.json({
+        error: `Документ "${existingDoc.title}" (${filename}) уже загружен (статус: ${existingDoc.parseStatus}). Удалите существующий документ перед повторной загрузкой.`,
+        existingId: existingDoc.id,
+      }, { status: 409 });
+    }
+
+    const buffer = Buffer.from(await file.arrayBuffer());
     const mimeType = file.type || detectMimeType(filename);
 
     // Step 1: Parse document text FIRST (required for SSE processing)
@@ -170,14 +184,14 @@ export async function POST(request: NextRequest): Promise<Response> {
         mimeType,
         rawBytes: buffer,
         rawText, // Include parsed text so SSE can proceed
-        parseStatus: 'PROCESSING',
+        parseStatus: 'PENDING', // PENDING until user opens processing terminal
       },
     });
 
-    console.log(`[Upload] Document created: ${document.id}`);
+    console.log(`[Upload] Document created: ${document.id} (PENDING)`);
 
     // NOTE: AI processing is handled by the Librarian Terminal (SSE stream).
-    // The SSE endpoint now has rawText available to proceed with domain classification.
+    // Status transitions: PENDING → PROCESSING (when SSE starts) → COMPLETED (after commit)
 
     return NextResponse.json({
       id: document.id,

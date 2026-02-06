@@ -39,6 +39,7 @@ model Document {
 enum ParseStatus {
   PENDING
   PROCESSING
+  EXTRACTED   // All processing phases complete, staged data ready for user review/commit
   COMPLETED
   FAILED
 }

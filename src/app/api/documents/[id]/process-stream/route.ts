@@ -18,6 +18,11 @@ import {
 } from '@/lib/ai/knowledge-extractor-stream';
 import { splitTextIntoChunks } from '@/lib/ai/chunker';
 
+// In-memory lock to prevent concurrent processing of the same document.
+// On Railway (single process), this is sufficient. For multi-instance deployments,
+// use a database-based lock instead.
+const processingLocks = new Map<string, boolean>();
+
 // Types for SSE events
 type SSEEventType =
   | 'phase_start'
@@ -90,7 +95,7 @@ export async function GET(
   }
   
   // Check for resume mode (reconnection should resume, not restart)
-  const shouldResume = url.searchParams.get('resume') === 'true';
+  let shouldResume = url.searchParams.get('resume') === 'true';
 
   // Check if document exists
   const document = await prisma.document.findUnique({
@@ -120,26 +125,102 @@ export async function GET(
     );
   }
 
+  // EXTRACTED documents MUST always use resume mode to preserve their staged data.
+  // Without this, clicking "Проверить" would delete all staged data and re-process.
+  if (document.parseStatus === 'EXTRACTED') {
+    shouldResume = true;
+    console.log(`[process-stream] Document ${documentId} is EXTRACTED - forcing resume mode`);
+  }
+
+  // Check for resume mode - if resuming, check if processing already completed
+  if (shouldResume) {
+    const existingProgress = await prisma.stagedExtraction.groupBy({
+      by: ['phase'],
+      where: { documentId },
+      _count: { id: true },
+    });
+    const phasesWithData = existingProgress.filter(g => g._count.id > 0).map(g => g.phase);
+
+    // If all 3 phases are already done, just return a completed response
+    if (phasesWithData.includes('DOMAIN_CLASSIFICATION') &&
+        phasesWithData.includes('KNOWLEDGE_EXTRACTION') &&
+        phasesWithData.includes('CHUNKING')) {
+      console.log(`[process-stream] All phases already complete for ${documentId}, serving from DB`);
+      // Let it fall through to resume mode which will re-emit from DB
+    }
+  }
+
+  // Concurrent processing guard - prevent duplicate processing of the same document.
+  // This blocks ALL new connections (including resume) if processing is in progress.
+  // The client's reconnection logic will retry automatically after processing completes.
+  if (processingLocks.has(documentId)) {
+    console.log(`[process-stream] Document ${documentId} is already being processed (resume=${shouldResume})`);
+    return new Response(
+      JSON.stringify({ error: 'Документ уже обрабатывается. Переподключение произойдёт автоматически.' }),
+      {
+        status: 409,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+
   // Create a readable stream for SSE
   const encoder = new TextEncoder();
 
+  // Track whether the client is still connected
+  let clientDisconnected = false;
+
   const stream = new ReadableStream({
+    cancel() {
+      // Called when the client disconnects (closes browser, modal, etc.)
+      clientDisconnected = true;
+      console.log(`[process-stream] Client disconnected for document ${documentId} - processing will continue`);
+    },
     async start(controller) {
+      // Acquire processing lock
+      processingLocks.set(documentId, true);
+
+      // Safe send: silently fails when client has disconnected.
+      // Processing continues regardless - results are saved to DB.
       const send = (event: SSEEvent) => {
-        controller.enqueue(encoder.encode(formatSSE(event)));
+        if (clientDisconnected) return;
+        try {
+          controller.enqueue(encoder.encode(formatSSE(event)));
+        } catch {
+          // Stream closed - mark as disconnected but keep processing
+          clientDisconnected = true;
+          console.log(`[process-stream] Stream write failed for ${documentId} - continuing processing in background`);
+        }
       };
 
       // SSE keepalive - send heartbeat every 15 seconds to prevent Railway proxy timeout
       const heartbeatInterval = setInterval(() => {
+        if (clientDisconnected) {
+          clearInterval(heartbeatInterval);
+          return;
+        }
         try {
           controller.enqueue(encoder.encode(': heartbeat\n\n'));
         } catch {
           // Controller closed, stop heartbeat
+          clientDisconnected = true;
           clearInterval(heartbeatInterval);
         }
       }, 15000);
 
       try {
+        // Update document status to PROCESSING (only if not already EXTRACTED for resume)
+        // EXTRACTED docs being resumed should keep their status until the stream completes.
+        if (document.parseStatus !== 'EXTRACTED') {
+          await prisma.document.update({
+            where: { id: documentId },
+            data: {
+              parseStatus: 'PROCESSING',
+              parseError: null,
+            },
+          });
+        }
+
         // Check existing progress for resume capability
         const existingStaged = await prisma.stagedExtraction.groupBy({
           by: ['phase'],
@@ -558,6 +639,18 @@ export async function GET(
         }
 
         // ========== Complete ==========
+        console.log(`[process-stream] All phases complete for ${documentId}. Client connected: ${!clientDisconnected}`);
+
+        // Mark document as EXTRACTED - all phases done, staged data ready for user review/commit.
+        // This distinguishes from PROCESSING (actively running) and COMPLETED (committed to final tables).
+        await prisma.document.update({
+          where: { id: documentId },
+          data: {
+            parseStatus: 'EXTRACTED',
+            parseError: null,
+          },
+        });
+
         send({
           type: 'complete',
           data: { success: true },
@@ -565,6 +658,8 @@ export async function GET(
       } catch (error) {
         const errorMessage =
           error instanceof Error ? error.message : 'Неизвестная ошибка';
+
+        console.error(`[process-stream] Error processing ${documentId}:`, errorMessage);
 
         // Determine if this is a fatal error that should not be retried
         const fatal = isFatalError(error);
@@ -589,8 +684,16 @@ export async function GET(
           });
         }
       } finally {
+        // Release processing lock
+        processingLocks.delete(documentId);
         clearInterval(heartbeatInterval);
-        controller.close();
+        if (!clientDisconnected) {
+          try {
+            controller.close();
+          } catch {
+            // Already closed
+          }
+        }
       }
     },
   });
