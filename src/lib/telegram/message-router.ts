@@ -12,6 +12,9 @@ import {
   handleUsers,
   handleAdd,
   handleCorrect,
+  handleShow,
+  handleEdit,
+  handleDelete,
   handleQuestion,
 } from './commands';
 import { handleVoiceMessage } from './voice-handler';
@@ -117,6 +120,12 @@ async function routeTextMessage(message: TelegramMessage, user: TelegramUserInfo
         return handleAdd(message, user, args);
       case 'correct':
         return handleCorrect(message, user, args);
+      case 'show':
+        return handleShow(message, user, args);
+      case 'edit':
+        return handleEdit(message, user, args);
+      case 'delete':
+        return handleDelete(message, user, args);
       default:
         await sendMessage(message.chat.id, `Неизвестная команда: /${command}\n\nИспользуйте /help для списка команд.`);
         return;

@@ -13,6 +13,7 @@ import {
 import { addKnowledge, correctKnowledge } from './knowledge-manager';
 import { answerQuestionEnhanced, type EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
 import { getOrCreateSession, saveChatMessage } from '@/lib/ai/answering-engine';
+import prisma from '@/lib/db';
 
 /**
  * Handle /start command.
@@ -40,10 +41,13 @@ export async function handleStart(message: TelegramMessage, user: TelegramUserIn
     text += '\nАдмин-команды:\n';
     text += '/add <текст> - Добавить знание\n';
     text += '/correct <текст> - Исправить знание\n';
+    text += '/show [R-X] - Просмотр правила\n';
+    text += '/edit R-X <текст> - Редактировать правило\n';
+    text += '/delete R-X - Удалить правило\n';
     text += '/grant <id> - Дать доступ\n';
     text += '/revoke <id> - Отозвать доступ\n';
     text += '/users - Список пользователей\n';
-    text += 'Голосовое сообщение - Добавить знание голосом\n';
+    text += 'Голосовое - Добавить/исправить знание\n';
     text += 'Документ (PDF/DOCX/TXT) - Загрузить в базу\n';
   }
 
@@ -69,12 +73,15 @@ export async function handleHelp(message: TelegramMessage, user: TelegramUserInf
 
   if (isAdmin(user.role)) {
     text += '\nАдмин-команды:\n';
-    text += '/add <текст> - Добавить новое знание в базу. AI извлечёт правила и QA пары.\n';
+    text += '/add <текст> - Добавить новое знание. AI извлечёт правила и QA пары.\n';
     text += '/correct <текст> - Исправить существующее знание. AI найдёт и обновит.\n';
+    text += '/show - Список правил. /show R-X для деталей.\n';
+    text += '/edit R-X <текст> - Заменить текст правила на новый.\n';
+    text += '/delete R-X - Пометить правило как удалённое.\n';
     text += '/grant <telegram_id> - Выдать доступ пользователю\n';
     text += '/revoke <telegram_id> - Отозвать доступ\n';
     text += '/users - Список всех активных пользователей\n\n';
-    text += 'Голосовые сообщения: отправьте голосовое, оно будет расшифровано и добавлено как знание.\n';
+    text += 'Голосовые: "добавь/запомни..." = добавление; "поменяй/измени..." = исправление; иначе = вопрос.\n';
     text += 'Документы: отправьте PDF/DOCX/TXT файл для полной обработки через AI.\n';
   }
 
@@ -257,6 +264,201 @@ export async function handleCorrect(message: TelegramMessage, user: TelegramUser
     console.error('[commands] /correct error:', error);
     await sendMessage(chatId, 'Ошибка при обновлении знания. Попробуйте позже.');
   }
+}
+
+/**
+ * Handle /show command — show a rule by code.
+ */
+export async function handleShow(message: TelegramMessage, user: TelegramUserInfo, args: string): Promise<void> {
+  const chatId = message.chat.id;
+
+  if (!isAdmin(user.role)) {
+    await sendMessage(chatId, 'У вас нет прав для этой команды.');
+    return;
+  }
+
+  const code = args.trim().toUpperCase();
+
+  // If no argument, list recent rules
+  if (!code) {
+    const recent = await prisma.rule.findMany({
+      where: { status: 'ACTIVE' },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+      select: { ruleCode: true, title: true },
+    });
+
+    if (recent.length === 0) {
+      await sendMessage(chatId, 'Нет активных правил.');
+      return;
+    }
+
+    let text = 'Последние правила:\n\n';
+    for (const r of recent) {
+      text += `${r.ruleCode} - ${r.title}\n`;
+    }
+    text += '\nИспользуйте /show R-X для просмотра деталей.';
+    await sendMessage(chatId, text);
+    return;
+  }
+
+  const rule = await prisma.rule.findFirst({
+    where: { ruleCode: code, status: 'ACTIVE' },
+    include: {
+      document: { select: { title: true } },
+      domains: { include: { domain: { select: { slug: true, title: true } } } },
+      qaPairs: { where: { status: 'ACTIVE' }, select: { question: true, answer: true } },
+    },
+  });
+
+  if (!rule) {
+    await sendMessage(chatId, `Правило ${code} не найдено (или не активно).`);
+    return;
+  }
+
+  let text = `${rule.ruleCode}: ${rule.title}\n\n`;
+  text += `${rule.body}\n\n`;
+  text += `Уверенность: ${(rule.confidence * 100).toFixed(0)}%\n`;
+  text += `Статус: ${rule.status}\n`;
+  if (rule.document) text += `Документ: ${rule.document.title}\n`;
+  if (rule.domains.length > 0) {
+    text += `Домены: ${rule.domains.map((d) => d.domain.slug).join(', ')}\n`;
+  }
+  if (rule.qaPairs.length > 0) {
+    text += `\nСвязанные QA (${rule.qaPairs.length}):\n`;
+    for (const qa of rule.qaPairs.slice(0, 5)) {
+      text += `  В: ${qa.question}\n  О: ${qa.answer}\n\n`;
+    }
+  }
+  text += `\nСоздано: ${rule.createdAt.toISOString().slice(0, 10)}`;
+
+  await sendMessage(chatId, text);
+}
+
+/**
+ * Handle /edit command — edit a rule's body.
+ */
+export async function handleEdit(message: TelegramMessage, user: TelegramUserInfo, args: string): Promise<void> {
+  const chatId = message.chat.id;
+
+  if (!isAdmin(user.role)) {
+    await sendMessage(chatId, 'У вас нет прав для этой команды.');
+    return;
+  }
+
+  // Parse: /edit R-5 новый текст правила
+  const match = args.match(/^(R-\d+)\s+([\s\S]+)$/i);
+
+  if (!match) {
+    await sendMessage(chatId, 'Использование: /edit R-X <новый текст правила>\n\nПример: /edit R-5 Стоимость перевода паспорта - 2000 руб');
+    return;
+  }
+
+  const code = match[1].toUpperCase();
+  const newBody = match[2].trim();
+
+  const existing = await prisma.rule.findFirst({
+    where: { ruleCode: code, status: 'ACTIVE' },
+  });
+
+  if (!existing) {
+    await sendMessage(chatId, `Правило ${code} не найдено (или не активно).`);
+    return;
+  }
+
+  await sendTypingIndicator(chatId);
+
+  // Supersede old rule, create new version
+  await prisma.rule.update({
+    where: { id: existing.id },
+    data: { status: 'SUPERSEDED' },
+  });
+
+  // Get next rule code
+  const maxRule = await prisma.rule.findFirst({
+    orderBy: { ruleCode: 'desc' },
+    select: { ruleCode: true },
+  });
+  const nextNum = maxRule
+    ? Math.max(...[maxRule.ruleCode].map((c) => parseInt(c.replace('R-', '')))) + 1
+    : 1;
+  const newCode = `R-${nextNum}`;
+
+  const newRule = await prisma.rule.create({
+    data: {
+      ruleCode: newCode,
+      title: existing.title,
+      body: newBody,
+      confidence: existing.confidence,
+      documentId: existing.documentId,
+      supersedesRuleId: existing.id,
+      sourceSpan: { quote: newBody.slice(0, 200), locationHint: `Отредактировано через Telegram` },
+    },
+  });
+
+  // Copy domain links
+  const domainLinks = await prisma.ruleDomain.findMany({
+    where: { ruleId: existing.id },
+  });
+  for (const link of domainLinks) {
+    await prisma.ruleDomain.create({
+      data: { ruleId: newRule.id, domainId: link.domainId, confidence: link.confidence },
+    });
+  }
+
+  await sendMessage(
+    chatId,
+    `Правило обновлено.\n\n` +
+    `Старое: ${code} (SUPERSEDED)\n` +
+    `Новое: ${newCode}\n\n` +
+    `${existing.title}\n${newBody}`
+  );
+}
+
+/**
+ * Handle /delete command — deactivate (deprecate) a rule.
+ */
+export async function handleDelete(message: TelegramMessage, user: TelegramUserInfo, args: string): Promise<void> {
+  const chatId = message.chat.id;
+
+  if (!isAdmin(user.role)) {
+    await sendMessage(chatId, 'У вас нет прав для этой команды.');
+    return;
+  }
+
+  const code = args.trim().toUpperCase();
+
+  if (!code || !code.match(/^R-\d+$/)) {
+    await sendMessage(chatId, 'Использование: /delete R-X\n\nПравило будет помечено как DEPRECATED (не удалено физически).');
+    return;
+  }
+
+  const existing = await prisma.rule.findFirst({
+    where: { ruleCode: code, status: 'ACTIVE' },
+  });
+
+  if (!existing) {
+    await sendMessage(chatId, `Правило ${code} не найдено (или уже не активно).`);
+    return;
+  }
+
+  await prisma.rule.update({
+    where: { id: existing.id },
+    data: { status: 'DEPRECATED' },
+  });
+
+  // Also deprecate linked QA pairs
+  const deprecated = await prisma.qAPair.updateMany({
+    where: { ruleId: existing.id, status: 'ACTIVE' },
+    data: { status: 'DEPRECATED' },
+  });
+
+  await sendMessage(
+    chatId,
+    `Правило ${code} помечено как DEPRECATED.\n` +
+    `Также помечено QA пар: ${deprecated.count}\n\n` +
+    `${existing.title}`
+  );
 }
 
 /**

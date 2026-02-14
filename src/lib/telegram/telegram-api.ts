@@ -43,28 +43,13 @@ export async function sendMessage(chatId: number, text: string): Promise<void> {
     : [text];
 
   for (const part of parts) {
-    // Escape special Markdown characters
-    const safeText = part.replace(/([_*\[\]()~`>#+\-=|{}.!])/g, '\\$1');
-
     try {
-      let resp = await fetch(url, {
+      // Send as plain text — avoids MarkdownV2 escaping issues and message bloat
+      await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: safeText,
-          parse_mode: 'MarkdownV2',
-        }),
+        body: JSON.stringify({ chat_id: chatId, text: part }),
       });
-
-      // If MarkdownV2 fails, send as plain text
-      if (!resp.ok) {
-        await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: chatId, text: part }),
-        });
-      }
     } catch (error) {
       console.error('Error sending Telegram message:', error);
     }

@@ -3,10 +3,16 @@ import { downloadFile, sendMessage, sendTypingIndicator } from './telegram-api';
 import type { TelegramMessage } from './telegram-api';
 import type { TelegramUserInfo } from './access-control';
 import { isAdmin } from './access-control';
-import { addKnowledge } from './knowledge-manager';
+import { addKnowledge, correctKnowledge } from './knowledge-manager';
 import { answerQuestionEnhanced } from '@/lib/ai/enhanced-answering-engine';
 import { getOrCreateSession, saveChatMessage } from '@/lib/ai/answering-engine';
 import { formatAnswerResponse } from './commands';
+
+// Keywords that signal "add new knowledge"
+const ADD_KEYWORDS = /^(добавь|добавить|запомни|запиши|сохрани|новое правило|добавить правило)/i;
+
+// Keywords that signal "correct/change existing knowledge"
+const CORRECT_KEYWORDS = /^(поменяй|поменять|измени|изменить|исправь|исправить|обнови|обновить|замени|заменить|теперь|стоимость .* теперь|цена .* теперь)/i;
 
 /**
  * Handle incoming voice messages.
@@ -45,13 +51,19 @@ export async function handleVoiceMessage(
     // Notify what was transcribed
     await sendMessage(chatId, `Распознано: "${text}"\n\nОбрабатываю...`);
 
-    // Route based on content
-    const lowerText = text.toLowerCase();
-
     if (isAdmin(user.role)) {
-      // If text starts with known command keywords, route to knowledge
-      if (lowerText.startsWith('добавь') || lowerText.startsWith('добавить') || lowerText.startsWith('запомни')) {
-        const knowledgeText = text.replace(/^(добавь|добавить|запомни)\s*/i, '');
+      // Check for correction/change keywords first (more specific)
+      if (CORRECT_KEYWORDS.test(text)) {
+        await sendTypingIndicator(chatId);
+        const result = await correctKnowledge(text, user.telegramId);
+        await sendMessage(chatId, `Голосовая команда обработана.\n\n${result.summary}`);
+        return;
+      }
+
+      // Check for add keywords
+      if (ADD_KEYWORDS.test(text)) {
+        await sendTypingIndicator(chatId);
+        const knowledgeText = text.replace(ADD_KEYWORDS, '').trim() || text;
         const result = await addKnowledge(knowledgeText, user.telegramId);
         await sendMessage(chatId, `Голосовая заметка обработана.\n\n${result.summary}`);
         return;
