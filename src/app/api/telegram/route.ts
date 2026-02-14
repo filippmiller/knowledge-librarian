@@ -1,7 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { answerQuestion, getOrCreateSession, saveChatMessage } from '@/lib/ai/answering-engine';
+import { answerQuestionEnhanced } from '@/lib/ai/enhanced-answering-engine';
+import { getOrCreateSession, saveChatMessage } from '@/lib/ai/answering-engine';
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+
+// Allowed Telegram user IDs (empty = allow all)
+const ALLOWED_USER_IDS = (process.env.TELEGRAM_ALLOWED_USERS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
 
 interface TelegramUpdate {
   update_id: number;
@@ -22,16 +29,33 @@ async function sendMessage(chatId: number, text: string) {
 
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
 
+  // Escape special Markdown characters that might break formatting
+  const safeText = text
+    .replace(/([_*\[\]()~`>#+\-=|{}.!])/g, '\\$1');
+
   try {
-    await fetch(url, {
+    // Try MarkdownV2 first
+    let resp = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         chat_id: chatId,
-        text,
-        parse_mode: 'Markdown',
+        text: safeText,
+        parse_mode: 'MarkdownV2',
       }),
     });
+
+    // If MarkdownV2 fails, send as plain text
+    if (!resp.ok) {
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text,
+        }),
+      });
+    }
   } catch (error) {
     console.error('Error sending Telegram message:', error);
   }
@@ -56,6 +80,13 @@ async function sendTypingIndicator(chatId: number) {
   }
 }
 
+function isUserAllowed(userId?: string): boolean {
+  // If no whitelist configured, allow everyone
+  if (ALLOWED_USER_IDS.length === 0) return true;
+  if (!userId) return false;
+  return ALLOWED_USER_IDS.includes(userId);
+}
+
 export async function POST(request: NextRequest) {
   try {
     const update: TelegramUpdate = await request.json();
@@ -68,19 +99,34 @@ export async function POST(request: NextRequest) {
     const chatId = update.message.chat.id;
     const question = update.message.text.trim();
     const userId = update.message.from?.id?.toString();
+    const username = update.message.from?.username;
+    const firstName = update.message.from?.first_name || 'User';
+
+    // Access control
+    if (!isUserAllowed(userId)) {
+      await sendMessage(
+        chatId,
+        `Извините, ${firstName}, у вас нет доступа к этому боту. Обратитесь к администратору.`
+      );
+      console.log(`[telegram] Access denied for user ${userId} (@${username})`);
+      return NextResponse.json({ ok: true });
+    }
 
     // Handle /start command
     if (question === '/start') {
       await sendMessage(
         chatId,
-        '*Welcome to the Knowledge Librarian Bot!*\n\n' +
-        'Ask me any question about translation bureau operations, ' +
-        'pricing, notary services, and more.\n\n' +
-        'Just type your question and I will answer based on our knowledge base.\n\n' +
-        '_Examples:_\n' +
-        '- Сколько стоит НЗП?\n' +
-        '- Как оформить нотариальный перевод?\n' +
-        '- Какие языки поддерживаются?'
+        `Добро пожаловать, ${firstName}!\n\n` +
+        'Я - бот базы знаний бюро переводов Аврора.\n\n' +
+        'Задайте мне любой вопрос о работе бюро: цены, процедуры, нотариальные услуги, миграционные услуги и многое другое.\n\n' +
+        'Примеры вопросов:\n' +
+        '- Сколько стоит нотариальный перевод?\n' +
+        '- Как отправить заказ почтой России?\n' +
+        '- Какие миграционные услуги вы предоставляете?\n' +
+        '- Как работать с договорами юрлиц?\n\n' +
+        'Команды:\n' +
+        '/start - Приветствие\n' +
+        '/help - Помощь'
       );
       return NextResponse.json({ ok: true });
     }
@@ -89,16 +135,24 @@ export async function POST(request: NextRequest) {
     if (question === '/help') {
       await sendMessage(
         chatId,
-        '*Available Commands:*\n\n' +
-        '/start - Welcome message\n' +
-        '/help - Show this help\n\n' +
-        'Or just type any question to search the knowledge base.'
+        'Команды:\n' +
+        '/start - Приветствие\n' +
+        '/help - Эта справка\n\n' +
+        'Просто напишите свой вопрос, и я найду ответ в базе знаний.'
       );
+      return NextResponse.json({ ok: true });
+    }
+
+    // Validate question length
+    if (question.length > 2000) {
+      await sendMessage(chatId, 'Вопрос слишком длинный. Максимум 2000 символов.');
       return NextResponse.json({ ok: true });
     }
 
     // Show typing indicator while processing
     await sendTypingIndicator(chatId);
+
+    console.log(`[telegram] Question from ${userId} (@${username}): ${question.substring(0, 100)}`);
 
     // Create or get session for this user
     const session = await getOrCreateSession('TELEGRAM', userId);
@@ -106,13 +160,15 @@ export async function POST(request: NextRequest) {
     // Save user message
     await saveChatMessage(session.id, 'USER', question);
 
-    // Process the question
-    const result = await answerQuestion(question);
+    // Process the question using the enhanced engine
+    const result = await answerQuestionEnhanced(question, session.id);
 
     // Save assistant message
     await saveChatMessage(session.id, 'ASSISTANT', result.answer, {
       confidence: result.confidence,
+      confidenceLevel: result.confidenceLevel,
       domainsUsed: result.domainsUsed,
+      citationCount: result.citations.length,
     });
 
     // Format response for Telegram
@@ -120,10 +176,10 @@ export async function POST(request: NextRequest) {
 
     // Add citations if available
     if (result.citations.length > 0) {
-      response += '\n\n*Sources:*';
+      response += '\n\nИсточники:';
       for (const citation of result.citations.slice(0, 3)) {
         if (citation.ruleCode) {
-          response += `\n• ${citation.ruleCode}`;
+          response += `\n  ${citation.ruleCode}`;
           if (citation.documentTitle) {
             response += ` (${citation.documentTitle})`;
           }
@@ -132,8 +188,11 @@ export async function POST(request: NextRequest) {
     }
 
     // Add confidence indicator
-    const confidenceEmoji = result.confidence >= 0.8 ? 'High' : result.confidence >= 0.5 ? 'Medium' : 'Low';
-    response += `\n\n_Confidence: ${confidenceEmoji} (${(result.confidence * 100).toFixed(0)}%)_`;
+    const confLabel = result.confidenceLevel === 'high' ? 'Высокая'
+      : result.confidenceLevel === 'medium' ? 'Средняя'
+      : result.confidenceLevel === 'low' ? 'Низкая'
+      : 'Недостаточная';
+    response += `\n\nУверенность: ${confLabel} (${(result.confidence * 100).toFixed(0)}%)`;
 
     // Send the response
     await sendMessage(chatId, response);
@@ -141,6 +200,18 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: true });
   } catch (error) {
     console.error('Telegram webhook error:', error);
+    // Try to send error message to user
+    try {
+      const update: TelegramUpdate = await request.clone().json();
+      if (update.message?.chat?.id) {
+        await sendMessage(
+          update.message.chat.id,
+          'Произошла ошибка при обработке вашего вопроса. Попробуйте позже.'
+        );
+      }
+    } catch {
+      // Ignore - can't parse the request again
+    }
     // Always return 200 to Telegram to prevent retries
     return NextResponse.json({ ok: true });
   }
@@ -151,5 +222,6 @@ export async function GET() {
   return NextResponse.json({
     status: 'ok',
     bot: TELEGRAM_BOT_TOKEN ? 'configured' : 'not configured',
+    accessControl: ALLOWED_USER_IDS.length > 0 ? 'whitelist' : 'open',
   });
 }

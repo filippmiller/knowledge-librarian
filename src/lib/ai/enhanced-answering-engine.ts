@@ -12,7 +12,7 @@
 import { createChatCompletion } from '@/lib/ai/chat-provider';
 import prisma from '@/lib/db';
 import { hybridSearch, HybridSearchResult } from './vector-search';
-import { expandQuery, ExtractedEntities, extractEntities } from './query-expansion';
+import { expandQuery, ExpandedQueries, ExtractedEntities, extractEntities } from './query-expansion';
 
 // Confidence thresholds
 const CONFIDENCE_THRESHOLD_HIGH = 0.7;    // Answer confidently
@@ -209,20 +209,28 @@ export async function answerQuestionEnhanced(
 ): Promise<EnhancedAnswerResult> {
   console.log('[enhanced-answering] Starting for question:', question.substring(0, 100));
   
-  // Step 1: Expand query and extract entities in parallel
+  // Step 1: Expand query and extract entities in parallel (resilient - each can fail independently)
   console.log('[enhanced-answering] Step 1: Query expansion and intent classification...');
-  let expandedQueries, entities, intentResult;
-  try {
-    [expandedQueries, entities, intentResult] = await Promise.all([
-      expandQuery(question),
-      extractEntities(question),
-      classifyIntent(question),
-    ]);
-    console.log('[enhanced-answering] Step 1 completed. Intent:', intentResult.intent, 'Domains:', intentResult.domains);
-  } catch (error) {
-    console.error('[enhanced-answering] Step 1 failed:', error);
-    throw error;
-  }
+  const [expandedResult, entitiesResult, intentSettled] = await Promise.allSettled([
+    expandQuery(question),
+    extractEntities(question),
+    classifyIntent(question),
+  ]);
+
+  const expandedQueries: ExpandedQueries = expandedResult.status === 'fulfilled'
+    ? expandedResult.value
+    : { original: question, variants: [], isAmbiguous: false };
+  const entities: ExtractedEntities = entitiesResult.status === 'fulfilled'
+    ? entitiesResult.value
+    : { dates: [], prices: [], documentTypes: [], services: [] };
+  const intentResult: IntentClassification = intentSettled.status === 'fulfilled'
+    ? intentSettled.value
+    : { intent: 'general_info', domains: [], confidence: 0.5 };
+
+  if (expandedResult.status === 'rejected') console.warn('[enhanced-answering] Query expansion failed, using original query');
+  if (entitiesResult.status === 'rejected') console.warn('[enhanced-answering] Entity extraction failed, using empty entities');
+  if (intentSettled.status === 'rejected') console.warn('[enhanced-answering] Intent classification failed, using defaults');
+  console.log('[enhanced-answering] Step 1 completed. Intent:', intentResult.intent, 'Domains:', intentResult.domains);
 
   // Step 2: Build query list for multi-query retrieval
   const allQueries = [question, ...expandedQueries.variants];
