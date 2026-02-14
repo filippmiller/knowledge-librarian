@@ -1,10 +1,53 @@
 # Knowledge Librarian - Work Log
 
+> **INSERTION ORDER: NEWEST ENTRY AT TOP.** All agents MUST insert new entries immediately below this header (after the `---` separator). The log is in strict reverse chronological order — the most recent entry is always first. NEVER append to the bottom.
+
+---
+
+## 2026-02-14 — Telegram Bot: Access Control, Knowledge Management, Document Upload
+
+**Status**: Completed
+**Commits**: d023ba0, 1f781fd, d2f6e0e, cdd7d4b, b2bb344, dc04725
+
+### What was done
+- Built full Telegram bot system: DB-backed access control (SUPER_ADMIN/ADMIN/USER), 7 new module files
+- User management: /grant, /revoke, /promote, /demote, /users commands
+- Knowledge management: /add (AI parses text into rules+QA), /correct (in-place rule updates)
+- Voice messages: Whisper transcription with keyword routing (add/correct/question)
+- Document upload: 3-phase pipeline (classify, extract, chunk) with detailed summary
+- Rule viewing: /show, /edit, /delete commands
+- Slash command menu registered with Telegram API (12 commands)
+- Added Яна (234742362) as SUPER_ADMIN
+
+### Bugfixes
+- Voice "поменяй" was routed to Q&A instead of correction (missing CORRECT_KEYWORDS)
+- MarkdownV2 escaping split messages; switched to plain text
+- /correct created duplicate rules; rewrote to update in-place + delete conflicting chunks
+- /add had 2000 char limit; raised to 10000
+- rawBytes not saved on document upload; fixed
+- 0 QA pairs from documents; rewrote extraction prompt to require 1-2 QA per rule
+
+### Decisions made
+- Plain text over MarkdownV2 for all Telegram messages
+- In-place rule correction over supersede pattern (avoids conflicting search results)
+- Non-streaming pipeline for Telegram (no SSE needed)
+
+### Session Notes
+→ `.claude/sessions/2026-02-14-235000.md`
+→ `.claude/agent-log.md` (6 entries)
+
+---
+
 ## 2026-02-06 Session 2 - EXTRACTED Status & Production Processing
 
 **Status**: Completed
 **Duration**: ~3.5 hours
 **Commits**: 9962c22
+
+## 2026-02-06 Session 1 - Resilience & Error-Proofing
+
+**Status**: Completed
+**Commits**: 8787fce, and prior commits
 
 ### What was done
 - Found and fixed critical bug: EXTRACTED documents re-processed from scratch on reopen (83s wasted + data loss)
@@ -30,11 +73,6 @@
 - Address Next.js 16 middleware deprecation warning (middleware.ts -> proxy.ts)
 
 ---
-
-## 2026-02-06 Session 1 - Resilience & Error-Proofing
-
-**Status**: Completed
-**Commits**: 8787fce, and prior commits
 
 ### What was done
 - Added EXTRACTED enum to ParseStatus in Prisma schema
