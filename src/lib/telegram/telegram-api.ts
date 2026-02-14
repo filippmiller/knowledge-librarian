@@ -103,6 +103,48 @@ export async function sendUploadingIndicator(chatId: number): Promise<void> {
   }
 }
 
+/**
+ * Register bot commands with Telegram so they appear in the slash menu.
+ * Safe to call multiple times — Telegram just overwrites.
+ */
+export async function setBotCommands(): Promise<void> {
+  if (!TELEGRAM_BOT_TOKEN) return;
+
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setMyCommands`;
+
+  const commands = [
+    { command: 'start', description: 'Приветствие и информация о боте' },
+    { command: 'help', description: 'Справка по всем командам' },
+    { command: 'add', description: 'Добавить знание: /add <текст>' },
+    { command: 'correct', description: 'Изменить правило: /correct <описание>' },
+    { command: 'show', description: 'Список правил или детали: /show [R-X]' },
+    { command: 'edit', description: 'Редактировать: /edit R-X <новый текст>' },
+    { command: 'delete', description: 'Удалить правило: /delete R-X' },
+    { command: 'grant', description: 'Дать доступ: /grant <telegram_id>' },
+    { command: 'revoke', description: 'Отозвать доступ: /revoke <telegram_id>' },
+    { command: 'promote', description: 'Повысить до админа: /promote <id>' },
+    { command: 'demote', description: 'Понизить до юзера: /demote <id>' },
+    { command: 'users', description: 'Список активных пользователей' },
+  ];
+
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ commands }),
+    });
+
+    if (resp.ok) {
+      console.log('[telegram-api] Bot commands registered successfully');
+    } else {
+      const err = await resp.text();
+      console.error('[telegram-api] Failed to set commands:', err);
+    }
+  } catch (error) {
+    console.error('[telegram-api] Error setting commands:', error);
+  }
+}
+
 export async function downloadFile(fileId: string): Promise<{ buffer: Buffer; filePath: string }> {
   if (!TELEGRAM_BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN not configured');
 
