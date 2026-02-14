@@ -86,6 +86,7 @@ export async function handleDocumentUpload(
         filename: fileName,
         mimeType,
         rawText,
+        rawBytes: buffer,
         parseStatus: 'PROCESSING',
       },
     });
