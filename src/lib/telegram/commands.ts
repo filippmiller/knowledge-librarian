@@ -470,8 +470,8 @@ export async function handleQuestion(message: TelegramMessage, user: TelegramUse
 
   if (!question) return;
 
-  if (question.length > 2000) {
-    await sendMessage(chatId, 'Вопрос слишком длинный. Максимум 2000 символов.');
+  if (question.length > 10000) {
+    await sendMessage(chatId, 'Текст слишком длинный. Максимум 10000 символов.');
     return;
   }
 
