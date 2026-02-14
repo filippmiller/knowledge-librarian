@@ -219,12 +219,13 @@ export async function correctKnowledge(
     );
     if (!existing) continue;
 
-    // 1. Update rule body IN-PLACE (keep same ruleCode!)
+    // 1. Update rule body IN-PLACE (keep same ruleCode!) + confidence=1.0 (human-verified)
     await prisma.rule.update({
       where: { id: existing.id },
       data: {
         title: update.newTitle || existing.title,
         body: update.newBody,
+        confidence: 1.0,
         sourceSpan: {
           quote: text.slice(0, 200),
           locationHint: `Изменено через Telegram (${correctedByTelegramId})`,

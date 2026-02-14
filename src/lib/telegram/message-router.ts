@@ -1,6 +1,6 @@
 import { sendMessage } from './telegram-api';
 import type { TelegramUpdate, TelegramMessage } from './telegram-api';
-import { checkAccess, isAdmin } from './access-control';
+import { checkAccess, isAdmin, isSuperAdmin } from './access-control';
 import type { TelegramUserInfo } from './access-control';
 import {
   handleStart,
@@ -12,6 +12,7 @@ import {
   handleUsers,
   handleAdd,
   handleCorrect,
+  handleConfirm,
   handleShow,
   handleEdit,
   handleDelete,
@@ -21,6 +22,12 @@ import {
 } from './commands';
 import { handleVoiceMessage } from './voice-handler';
 import { handleDocumentUpload } from './document-handler';
+import {
+  hasPendingConfirmation,
+  handleConfirmationResponse,
+  classifyAdminIntent,
+  handleSmartAdminAction,
+} from './smart-admin';
 
 /**
  * Main entry point for all Telegram updates.
@@ -59,13 +66,10 @@ export async function handleUpdate(update: TelegramUpdate): Promise<void> {
 
   // Route by content type
   try {
-    // Voice message
+    // Voice message — all users can ask questions by voice;
+    // admin-only actions (add/correct) are gated inside the handler
     if (message.voice) {
-      if (isAdmin(user.role)) {
-        await handleVoiceMessage(message, user);
-      } else {
-        await sendMessage(chatId, 'Голосовые сообщения доступны только администраторам.');
-      }
+      await handleVoiceMessage(message, user);
       return;
     }
 
@@ -92,11 +96,25 @@ export async function handleUpdate(update: TelegramUpdate): Promise<void> {
 
 /**
  * Route text messages: commands vs plain questions.
+ *
+ * For SUPER_ADMIN:
+ *  1. Check pending confirmations first (да/нет response)
+ *  2. /commands route as normal
+ *  3. Plain text → AI intent classifier → smart action or Q&A fallback
+ *
+ * For others: commands + Q&A (unchanged)
  */
 async function routeTextMessage(message: TelegramMessage, user: TelegramUserInfo): Promise<void> {
   const text = message.text?.trim() || '';
+  const chatId = message.chat.id;
 
-  // Parse command and arguments
+  // 1. SUPER_ADMIN pending confirmation intercept
+  if (isSuperAdmin(user.role) && hasPendingConfirmation(chatId)) {
+    await handleConfirmationResponse(chatId, text, user);
+    return;
+  }
+
+  // 2. Parse command and arguments
   const commandMatch = text.match(/^\/(\w+)(?:\s+([\s\S]*))?$/);
 
   if (commandMatch) {
@@ -116,10 +134,10 @@ async function routeTextMessage(message: TelegramMessage, user: TelegramUserInfo
     }
 
     // Admin-only commands
-    const adminCommands = ['grant', 'revoke', 'promote', 'demote', 'users', 'add', 'correct', 'show', 'edit', 'delete'];
+    const adminCommands = ['grant', 'revoke', 'promote', 'demote', 'users', 'add', 'correct', 'confirm', 'show', 'edit', 'delete'];
     if (adminCommands.includes(command)) {
       if (!isAdmin(user.role)) {
-        await sendMessage(message.chat.id, 'У вас нет прав для этой команды.');
+        await sendMessage(chatId, 'У вас нет прав для этой команды.');
         return;
       }
 
@@ -138,6 +156,8 @@ async function routeTextMessage(message: TelegramMessage, user: TelegramUserInfo
           return handleAdd(message, user, args);
         case 'correct':
           return handleCorrect(message, user, args);
+        case 'confirm':
+          return handleConfirm(message, user, args);
         case 'show':
           return handleShow(message, user, args);
         case 'edit':
@@ -148,10 +168,26 @@ async function routeTextMessage(message: TelegramMessage, user: TelegramUserInfo
       return;
     }
 
-    await sendMessage(message.chat.id, `Неизвестная команда: /${command}\n\nИспользуйте /help для списка команд.`);
+    await sendMessage(chatId, `Неизвестная команда: /${command}\n\nИспользуйте /help для списка команд.`);
     return;
   }
 
-  // Not a command — treat as a question
+  // 3. SUPER_ADMIN plain text → AI intent classification
+  if (isSuperAdmin(user.role)) {
+    try {
+      const classified = await classifyAdminIntent(text);
+      console.log(`[message-router] Smart admin: "${text.substring(0, 60)}" → ${classified.intent} (${classified.confidence})`);
+
+      if (classified.confidence > 0.7 && classified.intent !== 'question') {
+        await handleSmartAdminAction(chatId, classified, user);
+        return;
+      }
+    } catch (error) {
+      console.error('[message-router] Smart admin classification error:', error);
+      // Fall through to regular Q&A
+    }
+  }
+
+  // 4. Regular Q&A for everyone
   await handleQuestion(message, user);
 }

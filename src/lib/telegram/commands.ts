@@ -48,6 +48,7 @@ export async function handleStart(message: TelegramMessage, user: TelegramUserIn
     text += '/show [R-X] - Просмотр правила\n';
     text += '/edit R-X <текст> - Редактировать правило\n';
     text += '/delete R-X - Удалить правило\n';
+    text += '/confirm R-X - Подтвердить правило (100%)\n';
     text += '/grant <id> - Дать доступ\n';
     text += '/revoke <id> - Отозвать доступ\n';
     text += '/users - Список пользователей\n';
@@ -59,6 +60,12 @@ export async function handleStart(message: TelegramMessage, user: TelegramUserIn
     text += '\nСуперадмин:\n';
     text += '/promote <id> - Повысить до админа\n';
     text += '/demote <id> - Понизить до пользователя\n';
+    text += '\nУмный режим (пишите на русском):\n';
+    text += '"Подтверди R-24" — подтвердить правило\n';
+    text += '"Удали правило R-5" — удалить (с подтверждением)\n';
+    text += '"Покажи правила про апостиль" — поиск\n';
+    text += '"Какие документы загружены?" — список\n';
+    text += '"Статистика" — сводка по базе\n';
   }
 
   await sendMessage(chatId, text);
@@ -84,6 +91,7 @@ export async function handleHelp(message: TelegramMessage, user: TelegramUserInf
     text += '/show - Список правил. /show R-X для деталей.\n';
     text += '/edit R-X <текст> - Заменить текст правила на новый.\n';
     text += '/delete R-X - Пометить правило как удалённое.\n';
+    text += '/confirm R-X - Подтвердить правило (уверенность 100%).\n';
     text += '/grant <telegram_id> - Выдать доступ пользователю\n';
     text += '/revoke <telegram_id> - Отозвать доступ\n';
     text += '/users - Список всех активных пользователей\n\n';
@@ -95,6 +103,9 @@ export async function handleHelp(message: TelegramMessage, user: TelegramUserInf
     text += '\nСуперадмин:\n';
     text += '/promote <telegram_id> - Повысить пользователя до админа\n';
     text += '/demote <telegram_id> - Понизить админа до пользователя\n';
+    text += '\nУмный режим: пишите на русском без команд.\n';
+    text += 'Примеры: "Подтверди R-24", "Удали правило R-5", "Покажи правила про апостиль", "Статистика"\n';
+    text += 'Деструктивные действия требуют подтверждения "да".\n';
   }
 
   text += '\nВаш Telegram ID: ' + user.telegramId;
@@ -273,6 +284,53 @@ export async function handleCorrect(message: TelegramMessage, user: TelegramUser
 }
 
 /**
+ * Handle /confirm command — set rule confidence to 1.0 (human-verified).
+ */
+export async function handleConfirm(message: TelegramMessage, user: TelegramUserInfo, args: string): Promise<void> {
+  const chatId = message.chat.id;
+
+  if (!isAdmin(user.role)) {
+    await sendMessage(chatId, 'У вас нет прав для этой команды.');
+    return;
+  }
+
+  const code = args.trim().toUpperCase();
+
+  if (!code || !code.match(/^R-\d+$/)) {
+    await sendMessage(chatId, 'Использование: /confirm R-X\n\nПодтверждает правило — устанавливает уверенность 100%.');
+    return;
+  }
+
+  const existing = await prisma.rule.findFirst({
+    where: { ruleCode: code, status: 'ACTIVE' },
+  });
+
+  if (!existing) {
+    await sendMessage(chatId, `Правило ${code} не найдено (или не активно).`);
+    return;
+  }
+
+  if (existing.confidence >= 1.0) {
+    await sendMessage(chatId, `Правило ${code} уже подтверждено (100%).`);
+    return;
+  }
+
+  await prisma.rule.update({
+    where: { id: existing.id },
+    data: {
+      confidence: 1.0,
+      sourceSpan: {
+        ...(typeof existing.sourceSpan === 'object' && existing.sourceSpan !== null ? existing.sourceSpan : {}),
+        confirmedBy: user.telegramId,
+        confirmedAt: new Date().toISOString(),
+      },
+    },
+  });
+
+  await sendMessage(chatId, `Правило ${code} подтверждено (100%).\n\n${existing.title}`);
+}
+
+/**
  * Handle /show command — show a rule by code.
  */
 export async function handleShow(message: TelegramMessage, user: TelegramUserInfo, args: string): Promise<void> {
@@ -324,7 +382,11 @@ export async function handleShow(message: TelegramMessage, user: TelegramUserInf
 
   let text = `${rule.ruleCode}: ${rule.title}\n\n`;
   text += `${rule.body}\n\n`;
-  text += `Уверенность: ${(rule.confidence * 100).toFixed(0)}%\n`;
+  text += `Уверенность: ${(rule.confidence * 100).toFixed(0)}%`;
+  if (rule.confidence < 1.0) {
+    text += ` (используйте /confirm ${rule.ruleCode} для подтверждения)`;
+  }
+  text += '\n';
   text += `Статус: ${rule.status}\n`;
   if (rule.document) text += `Документ: ${rule.document.title}\n`;
   if (rule.domains.length > 0) {
@@ -395,7 +457,7 @@ export async function handleEdit(message: TelegramMessage, user: TelegramUserInf
       ruleCode: newCode,
       title: existing.title,
       body: newBody,
-      confidence: existing.confidence,
+      confidence: 1.0,
       documentId: existing.documentId,
       supersedesRuleId: existing.id,
       sourceSpan: { quote: newBody.slice(0, 200), locationHint: `Отредактировано через Telegram` },
