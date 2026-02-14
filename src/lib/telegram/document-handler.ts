@@ -100,7 +100,7 @@ export async function handleDocumentUpload(
     // Phase 2: Knowledge extraction (non-streaming)
     await sendTypingIndicator(chatId);
     await sendMessage(chatId, 'Фаза 2/3: Извлечение знаний...');
-    const { rulesCreated, qaPairsCreated, ruleCodeToId } = await extractKnowledge(rawText, document.id, domainIds);
+    const { rulesCreated, qaPairsCreated, ruleCodeToId, rulesList, qaPairsList } = await extractKnowledge(rawText, document.id, domainIds);
 
     // Phase 3: Chunking + embeddings
     await sendTypingIndicator(chatId);
@@ -113,14 +113,32 @@ export async function handleDocumentUpload(
       data: { parseStatus: 'COMPLETED' },
     });
 
-    // Send summary
+    // Fetch domain names for summary
+    const domains = domainIds.length > 0
+      ? await prisma.domain.findMany({
+          where: { id: { in: domainIds } },
+          select: { slug: true, title: true },
+        })
+      : [];
+
+    // Build detailed summary
     const summary = [
       `Документ "${fileName}" обработан!`,
+      `ID: ${document.id}`,
       '',
-      `Правил создано: ${rulesCreated}`,
-      `Пар вопрос-ответ: ${qaPairsCreated}`,
+      `Домены: ${domains.map((d) => d.title || d.slug).join(', ') || 'нет'}`,
+      '',
+      `--- Правила (${rulesCreated}) ---`,
+      ...(rulesList.length > 0
+        ? rulesList.map((r) => `${r.code}: ${r.title}`)
+        : ['(нет)']),
+      '',
+      `--- Вопрос-ответ (${qaPairsCreated}) ---`,
+      ...(qaPairsList.length > 0
+        ? qaPairsList.map((qa) => `Q: ${qa.question}`)
+        : ['(нет)']),
+      '',
       `Фрагментов для поиска: ${chunksCreated}`,
-      `Доменов привязано: ${domainIds.length}`,
     ].join('\n');
 
     await sendMessage(chatId, summary);
@@ -207,11 +225,19 @@ ${domainList}
   return [...new Set(domainIds)];
 }
 
+interface ExtractResult {
+  rulesCreated: number;
+  qaPairsCreated: number;
+  ruleCodeToId: Map<string, string>;
+  rulesList: { code: string; title: string }[];
+  qaPairsList: { question: string; answer: string }[];
+}
+
 async function extractKnowledge(
   rawText: string,
   documentId: string,
   domainIds: string[]
-): Promise<{ rulesCreated: number; qaPairsCreated: number; ruleCodeToId: Map<string, string> }> {
+): Promise<ExtractResult> {
   // Get existing rule codes
   const existingRules = await prisma.rule.findMany({
     where: { status: 'ACTIVE' },
@@ -225,30 +251,42 @@ async function extractKnowledge(
     messages: [
       {
         role: 'system',
-        content: `Ты - экстрактор знаний для бюро переводов. Извлеки правила и QA пары.
+        content: `Ты - экстрактор знаний для бюро переводов. Извлеки правила и пары вопрос-ответ из документа.
 Начинай нумерацию с R-${startCode}. ВСЕ тексты на РУССКОМ.
+
+ПРАВИЛА (rules):
+- Каждый значимый факт, процедуру, требование или инструкцию оформи как отдельное правило.
+- title: краткое название (до 10 слов)
+- body: полное описание правила
+
+ПАРЫ ВОПРОС-ОТВЕТ (qaPairs):
+- ОБЯЗАТЕЛЬНО создай 1-2 естественных вопроса для КАЖДОГО правила.
+- Вопросы должны быть такими, какие задал бы сотрудник в чате.
+- linkedRuleCode: укажи код правила, к которому относится вопрос.
+- Если в документе 10 правил, должно быть минимум 10-20 QA пар.
 
 Ответь JSON:
 {
   "rules": [{ "ruleCode": "R-${startCode}", "title": "...", "body": "...", "confidence": 0.8, "sourceSpan": { "quote": "...", "locationHint": "..." } }],
-  "qaPairs": [{ "question": "...", "answer": "...", "linkedRuleCode": "R-X или null" }]
+  "qaPairs": [{ "question": "...", "answer": "...", "linkedRuleCode": "R-X" }]
 }`,
       },
       { role: 'user', content: rawText.slice(0, 8000) },
     ],
     responseFormat: 'json_object',
     temperature: 0.2,
-    maxTokens: 4096,
+    maxTokens: 8192,
   });
 
   let result: KnowledgeExtractResult;
   try {
     result = JSON.parse(response);
   } catch {
-    return { rulesCreated: 0, qaPairsCreated: 0, ruleCodeToId: new Map() };
+    return { rulesCreated: 0, qaPairsCreated: 0, ruleCodeToId: new Map(), rulesList: [], qaPairsList: [] };
   }
 
   const ruleCodeToId = new Map<string, string>();
+  const rulesList: { code: string; title: string }[] = [];
   let rulesCreated = 0;
 
   for (const rule of (result.rules || [])) {
@@ -264,6 +302,7 @@ async function extractKnowledge(
     });
 
     ruleCodeToId.set(rule.ruleCode, created.id);
+    rulesList.push({ code: rule.ruleCode, title: rule.title });
 
     for (const domainId of domainIds) {
       await prisma.ruleDomain.upsert({
@@ -275,6 +314,7 @@ async function extractKnowledge(
     rulesCreated++;
   }
 
+  const qaPairsList: { question: string; answer: string }[] = [];
   let qaPairsCreated = 0;
   for (const qa of (result.qaPairs || [])) {
     const ruleId = qa.linkedRuleCode ? ruleCodeToId.get(qa.linkedRuleCode) : null;
@@ -288,6 +328,8 @@ async function extractKnowledge(
       },
     });
 
+    qaPairsList.push({ question: qa.question, answer: qa.answer });
+
     for (const domainId of domainIds) {
       await prisma.qADomain.upsert({
         where: { qaId_domainId: { qaId: created.id, domainId } },
@@ -298,7 +340,7 @@ async function extractKnowledge(
     qaPairsCreated++;
   }
 
-  return { rulesCreated, qaPairsCreated, ruleCodeToId };
+  return { rulesCreated, qaPairsCreated, ruleCodeToId, rulesList, qaPairsList };
 }
 
 async function createChunks(rawText: string, documentId: string, domainIds: string[]): Promise<number> {
