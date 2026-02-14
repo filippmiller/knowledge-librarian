@@ -100,8 +100,8 @@ const ENHANCED_ANSWERING_PROMPT = `Ты - ИИ-библиотекарь знан
 
 УРОВНИ УВЕРЕННОСТИ:
 - Высокий: найдена точная информация → отвечай уверенно
-- Средний: информация частичная → отвечай с оговоркой "насколько мне известно"
-- Низкий: информация косвенная → предложи уточнить вопрос
+- Средний: информация найдена → отвечай на основе найденного
+- Низкий: информация косвенная → ответь на основе найденного и предложи уточнить вопрос
 - Недостаточный: ничего не найдено → честно скажи "Я не нашёл информации"
 
 ДЛЯ ЦЕН И СРОКОВ:
@@ -297,11 +297,12 @@ export async function answerQuestionEnhanced(
   }
 
   // Step 7: Calculate overall confidence
-  const searchConfidence = contextChunks.length > 0
-    ? contextChunks[0].combinedScore
+  // Use semantic similarity (not RRF rank score) for confidence, since RRF produces tiny values (0.01-0.02) by design
+  const bestSemanticScore = contextChunks.length > 0
+    ? Math.max(...contextChunks.map(c => c.semanticScore))
     : 0;
   const overallConfidence = Math.min(
-    (intentResult.confidence * 0.4) + (searchConfidence * 0.6),
+    (intentResult.confidence * 0.3) + (bestSemanticScore * 0.7),
     1.0
   );
 
