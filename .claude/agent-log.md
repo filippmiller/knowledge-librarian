@@ -9,6 +9,52 @@ Each entry tracks: timestamp, agent session, functionality area, files changed, 
 
 ---
 
+## [2026-02-15 02:00] — Smart admin mode: natural language routing for SUPER_ADMIN
+
+**Area:** Telegram Bot/Smart Admin, Commands, Knowledge Management
+**Type:** feature
+
+### Files Changed
+- `src/lib/telegram/smart-admin.ts` — New: AI intent classifier, confirmation flow, 7 action executors
+- `src/lib/telegram/commands.ts` — Added handleConfirm(); /edit sets confidence=1.0; /show shows confirm hint
+- `src/lib/telegram/knowledge-manager.ts` — correctKnowledge() sets confidence=1.0 on updated rules
+- `src/lib/telegram/message-router.ts` — Added smart admin routing layer for SUPER_ADMIN plain text
+
+### Functions/Symbols Modified
+- `classifyAdminIntent()` — New: AI classifier (8 intents, JSON mode, temp=0.1)
+- `handleSmartAdminAction()` — New: routes classified intent to appropriate executor
+- `hasPendingConfirmation()` — New: checks in-memory Map with 5-min TTL
+- `handleConfirmationResponse()` — New: processes да/нет for destructive actions
+- `executeConfirmRule()` — New: sets rule confidence to 1.0
+- `executeConfirmAllDocRules()` — New: bulk confirm all rules from a document
+- `executeSearchRules()` — New: ILIKE search in rule title+body
+- `executeListDocuments()` — New: all completed docs with rule counts
+- `executeShowStats()` — New: rule/QA/chunk counts, optionally by domain
+- `prepareDeleteRule()` — New: preview + confirmation request
+- `prepareDeleteDocument()` — New: preview + confirmation request
+- `executeDeleteRule()` — New: DEPRECATED in transaction
+- `executeDeleteDocument()` — New: cascade deprecate/delete in transaction
+- `handleConfirm()` — New: /confirm R-X command handler
+- `handleEdit()` — Modified: confidence now 1.0 instead of copying old value
+- `handleShow()` — Modified: shows /confirm hint when confidence < 1.0
+- `correctKnowledge()` — Modified: sets confidence=1.0 on updated rules
+- `routeTextMessage()` — Modified: added confirmation intercept + AI classification for SUPER_ADMIN
+
+### Database Tables
+- `Rule` — confidence updated to 1.0 on confirm/edit/correct; DEPRECATED on delete
+- `QAPair` — DEPRECATED on rule delete
+- `DocChunk` — deleted on document delete
+- `Document` — queried for list/stats; marked FAILED on delete
+- `RuleDomain`, `QADomain`, `ChunkDomain` — queried for stats
+
+### Summary
+SUPER_ADMIN can now interact with the bot using natural Russian text instead of rigid /commands. An AI intent classifier (8 intents, confidence threshold 0.7) routes plain text to smart actions: confirm rules, search, list documents, show stats. Destructive actions (delete rule, delete document) require explicit "да" confirmation with 5-minute timeout. Also added /confirm R-X command for all admins, and set confidence=1.0 on /edit and /correct (human-verified). Regular users and ADMINs are completely unaffected.
+
+### Session Notes
+→ `.claude/sessions/2026-02-15-020000.md`
+
+---
+
 ## [2026-02-15 00:30] — Role-based commands, /report, /helpme
 
 **Area:** Telegram Bot/Commands, Access Control
