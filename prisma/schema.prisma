@@ -409,6 +409,31 @@ enum StagedItemType {
 }
 
 // ============================================
+// TELEGRAM ACCESS CONTROL
+// ============================================
+
+enum TelegramUserRole {
+  SUPER_ADMIN  // Can manage all users, full knowledge management
+  ADMIN        // Can add/correct knowledge, upload docs, manage regular users
+  USER         // Can only ask questions
+}
+
+model TelegramUser {
+  id          String            @id @default(cuid())
+  telegramId  String            @unique  // Telegram user ID (numeric string)
+  username    String?           // @username, may change
+  firstName   String?
+  role        TelegramUserRole  @default(USER)
+  grantedBy   String?           // telegramId of who granted access
+  isActive    Boolean           @default(true)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@index([telegramId])
+  @@index([role])
+}
+
+// ============================================
 // AI SETTINGS
 // ============================================
 
