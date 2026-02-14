@@ -9,6 +9,8 @@ import {
   listUsers,
   isAdmin,
   isSuperAdmin,
+  getAdminTelegramIds,
+  getAllActiveTelegramIds,
 } from './access-control';
 import { addKnowledge, correctKnowledge } from './knowledge-manager';
 import { answerQuestionEnhanced, type EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
@@ -34,8 +36,10 @@ export async function handleStart(message: TelegramMessage, user: TelegramUserIn
   text += '- Как отправить заказ почтой России?\n';
   text += '- Какие миграционные услуги вы предоставляете?\n\n';
 
-  text += 'Основные команды:\n';
+  text += 'Команды:\n';
   text += '/help - Справка по командам\n';
+  text += '/report <текст> - Сообщить об ошибке в базе знаний\n';
+  text += '/helpme <вопрос> - Отправить вопрос всем сотрудникам\n';
 
   if (isAdmin(user.role)) {
     text += '\nАдмин-команды:\n';
@@ -68,7 +72,9 @@ export async function handleHelp(message: TelegramMessage, user: TelegramUserInf
 
   let text = 'Команды бота:\n\n';
   text += '/start - Приветствие\n';
-  text += '/help - Эта справка\n\n';
+  text += '/help - Эта справка\n';
+  text += '/report <текст> - Сообщить об ошибке в базе знаний (уведомит админов)\n';
+  text += '/helpme <вопрос> - Отправить вопрос всем сотрудникам\n\n';
   text += 'Просто напишите вопрос, и я найду ответ в базе знаний.\n';
 
   if (isAdmin(user.role)) {
@@ -498,6 +504,97 @@ export async function handleQuestion(message: TelegramMessage, user: TelegramUse
     console.error('[commands] Question error:', error);
     await sendMessage(chatId, 'Произошла ошибка при обработке вопроса. Попробуйте позже.');
   }
+}
+
+/**
+ * Handle /report command — any user can report wrong information to admins.
+ */
+export async function handleReport(message: TelegramMessage, user: TelegramUserInfo, args: string): Promise<void> {
+  const chatId = message.chat.id;
+
+  const text = args.trim();
+  if (!text) {
+    await sendMessage(chatId, 'Использование: /report <описание ошибки>\n\nОпишите, какая информация в базе знаний неверна.\n\nПример: /report Бот сказал что перевод паспорта стоит 1500, но на самом деле 2000');
+    return;
+  }
+
+  const senderName = user.firstName || user.username || user.telegramId;
+  const senderInfo = user.username ? `${senderName} (@${user.username})` : senderName;
+
+  // Notify all admins
+  const adminIds = await getAdminTelegramIds();
+
+  if (adminIds.length === 0) {
+    await sendMessage(chatId, 'Нет активных администраторов для отправки отчёта. Попробуйте позже.');
+    return;
+  }
+
+  const reportMessage = [
+    'Сообщение об ошибке в базе знаний',
+    '',
+    `От: ${senderInfo} (ID: ${user.telegramId})`,
+    `Дата: ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}`,
+    '',
+    `Описание:`,
+    text,
+  ].join('\n');
+
+  let notified = 0;
+  for (const adminId of adminIds) {
+    // Don't notify the sender if they're also an admin
+    if (adminId === user.telegramId) continue;
+    try {
+      await sendMessage(Number(adminId), reportMessage);
+      notified++;
+    } catch {
+      // Skip unreachable admins
+    }
+  }
+
+  await sendMessage(chatId, `Спасибо! Ваше сообщение отправлено администраторам (${notified}).`);
+}
+
+/**
+ * Handle /helpme command — broadcast a question to all active users.
+ */
+export async function handleHelpMe(message: TelegramMessage, user: TelegramUserInfo, args: string): Promise<void> {
+  const chatId = message.chat.id;
+
+  const text = args.trim();
+  if (!text) {
+    await sendMessage(chatId, 'Использование: /helpme <ваш вопрос>\n\nВаш вопрос будет отправлен всем сотрудникам.\n\nПример: /helpme Кто-нибудь знает, как оформить апостиль на свидетельство?');
+    return;
+  }
+
+  const senderName = user.firstName || user.username || user.telegramId;
+  const senderInfo = user.username ? `${senderName} (@${user.username})` : senderName;
+
+  // Get all active users
+  const allIds = await getAllActiveTelegramIds();
+
+  const helpMessage = [
+    'Просьба о помощи',
+    '',
+    `От: ${senderInfo}`,
+    '',
+    text,
+    '',
+    `Ответьте ${senderInfo} напрямую в Telegram.`,
+  ].join('\n');
+
+  let notified = 0;
+  for (const userId of allIds) {
+    // Don't send to the requester
+    if (userId === user.telegramId) continue;
+    try {
+      await sendMessage(Number(userId), helpMessage);
+      notified++;
+    } catch {
+      // Skip unreachable users
+    }
+  }
+
+  await sendMessage(chatId, `Ваш вопрос отправлен ${notified} сотрудникам.`);
 }
 
 /**

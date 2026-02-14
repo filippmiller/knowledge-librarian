@@ -112,26 +112,20 @@ export async function setBotCommands(): Promise<void> {
 
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setMyCommands`;
 
-  const commands = [
+  // Default commands visible to all users (no admin commands)
+  const userCommands = [
     { command: 'start', description: 'Приветствие и информация о боте' },
-    { command: 'help', description: 'Справка по всем командам' },
-    { command: 'add', description: 'Добавить знание: /add <текст>' },
-    { command: 'correct', description: 'Изменить правило: /correct <описание>' },
-    { command: 'show', description: 'Список правил или детали: /show [R-X]' },
-    { command: 'edit', description: 'Редактировать: /edit R-X <новый текст>' },
-    { command: 'delete', description: 'Удалить правило: /delete R-X' },
-    { command: 'grant', description: 'Дать доступ: /grant <telegram_id>' },
-    { command: 'revoke', description: 'Отозвать доступ: /revoke <telegram_id>' },
-    { command: 'promote', description: 'Повысить до админа: /promote <id>' },
-    { command: 'demote', description: 'Понизить до юзера: /demote <id>' },
-    { command: 'users', description: 'Список активных пользователей' },
+    { command: 'help', description: 'Справка по командам' },
+    { command: 'report', description: 'Сообщить об ошибке в базе знаний' },
+    { command: 'helpme', description: 'Отправить вопрос всем сотрудникам' },
   ];
 
   try {
+    // Set default commands (visible to all users)
     const resp = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ commands }),
+      body: JSON.stringify({ commands: userCommands }),
     });
 
     if (resp.ok) {

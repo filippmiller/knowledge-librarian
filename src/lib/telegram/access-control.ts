@@ -246,3 +246,25 @@ export function isAdmin(role: TelegramUserRole): boolean {
 export function isSuperAdmin(role: TelegramUserRole): boolean {
   return role === 'SUPER_ADMIN';
 }
+
+/**
+ * Get Telegram IDs of all active admins (ADMIN + SUPER_ADMIN).
+ */
+export async function getAdminTelegramIds(): Promise<string[]> {
+  const admins = await prisma.telegramUser.findMany({
+    where: { isActive: true, role: { in: ['ADMIN', 'SUPER_ADMIN'] } },
+    select: { telegramId: true },
+  });
+  return admins.map((a) => a.telegramId);
+}
+
+/**
+ * Get Telegram IDs of all active users (all roles).
+ */
+export async function getAllActiveTelegramIds(): Promise<string[]> {
+  const users = await prisma.telegramUser.findMany({
+    where: { isActive: true },
+    select: { telegramId: true },
+  });
+  return users.map((u) => u.telegramId);
+}

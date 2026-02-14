@@ -15,6 +15,8 @@ import {
   handleShow,
   handleEdit,
   handleDelete,
+  handleReport,
+  handleHelpMe,
   handleQuestion,
 } from './commands';
 import { handleVoiceMessage } from './voice-handler';
@@ -101,35 +103,53 @@ async function routeTextMessage(message: TelegramMessage, user: TelegramUserInfo
     const command = commandMatch[1].toLowerCase();
     const args = commandMatch[2] || '';
 
+    // Commands available to all users
     switch (command) {
       case 'start':
         return handleStart(message, user);
       case 'help':
         return handleHelp(message, user);
-      case 'grant':
-        return handleGrant(message, user, args);
-      case 'revoke':
-        return handleRevoke(message, user, args);
-      case 'promote':
-        return handlePromote(message, user, args);
-      case 'demote':
-        return handleDemote(message, user, args);
-      case 'users':
-        return handleUsers(message, user);
-      case 'add':
-        return handleAdd(message, user, args);
-      case 'correct':
-        return handleCorrect(message, user, args);
-      case 'show':
-        return handleShow(message, user, args);
-      case 'edit':
-        return handleEdit(message, user, args);
-      case 'delete':
-        return handleDelete(message, user, args);
-      default:
-        await sendMessage(message.chat.id, `Неизвестная команда: /${command}\n\nИспользуйте /help для списка команд.`);
-        return;
+      case 'report':
+        return handleReport(message, user, args);
+      case 'helpme':
+        return handleHelpMe(message, user, args);
     }
+
+    // Admin-only commands
+    const adminCommands = ['grant', 'revoke', 'promote', 'demote', 'users', 'add', 'correct', 'show', 'edit', 'delete'];
+    if (adminCommands.includes(command)) {
+      if (!isAdmin(user.role)) {
+        await sendMessage(message.chat.id, 'У вас нет прав для этой команды.');
+        return;
+      }
+
+      switch (command) {
+        case 'grant':
+          return handleGrant(message, user, args);
+        case 'revoke':
+          return handleRevoke(message, user, args);
+        case 'promote':
+          return handlePromote(message, user, args);
+        case 'demote':
+          return handleDemote(message, user, args);
+        case 'users':
+          return handleUsers(message, user);
+        case 'add':
+          return handleAdd(message, user, args);
+        case 'correct':
+          return handleCorrect(message, user, args);
+        case 'show':
+          return handleShow(message, user, args);
+        case 'edit':
+          return handleEdit(message, user, args);
+        case 'delete':
+          return handleDelete(message, user, args);
+      }
+      return;
+    }
+
+    await sendMessage(message.chat.id, `Неизвестная команда: /${command}\n\nИспользуйте /help для списка команд.`);
+    return;
   }
 
   // Not a command — treat as a question
