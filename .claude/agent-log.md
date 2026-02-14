@@ -9,6 +9,38 @@ Each entry tracks: timestamp, agent session, functionality area, files changed, 
 
 ---
 
+## [2026-02-15 00:30] — Role-based commands, /report, /helpme
+
+**Area:** Telegram Bot/Commands, Access Control
+**Type:** feature
+
+### Files Changed
+- `src/lib/telegram/telegram-api.ts` — Slash menu shows only user commands (start, help, report, helpme)
+- `src/lib/telegram/access-control.ts` — Added getAdminTelegramIds(), getAllActiveTelegramIds()
+- `src/lib/telegram/commands.ts` — Added handleReport(), handleHelpMe(); updated /start and /help to show /report and /helpme
+- `src/lib/telegram/message-router.ts` — Added /report, /helpme routing; centralized admin command blocking
+
+### Functions/Symbols Modified
+- `setBotCommands()` — Now registers only 4 user commands instead of 12
+- `getAdminTelegramIds()` — New: returns all active ADMIN+SUPER_ADMIN telegram IDs
+- `getAllActiveTelegramIds()` — New: returns all active user telegram IDs
+- `handleReport()` — New: reports wrong info to all admins via DM
+- `handleHelpMe()` — New: broadcasts question to all active users via DM
+- `handleStart()` — Shows /report and /helpme to all users
+- `handleHelp()` — Shows /report and /helpme to all users
+- `routeTextMessage()` — Split into user commands (always) and admin commands (role-gated)
+
+### Database Tables
+- `TelegramUser` — queried for admin IDs and all active user IDs
+
+### Summary
+Regular users now only see 4 commands in the Telegram slash menu: /start, /help, /report, /helpme. Admin commands are hidden and blocked at the router level for USER role. /report lets any user report wrong information — all admins receive a notification DM. /helpme broadcasts a question to all active users in the system.
+
+### Session Notes
+→ `.claude/sessions/2026-02-14-235000.md`
+
+---
+
 ## [2026-02-14 23:50] — Improve document extraction QA pairs + detailed processing summary
 
 **Area:** Telegram Bot/Document Processing
