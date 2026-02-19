@@ -4,6 +4,29 @@
 
 ---
 
+## 2026-02-19 — UX: Forgiving Bot — Keyword Detection, Direct Rule Lookup
+
+**Status**: Completed
+**Commits**: 1ba28d3
+
+### What was done
+- **Keyword detection in text messages**: Admin text starting with "сохрани/добавь/запомни/запиши" now triggers `addKnowledge` directly (not RAG). Same for "поменяй/измени/исправь/обнови" → `correctKnowledge`. Previously this only worked for voice messages.
+- **Direct rule lookup**: "правило 100" or "правило R-100" in any text message now queries the DB by ruleCode and shows the rule directly. Works for ALL users. Falls through to RAG only if not found.
+- **Search includes ruleCode**: `executeSearchRules` in smart-admin now also searches by `ruleCode` field (was only title+body).
+- **`add_rule` intent in smart-admin**: Added as fallback for SUPER_ADMIN AI classifier — catches "сохрани правило..." even if keyword regex doesn't match.
+
+### Root cause
+Bot was too "rigid" — keyword-based intent detection (add/correct) only worked for voice messages. Text messages went straight to RAG or required exact `/commands`. User wrote "сохрани правило..." as text → bot answered from RAG. After `/add` created R-100, user asked "покажи правило 100" → bot couldn't find it (no direct DB lookup).
+
+### Files changed
+- `src/lib/telegram/message-router.ts` — keyword detection + rule lookup pattern
+- `src/lib/telegram/smart-admin.ts` — ruleCode in search + add_rule intent
+
+### Deployment
+- Railway: deployed via `railway up`, Next.js 16.1.3 started successfully
+
+---
+
 ## 2026-02-14 — Telegram Bot: Access Control, Knowledge Management, Document Upload
 
 **Status**: Completed
