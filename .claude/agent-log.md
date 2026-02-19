@@ -9,6 +9,38 @@ Each entry tracks: timestamp, agent session, functionality area, files changed, 
 
 ---
 
+## [2026-02-19 16:00] — Forgiving bot: keyword detection in text, direct rule lookup, smarter search
+
+**Area:** Telegram Bot/Message Router, Smart Admin
+**Type:** feature
+
+### Files Changed
+- `src/lib/telegram/message-router.ts` — Added keyword detection (ADD_KEYWORDS, CORRECT_KEYWORDS) for text messages; added RULE_LOOKUP_PATTERN for direct rule lookup by code; imported addKnowledge, correctKnowledge, prisma, sendTypingIndicator
+- `src/lib/telegram/smart-admin.ts` — Added `add_rule` intent to classifier prompt, AdminIntent type, validIntents, handleSmartAdminAction switch; added `executeAddRule()` function; added ruleCode to OR conditions in `executeSearchRules()`
+
+### Functions/Symbols Modified
+- `routeTextMessage()` — Modified: added step 3 (keyword detection for admin), step 4 (rule lookup for all users), renumbered steps 5-6
+- `executeSearchRules()` — Modified: added `ruleCode` to OR search conditions
+- `executeAddRule()` — New: calls addKnowledge via smart-admin AI classifier
+- `classifyAdminIntent()` — Modified: updated validIntents to include `add_rule`
+- `handleSmartAdminAction()` — Modified: added `add_rule` case
+- `CLASSIFIER_PROMPT` — Modified: added `add_rule` intent description
+- `AdminIntent` type — Modified: added `'add_rule'` union member
+- `ADD_KEYWORDS` const — New in message-router (copied from voice-handler)
+- `CORRECT_KEYWORDS` const — New in message-router (copied from voice-handler)
+- `RULE_LOOKUP_PATTERN` const — New: `/правило\s+(?:R-)?(\d+)/i`
+
+### Database Tables
+- `Rule` — direct findFirst by ruleCode for rule lookup pattern; ruleCode added to search OR conditions
+
+### Summary
+Bot was too rigid — keyword-based intent detection (add/correct) only worked for voice messages, and "покажи правило 100" went through full RAG instead of a direct DB lookup. Added three layers of "forgiveness": (1) admin text starting with "сохрани/добавь/запомни" triggers addKnowledge directly, same for "поменяй/измени" → correctKnowledge; (2) "правило N" pattern queries the DB by ruleCode and shows the rule instantly for all users; (3) add_rule intent in smart-admin classifier as a fallback safety net. Also fixed executeSearchRules to include ruleCode in search.
+
+### Session Notes
+→ `.claude/sessions/2026-02-19-forgiving-bot.md`
+
+---
+
 ## [2026-02-15 02:00] — Smart admin mode: natural language routing for SUPER_ADMIN
 
 **Area:** Telegram Bot/Smart Admin, Commands, Knowledge Management
