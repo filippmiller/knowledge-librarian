@@ -1,6 +1,7 @@
 import { createChatCompletion } from '@/lib/ai/chat-provider';
-import { sendMessage } from './telegram-api';
+import { sendMessage, sendTypingIndicator } from './telegram-api';
 import type { TelegramUserInfo } from './access-control';
+import { addKnowledge } from './knowledge-manager';
 import prisma from '@/lib/db';
 
 // ============================================
@@ -8,6 +9,7 @@ import prisma from '@/lib/db';
 // ============================================
 
 export type AdminIntent =
+  | 'add_rule'
   | 'delete_rule'
   | 'delete_document'
   | 'confirm_rule'
@@ -43,6 +45,9 @@ const CONFIRMATION_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const CLASSIFIER_PROMPT = `Ты классификатор намерений администратора базы знаний бюро переводов.
 
 Определи намерение из текста администратора. Возможные намерения:
+
+- add_rule — добавить новое знание/правило (пример: "сохрани правило...", "добавь знание...", "запомни что...")
+  params: { text: "текст знания для сохранения" }
 
 - delete_rule — удалить конкретное правило (пример: "Удали правило R-42", "убери R-5")
   params: { ruleCode: "R-42" }
@@ -97,7 +102,7 @@ export async function classifyAdminIntent(text: string): Promise<ClassifiedInten
 
     // Validate
     const validIntents: AdminIntent[] = [
-      'delete_rule', 'delete_document', 'confirm_rule', 'confirm_all_doc',
+      'add_rule', 'delete_rule', 'delete_document', 'confirm_rule', 'confirm_all_doc',
       'search_rules', 'list_documents', 'show_stats', 'question',
     ];
     if (!validIntents.includes(parsed.intent)) {
@@ -193,6 +198,10 @@ export async function handleSmartAdminAction(
   user: TelegramUserInfo
 ): Promise<void> {
   switch (intent.intent) {
+    case 'add_rule':
+      await executeAddRule(chatId, intent.params.text, user);
+      break;
+
     case 'confirm_rule':
       await executeConfirmRule(chatId, intent.params.ruleCode);
       break;
@@ -229,6 +238,22 @@ export async function handleSmartAdminAction(
 // ============================================
 // SAFE EXECUTORS (no confirmation needed)
 // ============================================
+
+async function executeAddRule(chatId: number, text: string, user: TelegramUserInfo): Promise<void> {
+  if (!text) {
+    await sendMessage(chatId, 'Не указан текст для сохранения.');
+    return;
+  }
+
+  await sendTypingIndicator(chatId);
+  try {
+    const result = await addKnowledge(text, user.telegramId);
+    await sendMessage(chatId, result.summary);
+  } catch (error) {
+    console.error('[smart-admin] addKnowledge failed:', error);
+    await sendMessage(chatId, 'Ошибка при сохранении знания.');
+  }
+}
 
 async function executeConfirmRule(chatId: number, ruleCode: string): Promise<void> {
   if (!ruleCode) {
@@ -296,6 +321,7 @@ async function executeSearchRules(chatId: number, query: string): Promise<void> 
     where: {
       status: 'ACTIVE',
       OR: [
+        { ruleCode: { contains: query, mode: 'insensitive' } },
         { title: { contains: query, mode: 'insensitive' } },
         { body: { contains: query, mode: 'insensitive' } },
       ],

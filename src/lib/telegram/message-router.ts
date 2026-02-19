@@ -1,4 +1,4 @@
-import { sendMessage } from './telegram-api';
+import { sendMessage, sendTypingIndicator } from './telegram-api';
 import type { TelegramUpdate, TelegramMessage } from './telegram-api';
 import { checkAccess, isAdmin, isSuperAdmin } from './access-control';
 import type { TelegramUserInfo } from './access-control';
@@ -22,12 +22,23 @@ import {
 } from './commands';
 import { handleVoiceMessage } from './voice-handler';
 import { handleDocumentUpload } from './document-handler';
+import { addKnowledge, correctKnowledge } from './knowledge-manager';
 import {
   hasPendingConfirmation,
   handleConfirmationResponse,
   classifyAdminIntent,
   handleSmartAdminAction,
 } from './smart-admin';
+import prisma from '@/lib/db';
+
+// Keywords that signal "add new knowledge" (same as voice-handler)
+const ADD_KEYWORDS = /^(добавь|добавить|запомни|запиши|сохрани|новое правило|добавить правило)/i;
+
+// Keywords that signal "correct/change existing knowledge" (same as voice-handler)
+const CORRECT_KEYWORDS = /^(поменяй|поменять|измени|изменить|исправь|исправить|обнови|обновить|замени|заменить|теперь|стоимость .* теперь|цена .* теперь)/i;
+
+// Pattern to detect direct rule lookup: "правило 100", "правило R-100", "покажи правило 100"
+const RULE_LOOKUP_PATTERN = /правило\s+(?:R-)?(\d+)/i;
 
 /**
  * Main entry point for all Telegram updates.
@@ -172,7 +183,54 @@ async function routeTextMessage(message: TelegramMessage, user: TelegramUserInfo
     return;
   }
 
-  // 3. SUPER_ADMIN plain text → AI intent classification
+  // 3. Admin keyword detection: "сохрани/добавь" and "поменяй/измени" in plain text
+  if (isAdmin(user.role)) {
+    if (CORRECT_KEYWORDS.test(text)) {
+      await sendTypingIndicator(chatId);
+      try {
+        const result = await correctKnowledge(text, user.telegramId);
+        await sendMessage(chatId, result.summary);
+        return;
+      } catch (error) {
+        console.error('[message-router] correctKnowledge error:', error);
+        await sendMessage(chatId, 'Ошибка при обработке команды изменения.');
+        return;
+      }
+    }
+
+    if (ADD_KEYWORDS.test(text)) {
+      await sendTypingIndicator(chatId);
+      try {
+        const knowledgeText = text.replace(ADD_KEYWORDS, '').trim() || text;
+        const result = await addKnowledge(knowledgeText, user.telegramId);
+        await sendMessage(chatId, result.summary);
+        return;
+      } catch (error) {
+        console.error('[message-router] addKnowledge error:', error);
+        await sendMessage(chatId, 'Ошибка при сохранении знания.');
+        return;
+      }
+    }
+  }
+
+  // 4. Direct rule lookup: "правило 100", "правило R-100", "покажи правило 100"
+  const ruleLookupMatch = text.match(RULE_LOOKUP_PATTERN);
+  if (ruleLookupMatch) {
+    const ruleCode = `R-${ruleLookupMatch[1]}`;
+    const rule = await prisma.rule.findFirst({
+      where: { ruleCode, status: 'ACTIVE' },
+      select: { ruleCode: true, title: true, body: true, confidence: true },
+    });
+
+    if (rule) {
+      const conf = rule.confidence >= 1.0 ? '(подтверждено)' : `(${(rule.confidence * 100).toFixed(0)}%)`;
+      await sendMessage(chatId, `${rule.ruleCode} ${conf}\n\n${rule.title}\n\n${rule.body}`);
+      return;
+    }
+    // Rule not found — fall through to RAG, maybe it can find something relevant
+  }
+
+  // 5. SUPER_ADMIN plain text → AI intent classification
   if (isSuperAdmin(user.role)) {
     try {
       const classified = await classifyAdminIntent(text);
@@ -188,6 +246,6 @@ async function routeTextMessage(message: TelegramMessage, user: TelegramUserInfo
     }
   }
 
-  // 4. Regular Q&A for everyone
+  // 6. Regular Q&A for everyone
   await handleQuestion(message, user);
 }
