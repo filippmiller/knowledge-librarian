@@ -30,15 +30,7 @@ import {
   handleSmartAdminAction,
 } from './smart-admin';
 import prisma from '@/lib/db';
-
-// Keywords that signal "add new knowledge" (same as voice-handler)
-const ADD_KEYWORDS = /^(добавь|добавить|запомни|запиши|сохрани|новое правило|добавить правило)/i;
-
-// Keywords that signal "correct/change existing knowledge" (same as voice-handler)
-const CORRECT_KEYWORDS = /^(поменяй|поменять|измени|изменить|исправь|исправить|обнови|обновить|замени|заменить|теперь|стоимость .* теперь|цена .* теперь)/i;
-
-// Pattern to detect direct rule lookup: "правило 100", "правило R-100", "покажи правило 100"
-const RULE_LOOKUP_PATTERN = /правило\s+(?:R-)?(\d+)/i;
+import { ADD_KEYWORDS, CORRECT_KEYWORDS, PRICE_CHANGE_PATTERN, RULE_LOOKUP_PATTERN } from './constants';
 
 /**
  * Main entry point for all Telegram updates.
@@ -185,7 +177,7 @@ async function routeTextMessage(message: TelegramMessage, user: TelegramUserInfo
 
   // 3. Admin keyword detection: "сохрани/добавь" and "поменяй/измени" in plain text
   if (isAdmin(user.role)) {
-    if (CORRECT_KEYWORDS.test(text)) {
+    if (CORRECT_KEYWORDS.test(text) || PRICE_CHANGE_PATTERN.test(text)) {
       await sendTypingIndicator(chatId);
       try {
         const result = await correctKnowledge(text, user.telegramId);

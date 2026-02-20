@@ -7,12 +7,7 @@ import { addKnowledge, correctKnowledge } from './knowledge-manager';
 import { answerQuestionEnhanced } from '@/lib/ai/enhanced-answering-engine';
 import { getOrCreateSession, saveChatMessage } from '@/lib/ai/answering-engine';
 import { formatAnswerResponse } from './commands';
-
-// Keywords that signal "add new knowledge"
-const ADD_KEYWORDS = /^(добавь|добавить|запомни|запиши|сохрани|новое правило|добавить правило)/i;
-
-// Keywords that signal "correct/change existing knowledge"
-const CORRECT_KEYWORDS = /^(поменяй|поменять|измени|изменить|исправь|исправить|обнови|обновить|замени|заменить|теперь|стоимость .* теперь|цена .* теперь)/i;
+import { ADD_KEYWORDS, CORRECT_KEYWORDS, PRICE_CHANGE_PATTERN } from './constants';
 
 /**
  * Handle incoming voice messages.
@@ -53,7 +48,7 @@ export async function handleVoiceMessage(
 
     if (isAdmin(user.role)) {
       // Check for correction/change keywords first (more specific)
-      if (CORRECT_KEYWORDS.test(text)) {
+      if (CORRECT_KEYWORDS.test(text) || PRICE_CHANGE_PATTERN.test(text)) {
         await sendTypingIndicator(chatId);
         const result = await correctKnowledge(text, user.telegramId);
         await sendMessage(chatId, `Голосовая команда обработана.\n\n${result.summary}`);
