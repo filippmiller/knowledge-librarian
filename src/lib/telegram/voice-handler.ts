@@ -7,7 +7,8 @@ import { addKnowledge, correctKnowledge } from './knowledge-manager';
 import { answerQuestionEnhanced } from '@/lib/ai/enhanced-answering-engine';
 import { getOrCreateSession, saveChatMessage } from '@/lib/ai/answering-engine';
 import { formatAnswerResponse } from './commands';
-import { ADD_KEYWORDS, CORRECT_KEYWORDS, PRICE_CHANGE_PATTERN } from './constants';
+import { ADD_KEYWORDS, CORRECT_KEYWORDS, PRICE_CHANGE_PATTERN, RULE_LOOKUP_PATTERN } from './constants';
+import prisma from '@/lib/db';
 
 /**
  * Handle incoming voice messages.
@@ -63,6 +64,23 @@ export async function handleVoiceMessage(
         await sendMessage(chatId, `Голосовая заметка обработана.\n\n${result.summary}`);
         return;
       }
+    }
+
+    // Check for direct rule lookup: "правило R-336", "R336", etc.
+    const ruleLookupMatch = text.match(RULE_LOOKUP_PATTERN);
+    if (ruleLookupMatch) {
+      const ruleCode = `R-${ruleLookupMatch[1]}`;
+      const rule = await prisma.rule.findFirst({
+        where: { ruleCode, status: 'ACTIVE' },
+        select: { ruleCode: true, title: true, body: true, confidence: true },
+      });
+
+      if (rule) {
+        const conf = rule.confidence >= 1.0 ? '(подтверждено)' : `(${(rule.confidence * 100).toFixed(0)}%)`;
+        await sendMessage(chatId, `${rule.ruleCode} ${conf}\n\n${rule.title}\n\n${rule.body}`);
+        return;
+      }
+      // Rule not found — fall through to RAG
     }
 
     // Default: treat as a question
