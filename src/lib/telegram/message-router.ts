@@ -207,12 +207,15 @@ async function routeTextMessage(message: TelegramMessage, user: TelegramUserInfo
 
   // 4. Direct rule lookup: "правило 100", "правило R-100", "покажи правило 100"
   const ruleLookupMatch = text.match(RULE_LOOKUP_PATTERN);
+  console.log(`[message-router] Rule lookup: text="${text.substring(0, 40)}" match=${ruleLookupMatch ? ruleLookupMatch[1] : 'null'}`);
   if (ruleLookupMatch) {
     const ruleCode = `R-${ruleLookupMatch[1]}`;
+    console.log(`[message-router] Looking up ruleCode: ${ruleCode}`);
     const rule = await prisma.rule.findFirst({
       where: { ruleCode, status: 'ACTIVE' },
       select: { ruleCode: true, title: true, body: true, confidence: true },
     });
+    console.log(`[message-router] Rule lookup result: ${rule ? 'FOUND' : 'NOT FOUND'}`);
 
     if (rule) {
       const conf = rule.confidence >= 1.0 ? '(подтверждено)' : `(${(rule.confidence * 100).toFixed(0)}%)`;
