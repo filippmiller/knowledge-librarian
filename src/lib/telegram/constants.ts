@@ -20,8 +20,8 @@ export const PRICE_CHANGE_PATTERN =
   /(стоимость|цена|сколько стоит).*(теперь|стало|изменилась|поменялась|новая)/i;
 
 // Pattern to detect direct rule lookup:
-// - "правило 100", "правило R-100", "покажи правило 100"
+// - "правило/правила 100", "правило R-100", "покажи правило 100"
 // - "R-100", "r-100", "р-100" (Latin or Cyrillic r with dash)
 // - "R100", "r100", "р100" (Latin or Cyrillic r without dash)
-// Must have either: word "правило" OR letter R/r/р prefix before the number
-export const RULE_LOOKUP_PATTERN = /(?:правило\s+(?:R-|r-|р-)?|(?:R|r|р)-?)(\d+)/i;
+// Must have either: word "правило/правила" OR letter R/r/р prefix before the number
+export const RULE_LOOKUP_PATTERN = /(?:правил[оа]\s+(?:R-|r-|р-)?|(?:R|r|р)-?)(\d+)/i;
