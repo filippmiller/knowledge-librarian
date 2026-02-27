@@ -115,7 +115,11 @@ export default function TelegramMiniApp() {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [documentFilter, setDocumentFilter] = useState('');
-  const [documents, setDocuments] = useState<{id: string, title: string}[]>([]);
+  const [documents, setDocuments] = useState<{
+    id: string; title: string; filename: string; parseStatus: string;
+    parseError?: string | null; retryCount?: number; uploadedAt: string;
+    _count?: { rules: number; qaPairs: number };
+  }[]>([]);
   
   // Data
   const [recentRules, setRecentRules] = useState<Rule[]>([]);
@@ -910,8 +914,13 @@ export default function TelegramMiniApp() {
             </div>
 
             {processingErr && (
-              <div className="mt-4 p-3 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 rounded-xl text-sm">
-                ❌ {processingErr}
+              <div className="mt-4 p-3 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 rounded-xl text-sm space-y-2">
+                <p>❌ {processingErr}</p>
+                {processingErr.includes('DLQ') || processingErr.includes('лимит попыток') ? (
+                  <p className="text-xs opacity-80">Документ перемещён в DLQ. Используйте кнопку «Реанимировать» в списке документов.</p>
+                ) : (
+                  <p className="text-xs opacity-80">Попытка не удалась. Вы можете попробовать снова.</p>
+                )}
               </div>
             )}
           </div>
@@ -1875,8 +1884,18 @@ export default function TelegramMiniApp() {
                           <span>{doc._count?.qaPairs ?? 0} вопросов</span>
                           <span>{new Date(doc.uploadedAt).toLocaleDateString('ru-RU')}</span>
                         </div>
-                        {doc.parseError && (
-                          <p className="text-xs text-red-500 mt-1 truncate">{doc.parseError}</p>
+                        {doc.parseError && doc.parseStatus !== 'DEAD' && (
+                          <p className="text-xs text-red-500 mt-1 truncate">{doc.parseError.slice(0, 80)}</p>
+                        )}
+                        {doc.parseStatus === 'DEAD' && (
+                          <p className="text-xs text-red-600 font-medium mt-1">
+                            ⛔ Исчерпаны попытки ({doc.retryCount ?? 3}/3)
+                          </p>
+                        )}
+                        {doc.parseStatus === 'FAILED' && (doc.retryCount ?? 0) > 0 && (
+                          <p className="text-xs text-orange-500 mt-1">
+                            Попытка {doc.retryCount}/3
+                          </p>
                         )}
                       </div>
                       <div className="flex flex-col items-end gap-2 flex-shrink-0">
@@ -1886,6 +1905,8 @@ export default function TelegramMiniApp() {
                             : doc.parseStatus === 'PROCESSING'
                             ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
                             : doc.parseStatus === 'FAILED'
+                            ? 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400'
+                            : doc.parseStatus === 'DEAD'
                             ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
                             : doc.parseStatus === 'EXTRACTED'
                             ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
@@ -1894,6 +1915,7 @@ export default function TelegramMiniApp() {
                           {doc.parseStatus === 'COMPLETED' ? '✓ Готов'
                             : doc.parseStatus === 'PROCESSING' ? '⏳ Обработка'
                             : doc.parseStatus === 'FAILED' ? '✗ Ошибка'
+                            : doc.parseStatus === 'DEAD' ? '⛔ DLQ'
                             : doc.parseStatus === 'EXTRACTED' ? '📦 Извлечено'
                             : '⏸ Ожидание'}
                         </span>
@@ -1914,6 +1936,23 @@ export default function TelegramMiniApp() {
                           >
                             <PlayCircle className="w-3 h-3" />
                             Повтор
+                          </button>
+                        )}
+                        {doc.parseStatus === 'DEAD' && (
+                          <button
+                            onClick={async () => {
+                              const res = await fetch('/api/telegram/mini-app', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ initData: initData || 'dev', action: 'reviveDocument', documentId: doc.id }),
+                              });
+                              const data = await res.json();
+                              if (data.success) { setActionMsg('Документ реанимирован'); loadDocuments(); }
+                              else setActionMsg(data.error || 'Ошибка');
+                            }}
+                            className="flex items-center gap-1 px-2 py-1 bg-red-600 text-white text-xs rounded-lg font-medium"
+                          >
+                            ↺ Реанимировать
                           </button>
                         )}
                       </div>

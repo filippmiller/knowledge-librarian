@@ -1033,6 +1033,7 @@ export async function POST(request: NextRequest) {
             filename: true,
             parseStatus: true,
             parseError: true,
+            retryCount: true,
             uploadedAt: true,
             _count: { select: { rules: true, qaPairs: true } },
           },
@@ -1041,6 +1042,45 @@ export async function POST(request: NextRequest) {
         });
 
         return NextResponse.json({ documents });
+      }
+
+      case 'reviveDocument': {
+        if (!isAdmin) return NextResponse.json({ error: 'Admin required' }, { status: 403 });
+        const { documentId } = body;
+        if (!documentId) return NextResponse.json({ error: 'Missing documentId' }, { status: 400 });
+
+        const doc = await prisma.document.findUnique({ where: { id: documentId }, select: { id: true, parseStatus: true } });
+        if (!doc) return NextResponse.json({ error: 'Документ не найден' }, { status: 404 });
+
+        await prisma.document.update({
+          where: { id: documentId },
+          data: { parseStatus: 'PENDING', retryCount: 0, parseError: null },
+        });
+
+        return NextResponse.json({ success: true, message: 'Документ реанимирован и готов к обработке' });
+      }
+
+      case 'getAttempts': {
+        if (!isAdmin) return NextResponse.json({ error: 'Admin required' }, { status: 403 });
+        const { documentId } = body;
+        if (!documentId) return NextResponse.json({ error: 'Missing documentId' }, { status: 400 });
+
+        const attempts = await prisma.processingAttempt.findMany({
+          where: { documentId },
+          orderBy: { startedAt: 'desc' },
+          take: 10,
+          select: {
+            id: true,
+            startedAt: true,
+            completedAt: true,
+            status: true,
+            errorMessage: true,
+            failedPhase: true,
+            durationMs: true,
+          },
+        });
+
+        return NextResponse.json({ attempts });
       }
 
       case 'getHistory': {

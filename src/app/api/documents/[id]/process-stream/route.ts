@@ -105,6 +105,7 @@ export async function GET(
       title: true,
       rawText: true,
       parseStatus: true,
+      retryCount: true,
     },
   });
 
@@ -124,6 +125,16 @@ export async function GET(
       }
     );
   }
+
+  // DEAD documents cannot be processed — they must be revived first via the admin panel.
+  if (document.parseStatus === 'DEAD') {
+    return new Response(
+      JSON.stringify({ error: 'Документ превысил лимит попыток. Реанимируйте его в панели управления.' }),
+      { status: 422, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  const MAX_RETRIES = 3;
 
   // EXTRACTED documents MUST always use resume mode to preserve their staged data.
   // Without this, clicking "Проверить" would delete all staged data and re-process.
@@ -179,6 +190,13 @@ export async function GET(
     async start(controller) {
       // Acquire processing lock
       processingLocks.set(documentId, true);
+
+      // DLQ: create an attempt record
+      const attempt = await prisma.processingAttempt.create({
+        data: { documentId, status: 'RUNNING' },
+      });
+      const attemptStart = Date.now();
+      let currentPhase = 'INIT';
 
       // Safe send: silently fails when client has disconnected.
       // Processing continues regardless - results are saved to DB.
@@ -243,6 +261,7 @@ export async function GET(
         }
 
         // ========== PHASE 1: Domain Classification ==========
+        currentPhase = 'DOMAIN_CLASSIFICATION';
         if (completedPhases.has('DOMAIN_CLASSIFICATION')) {
           // Resume: re-emit existing results
           send({
@@ -367,6 +386,7 @@ export async function GET(
         }
 
         // ========== PHASE 2: Knowledge Extraction ==========
+        currentPhase = 'KNOWLEDGE_EXTRACTION';
         if (completedPhases.has('KNOWLEDGE_EXTRACTION')) {
           // Resume: re-emit existing results
           send({
@@ -541,6 +561,7 @@ export async function GET(
         console.log(`[process-stream] completedPhases has CHUNKING: ${completedPhases.has('CHUNKING')}`);
         
         // ========== PHASE 3: Chunking ==========
+        currentPhase = 'CHUNKING';
         if (completedPhases.has('CHUNKING')) {
           // Resume: re-emit existing results
           send({
@@ -648,7 +669,14 @@ export async function GET(
           data: {
             parseStatus: 'EXTRACTED',
             parseError: null,
+            retryCount: 0, // reset on success
           },
+        });
+
+        // DLQ: mark attempt as SUCCESS
+        await prisma.processingAttempt.update({
+          where: { id: attempt.id },
+          data: { status: 'SUCCESS', completedAt: new Date(), durationMs: Date.now() - attemptStart },
         });
 
         send({
@@ -664,25 +692,44 @@ export async function GET(
         // Determine if this is a fatal error that should not be retried
         const fatal = isFatalError(error);
 
+        // DLQ: mark attempt as FAILED and increment retryCount
+        await prisma.processingAttempt.update({
+          where: { id: attempt.id },
+          data: {
+            status: 'FAILED',
+            completedAt: new Date(),
+            durationMs: Date.now() - attemptStart,
+            errorMessage,
+            failedPhase: currentPhase,
+          },
+        });
+
+        const newRetryCount = (document.retryCount ?? 0) + 1;
+        const isDead = newRetryCount >= MAX_RETRIES;
+
+        await prisma.document.update({
+          where: { id: documentId },
+          data: {
+            parseStatus: isDead ? 'DEAD' : 'FAILED',
+            parseError: errorMessage,
+            retryCount: newRetryCount,
+          },
+        });
+
+        if (isDead) {
+          console.error(`[process-stream] Document ${documentId} is now DEAD after ${newRetryCount} retries`);
+        }
+
         send({
           type: fatal ? 'fatal_error' : 'error',
           data: {
             message: errorMessage,
             fatal,
-            code: fatal ? 'FATAL' : 'ERROR',
+            code: isDead ? 'DEAD' : fatal ? 'FATAL' : 'ERROR',
+            retryCount: newRetryCount,
+            maxRetries: MAX_RETRIES,
           },
         });
-
-        // Update document status to FAILED for fatal errors
-        if (fatal) {
-          await prisma.document.update({
-            where: { id: documentId },
-            data: {
-              parseStatus: 'FAILED',
-              parseError: errorMessage,
-            },
-          });
-        }
       } finally {
         // Release processing lock
         processingLocks.delete(documentId);

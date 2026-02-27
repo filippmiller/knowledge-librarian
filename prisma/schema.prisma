@@ -24,14 +24,16 @@ model Document {
   uploadedAt  DateTime    @default(now())
   parseStatus ParseStatus @default(PENDING)
   parseError  String?
+  retryCount  Int         @default(0)
 
   // Relations
-  domains           DocumentDomain[]
-  rules             Rule[]
-  qaPairs           QAPair[]
-  chunks            DocChunk[]
-  domainSuggestions DomainSuggestion[]
-  stagedExtractions StagedExtraction[]
+  domains             DocumentDomain[]
+  rules               Rule[]
+  qaPairs             QAPair[]
+  chunks              DocChunk[]
+  domainSuggestions   DomainSuggestion[]
+  stagedExtractions   StagedExtraction[]
+  processingAttempts  ProcessingAttempt[]
 
   @@index([parseStatus])
 }
@@ -42,6 +44,23 @@ enum ParseStatus {
   EXTRACTED // All processing phases complete, staged data ready for user review/commit
   COMPLETED
   FAILED
+  DEAD      // Exceeded max retries — needs manual revival
+}
+
+// Dead Letter Queue — logs every processing attempt for a document
+model ProcessingAttempt {
+  id           String    @id @default(cuid())
+  documentId   String
+  document     Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  startedAt    DateTime  @default(now())
+  completedAt  DateTime?
+  status       String    // RUNNING | SUCCESS | FAILED
+  errorMessage String?   @db.Text
+  failedPhase  String?   // DOMAIN_CLASSIFICATION | KNOWLEDGE_EXTRACTION | CHUNKING
+  durationMs   Int?
+
+  @@index([documentId])
+  @@index([status])
 }
 
 // Hierarchical domain structure
