@@ -23,6 +23,23 @@ import { splitTextIntoChunks } from '@/lib/ai/chunker';
 // use a database-based lock instead.
 const processingLocks = new Map<string, boolean>();
 
+// DLQ cleanup: on module load, mark stale RUNNING attempts (> 2h) as FAILED.
+// These are orphaned records left by server crashes or forced restarts.
+(async () => {
+  try {
+    const staleThreshold = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    const stale = await prisma.processingAttempt.updateMany({
+      where: { status: 'RUNNING', startedAt: { lt: staleThreshold } },
+      data: { status: 'FAILED', completedAt: new Date(), errorMessage: 'Server restart — attempt orphaned' },
+    });
+    if (stale.count > 0) {
+      console.log(`[DLQ] Cleaned up ${stale.count} stale RUNNING attempts on startup`);
+    }
+  } catch {
+    // Non-fatal — don't block server startup
+  }
+})();
+
 // Types for SSE events
 type SSEEventType =
   | 'phase_start'

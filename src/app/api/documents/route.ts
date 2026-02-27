@@ -119,6 +119,7 @@ export async function GET(request: NextRequest): Promise<Response> {
         mimeType: true,
         parseStatus: true,
         parseError: true,
+        retryCount: true,
         uploadedAt: true,
         // Explicitly exclude rawText and rawBytes - they can be megabytes each
         domains: {
