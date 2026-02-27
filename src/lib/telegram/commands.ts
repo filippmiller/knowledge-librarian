@@ -444,15 +444,16 @@ export async function handleEdit(message: TelegramMessage, user: TelegramUserInf
     data: { status: 'SUPERSEDED' },
   });
 
-  // Get next rule code
-  const maxRule = await prisma.rule.findFirst({
-    orderBy: { ruleCode: 'desc' },
+  // Get next rule code (numeric sort — string sort gives wrong max with R-1..R-492)
+  const allCodes = await prisma.rule.findMany({
+    where: { ruleCode: { startsWith: 'R-' } },
     select: { ruleCode: true },
   });
-  const nextNum = maxRule
-    ? Math.max(...[maxRule.ruleCode].map((c) => parseInt(c.replace('R-', '')))) + 1
-    : 1;
-  const newCode = `R-${nextNum}`;
+  const maxNum = allCodes.reduce((max, r) => {
+    const n = parseInt(r.ruleCode.replace(/^R-/i, '')) || 0;
+    return n > max ? n : max;
+  }, 0);
+  const newCode = `R-${maxNum + 1}`;
 
   const newRule = await prisma.rule.create({
     data: {

@@ -19,6 +19,12 @@ export const CORRECT_KEYWORDS =
 export const PRICE_CHANGE_PATTERN =
   /(стоимость|цена|сколько стоит).*(теперь|стало|изменилась|поменялась|новая)/i;
 
+// Pattern to detect direct rule edit by voice:
+// "измени/поменяй/обнови/исправь правило R-5 новый текст"
+// "R-5 теперь/новый текст"
+export const DIRECT_EDIT_PATTERN =
+  /^(?:измени|поменяй|обнови|исправь|замени|отредактируй)\s+(?:правило\s+)?(R-?\d+)\s+([\s\S]+)$/i;
+
 // Pattern to detect direct rule lookup:
 // - "правило/правила 100", "правило R-100", "покажи правило 100"
 // - "R-100", "r-100", "р-100" (Latin or Cyrillic r with dash)
