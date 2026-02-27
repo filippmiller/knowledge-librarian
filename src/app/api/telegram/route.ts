@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { handleUpdate } from '@/lib/telegram/message-router';
 import type { TelegramUpdate } from '@/lib/telegram/telegram-api';
-import { sendMessage, setBotCommands } from '@/lib/telegram/telegram-api';
+import { sendMessage, setBotCommands, setMenuButton } from '@/lib/telegram/telegram-api';
 
 // Register slash commands once on module load
 let commandsRegistered = false;
@@ -11,6 +11,7 @@ export async function POST(request: NextRequest) {
   if (!commandsRegistered) {
     commandsRegistered = true;
     setBotCommands().catch(() => {});
+    setMenuButton().catch(() => {});
   }
 
   try {
@@ -39,12 +40,19 @@ export async function GET() {
   if (!commandsRegistered) {
     commandsRegistered = true;
     await setBotCommands();
+    await setMenuButton();
   }
+
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://avrora-library-production.up.railway.app';
 
   return NextResponse.json({
     status: 'ok',
     bot: process.env.TELEGRAM_BOT_TOKEN ? 'configured' : 'not configured',
     accessControl: 'database',
     commandsRegistered,
+    miniApp: {
+      url: `${appUrl}/telegram-app`,
+      status: 'active',
+    },
   });
 }

@@ -1,10 +1,11 @@
-import { sendMessage, sendTypingIndicator } from './telegram-api';
+import { sendMessage, sendTypingIndicator, sendWebAppButton } from './telegram-api';
 import type { TelegramUpdate, TelegramMessage } from './telegram-api';
 import { checkAccess, isAdmin, isSuperAdmin } from './access-control';
 import type { TelegramUserInfo } from './access-control';
 import {
   handleStart,
   handleHelp,
+  handleApp,
   handleGrant,
   handleRevoke,
   handlePromote,
@@ -130,6 +131,8 @@ async function routeTextMessage(message: TelegramMessage, user: TelegramUserInfo
         return handleStart(message, user);
       case 'help':
         return handleHelp(message, user);
+      case 'app':
+        return handleApp(message, user);
       case 'report':
         return handleReport(message, user, args);
       case 'helpme':

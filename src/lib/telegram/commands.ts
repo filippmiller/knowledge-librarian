@@ -1,4 +1,4 @@
-import { sendMessage, sendTypingIndicator } from './telegram-api';
+import { sendMessage, sendTypingIndicator, sendWebAppButton } from './telegram-api';
 import type { TelegramMessage } from './telegram-api';
 import type { TelegramUserInfo } from './access-control';
 import {
@@ -27,48 +27,49 @@ export async function handleStart(message: TelegramMessage, user: TelegramUserIn
     : user.role === 'ADMIN' ? 'Администратор'
     : 'Пользователь';
 
-  let text = `Добро пожаловать, ${name}!\n\n`;
+  let text = `Добро пожаловать, ${name}! 👋\n\n`;
   text += `Ваша роль: ${roleLabel}\n\n`;
-  text += 'Я - бот базы знаний бюро переводов Аврора.\n\n';
-  text += 'Задайте мне любой вопрос о работе бюро.\n\n';
-  text += 'Примеры вопросов:\n';
-  text += '- Сколько стоит нотариальный перевод?\n';
-  text += '- Как отправить заказ почтой России?\n';
-  text += '- Какие миграционные услуги вы предоставляете?\n\n';
+  text += 'Я — бот базы знаний бюро переводов Аврора.\n\n';
+  text += '💡 Новое: теперь есть удобное приложение с поиском и карточками правил!\n\n';
+  text += '📝 Задайте мне вопрос голосом или текстом, или откройте приложение для просмотра всех правил.';
 
-  text += 'Команды:\n';
-  text += '/help - Справка по командам\n';
-  text += '/report <текст> - Сообщить об ошибке в базе знаний\n';
-  text += '/helpme <вопрос> - Отправить вопрос всем сотрудникам\n';
+  // Send welcome message with Web App button
+  await sendWebAppButton(chatId, text, '📱 Открыть базу знаний');
+
+  // Also send a follow-up with quick tips
+  let tipsText = '\n💡 *Быстрые команды:*\n\n';
+  tipsText += '• Задайте вопрос — получите ответ из базы\n';
+  tipsText += '• Отправьте голосовое — я распознаю и отвечу\n';
+  tipsText += '• Напишите "правило R-123" — покажу детали\n';
+  tipsText += '• /help — полный список команд\n';
 
   if (isAdmin(user.role)) {
-    text += '\nАдмин-команды:\n';
-    text += '/add <текст> - Добавить знание\n';
-    text += '/correct <текст> - Исправить знание\n';
-    text += '/show [R-X] - Просмотр правила\n';
-    text += '/edit R-X <текст> - Редактировать правило\n';
-    text += '/delete R-X - Удалить правило\n';
-    text += '/confirm R-X - Подтвердить правило (100%)\n';
-    text += '/grant <id> - Дать доступ\n';
-    text += '/revoke <id> - Отозвать доступ\n';
-    text += '/users - Список пользователей\n';
-    text += 'Голосовое - Добавить/исправить знание\n';
-    text += 'Документ (PDF/DOCX/TXT) - Загрузить в базу\n';
+    tipsText += '\n👨‍💼 *Для админов:*\n';
+    tipsText += '• /add — добавить знание\n';
+    tipsText += '• /correct — исправить знание\n';
+    tipsText += '• /show R-X — просмотр правила\n';
+    tipsText += '• Загрузите документ — обработаю автоматически\n';
   }
 
-  if (isSuperAdmin(user.role)) {
-    text += '\nСуперадмин:\n';
-    text += '/promote <id> - Повысить до админа\n';
-    text += '/demote <id> - Понизить до пользователя\n';
-    text += '\nУмный режим (пишите на русском):\n';
-    text += '"Подтверди R-24" — подтвердить правило\n';
-    text += '"Удали правило R-5" — удалить (с подтверждением)\n';
-    text += '"Покажи правила про апостиль" — поиск\n';
-    text += '"Какие документы загружены?" — список\n';
-    text += '"Статистика" — сводка по базе\n';
-  }
+  await sendMessage(chatId, tipsText);
+}
 
-  await sendMessage(chatId, text);
+/**
+ * Handle /app command - open Mini App.
+ */
+export async function handleApp(message: TelegramMessage, user: TelegramUserInfo): Promise<void> {
+  const chatId = message.chat.id;
+
+  const text = `📱 *База знаний Аврора*\n\n` +
+    `Удобное приложение для просмотра правил, поиска и навигации по базе знаний.\n\n` +
+    `Возможности:\n` +
+    `• 🔍 Быстрый поиск по правилам\n` +
+    `• 📂 Просмотр по категориям\n` +
+    `• ⭐ Просмотр уверенности AI\n` +
+    `• 📄 Детали каждого правила\n\n` +
+    `Нажмите кнопку ниже, чтобы открыть:`;
+
+  await sendWebAppButton(chatId, text, '📱 Открыть приложение');
 }
 
 /**
@@ -77,38 +78,38 @@ export async function handleStart(message: TelegramMessage, user: TelegramUserIn
 export async function handleHelp(message: TelegramMessage, user: TelegramUserInfo): Promise<void> {
   const chatId = message.chat.id;
 
-  let text = 'Команды бота:\n\n';
-  text += '/start - Приветствие\n';
-  text += '/help - Эта справка\n';
-  text += '/report <текст> - Сообщить об ошибке в базе знаний (уведомит админов)\n';
-  text += '/helpme <вопрос> - Отправить вопрос всем сотрудникам\n\n';
-  text += 'Просто напишите вопрос, и я найду ответ в базе знаний.\n';
+  let text = '📚 *Команды бота:*\n\n';
+  text += '/start — Приветствие и меню\n';
+  text += '/app — Открыть приложение базы знаний\n';
+  text += '/help — Эта справка\n';
+  text += '/report <текст> — Сообщить об ошибке (уведомит админов)\n';
+  text += '/helpme <вопрос> — Отправить вопрос всем сотрудникам\n\n';
+  text += '💡 Просто напишите вопрос, и я найду ответ в базе знаний.';
 
   if (isAdmin(user.role)) {
-    text += '\nАдмин-команды:\n';
-    text += '/add <текст> - Добавить новое знание. AI извлечёт правила и QA пары.\n';
-    text += '/correct <текст> - Исправить существующее знание. AI найдёт и обновит.\n';
-    text += '/show - Список правил. /show R-X для деталей.\n';
-    text += '/edit R-X <текст> - Заменить текст правила на новый.\n';
-    text += '/delete R-X - Пометить правило как удалённое.\n';
-    text += '/confirm R-X - Подтвердить правило (уверенность 100%).\n';
-    text += '/grant <telegram_id> - Выдать доступ пользователю\n';
-    text += '/revoke <telegram_id> - Отозвать доступ\n';
-    text += '/users - Список всех активных пользователей\n\n';
-    text += 'Голосовые: "добавь/запомни..." = добавление; "поменяй/измени..." = исправление; иначе = вопрос.\n';
-    text += 'Документы: отправьте PDF/DOCX/TXT файл для полной обработки через AI.\n';
+    text += '\n\n👨‍💼 *Админ-команды:*\n';
+    text += '/add <текст> — Добавить знание (AI извлечёт правила)\n';
+    text += '/correct <текст> — Исправить знание\n';
+    text += '/show — Список правил, /show R-X для деталей\n';
+    text += '/edit R-X <текст> — Заменить текст правила\n';
+    text += '/delete R-X — Пометить правило как удалённое\n';
+    text += '/confirm R-X — Подтвердить правило (100%)\n';
+    text += '/grant <telegram_id> — Выдать доступ пользователю\n';
+    text += '/revoke <telegram_id> — Отозвать доступ\n';
+    text += '/users — Список всех активных пользователей\n\n';
+    text += '🎙 *Голосовые:* "добавь/запомни..." = добавление; "поменяй/измени..." = исправление\n';
+    text += '📎 *Документы:* PDF/DOCX/TXT для обработки AI';
   }
 
   if (isSuperAdmin(user.role)) {
-    text += '\nСуперадмин:\n';
-    text += '/promote <telegram_id> - Повысить пользователя до админа\n';
-    text += '/demote <telegram_id> - Понизить админа до пользователя\n';
-    text += '\nУмный режим: пишите на русском без команд.\n';
-    text += 'Примеры: "Подтверди R-24", "Удали правило R-5", "Покажи правила про апостиль", "Статистика"\n';
-    text += 'Деструктивные действия требуют подтверждения "да".\n';
+    text += '\n\n🔑 *Суперадмин:*\n';
+    text += '/promote <telegram_id> — Повысить до админа\n';
+    text += '/demote <telegram_id> — Понизить до пользователя\n';
+    text += '\n🧠 *Умный режим:* пишите на русском без команд.\n';
+    text += 'Примеры: "Подтверди R-24", "Удали правило R-5", "Покажи правила про апостиль", "Статистика"';
   }
 
-  text += '\nВаш Telegram ID: ' + user.telegramId;
+  text += '\n\n🆔 Ваш Telegram ID: `' + user.telegramId + '`';
 
   await sendMessage(chatId, text);
 }
@@ -215,11 +216,12 @@ export async function handleUsers(message: TelegramMessage, user: TelegramUserIn
     return;
   }
 
-  let text = `Активные пользователи (${users.length}):\n\n`;
+  let text = `👥 Активные пользователи (${users.length}):\n\n`;
   for (const u of users) {
     const name = u.firstName || u.username || 'Без имени';
     const usernameStr = u.username ? ` (@${u.username})` : '';
-    text += `${u.role} | ${u.telegramId} | ${name}${usernameStr}\n`;
+    const roleEmoji = u.role === 'SUPER_ADMIN' ? '🔑' : u.role === 'ADMIN' ? '👨‍💼' : '👤';
+    text += `${roleEmoji} ${u.role} | ${u.telegramId} | ${name}${usernameStr}\n`;
   }
 
   await sendMessage(chatId, text);
@@ -243,14 +245,14 @@ export async function handleAdd(message: TelegramMessage, user: TelegramUserInfo
   }
 
   await sendTypingIndicator(chatId);
-  await sendMessage(chatId, 'Обрабатываю...');
+  await sendMessage(chatId, '⏳ Обрабатываю...');
 
   try {
     const result = await addKnowledge(text, user.telegramId);
-    await sendMessage(chatId, result.summary);
+    await sendMessage(chatId, `✅ ${result.summary}`);
   } catch (error) {
     console.error('[commands] /add error:', error);
-    await sendMessage(chatId, 'Ошибка при добавлении знания. Попробуйте позже.');
+    await sendMessage(chatId, '❌ Ошибка при добавлении знания. Попробуйте позже.');
   }
 }
 
@@ -272,14 +274,14 @@ export async function handleCorrect(message: TelegramMessage, user: TelegramUser
   }
 
   await sendTypingIndicator(chatId);
-  await sendMessage(chatId, 'Ищу и обновляю...');
+  await sendMessage(chatId, '🔍 Ищу и обновляю...');
 
   try {
     const result = await correctKnowledge(text, user.telegramId);
-    await sendMessage(chatId, result.summary);
+    await sendMessage(chatId, `✅ ${result.summary}`);
   } catch (error) {
     console.error('[commands] /correct error:', error);
-    await sendMessage(chatId, 'Ошибка при обновлении знания. Попробуйте позже.');
+    await sendMessage(chatId, '❌ Ошибка при обновлении знания. Попробуйте позже.');
   }
 }
 
@@ -306,12 +308,12 @@ export async function handleConfirm(message: TelegramMessage, user: TelegramUser
   });
 
   if (!existing) {
-    await sendMessage(chatId, `Правило ${code} не найдено (или не активно).`);
+    await sendMessage(chatId, `❌ Правило ${code} не найдено (или не активно).`);
     return;
   }
 
   if (existing.confidence >= 1.0) {
-    await sendMessage(chatId, `Правило ${code} уже подтверждено (100%).`);
+    await sendMessage(chatId, `✓ Правило ${code} уже подтверждено (100%).`);
     return;
   }
 
@@ -327,7 +329,7 @@ export async function handleConfirm(message: TelegramMessage, user: TelegramUser
     },
   });
 
-  await sendMessage(chatId, `Правило ${code} подтверждено (100%).\n\n${existing.title}`);
+  await sendMessage(chatId, `✅ Правило ${code} подтверждено (100%).\n\n${existing.title}`);
 }
 
 /**
@@ -357,11 +359,11 @@ export async function handleShow(message: TelegramMessage, user: TelegramUserInf
       return;
     }
 
-    let text = 'Последние правила:\n\n';
+    let text = '📋 Последние правила:\n\n';
     for (const r of recent) {
-      text += `${r.ruleCode} - ${r.title}\n`;
+      text += `${r.ruleCode} — ${r.title}\n`;
     }
-    text += '\nИспользуйте /show R-X для просмотра деталей.';
+    text += '\n💡 Используйте /show R-X для просмотра деталей.';
     await sendMessage(chatId, text);
     return;
   }
@@ -376,29 +378,29 @@ export async function handleShow(message: TelegramMessage, user: TelegramUserInf
   });
 
   if (!rule) {
-    await sendMessage(chatId, `Правило ${code} не найдено (или не активно).`);
+    await sendMessage(chatId, `❌ Правило ${code} не найдено (или не активно).`);
     return;
   }
 
-  let text = `${rule.ruleCode}: ${rule.title}\n\n`;
+  let text = `📌 *${rule.ruleCode}*: ${rule.title}\n\n`;
   text += `${rule.body}\n\n`;
-  text += `Уверенность: ${(rule.confidence * 100).toFixed(0)}%`;
+  text += `⭐ Уверенность: ${(rule.confidence * 100).toFixed(0)}%`;
   if (rule.confidence < 1.0) {
-    text += ` (используйте /confirm ${rule.ruleCode} для подтверждения)`;
+    text += ` (/confirm ${rule.ruleCode} для подтверждения)`;
   }
   text += '\n';
-  text += `Статус: ${rule.status}\n`;
-  if (rule.document) text += `Документ: ${rule.document.title}\n`;
+  text += `📝 Статус: ${rule.status}\n`;
+  if (rule.document) text += `📄 Документ: ${rule.document.title}\n`;
   if (rule.domains.length > 0) {
-    text += `Домены: ${rule.domains.map((d) => d.domain.slug).join(', ')}\n`;
+    text += `🏷 Домены: ${rule.domains.map((d) => d.domain.slug).join(', ')}\n`;
   }
   if (rule.qaPairs.length > 0) {
-    text += `\nСвязанные QA (${rule.qaPairs.length}):\n`;
+    text += `\n💬 Связанные вопросы (${rule.qaPairs.length}):\n`;
     for (const qa of rule.qaPairs.slice(0, 5)) {
-      text += `  В: ${qa.question}\n  О: ${qa.answer}\n\n`;
+      text += `  ❓ ${qa.question}\n  ✓ ${qa.answer}\n\n`;
     }
   }
-  text += `\nСоздано: ${rule.createdAt.toISOString().slice(0, 10)}`;
+  text += `\n📅 Создано: ${rule.createdAt.toISOString().slice(0, 10)}`;
 
   await sendMessage(chatId, text);
 }
@@ -430,7 +432,7 @@ export async function handleEdit(message: TelegramMessage, user: TelegramUserInf
   });
 
   if (!existing) {
-    await sendMessage(chatId, `Правило ${code} не найдено (или не активно).`);
+    await sendMessage(chatId, `❌ Правило ${code} не найдено (или не активно).`);
     return;
   }
 
@@ -476,7 +478,7 @@ export async function handleEdit(message: TelegramMessage, user: TelegramUserInf
 
   await sendMessage(
     chatId,
-    `Правило обновлено.\n\n` +
+    `✅ Правило обновлено.\n\n` +
     `Старое: ${code} (SUPERSEDED)\n` +
     `Новое: ${newCode}\n\n` +
     `${existing.title}\n${newBody}`
@@ -506,7 +508,7 @@ export async function handleDelete(message: TelegramMessage, user: TelegramUserI
   });
 
   if (!existing) {
-    await sendMessage(chatId, `Правило ${code} не найдено (или уже не активно).`);
+    await sendMessage(chatId, `❌ Правило ${code} не найдено (или уже не активно).`);
     return;
   }
 
@@ -523,7 +525,7 @@ export async function handleDelete(message: TelegramMessage, user: TelegramUserI
 
   await sendMessage(
     chatId,
-    `Правило ${code} помечено как DEPRECATED.\n` +
+    `🗑 Правило ${code} помечено как DEPRECATED.\n` +
     `Также помечено QA пар: ${deprecated.count}\n\n` +
     `${existing.title}`
   );
@@ -564,7 +566,7 @@ export async function handleQuestion(message: TelegramMessage, user: TelegramUse
     await sendMessage(chatId, response);
   } catch (error) {
     console.error('[commands] Question error:', error);
-    await sendMessage(chatId, 'Произошла ошибка при обработке вопроса. Попробуйте позже.');
+    await sendMessage(chatId, '❌ Произошла ошибка при обработке вопроса. Попробуйте позже.');
   }
 }
 
@@ -587,17 +589,17 @@ export async function handleReport(message: TelegramMessage, user: TelegramUserI
   const adminIds = await getAdminTelegramIds();
 
   if (adminIds.length === 0) {
-    await sendMessage(chatId, 'Нет активных администраторов для отправки отчёта. Попробуйте позже.');
+    await sendMessage(chatId, '⚠️ Нет активных администраторов для отправки отчёта. Попробуйте позже.');
     return;
   }
 
   const reportMessage = [
-    'Сообщение об ошибке в базе знаний',
+    '🚨 Сообщение об ошибке в базе знаний',
     '',
-    `От: ${senderInfo} (ID: ${user.telegramId})`,
-    `Дата: ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}`,
+    `👤 От: ${senderInfo} (ID: ${user.telegramId})`,
+    `📅 Дата: ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}`,
     '',
-    `Описание:`,
+    `📝 Описание:`,
     text,
   ].join('\n');
 
@@ -613,7 +615,7 @@ export async function handleReport(message: TelegramMessage, user: TelegramUserI
     }
   }
 
-  await sendMessage(chatId, `Спасибо! Ваше сообщение отправлено администраторам (${notified}).`);
+  await sendMessage(chatId, `✅ Спасибо! Ваше сообщение отправлено администраторам (${notified}).`);
 }
 
 /**
@@ -635,13 +637,13 @@ export async function handleHelpMe(message: TelegramMessage, user: TelegramUserI
   const allIds = await getAllActiveTelegramIds();
 
   const helpMessage = [
-    'Просьба о помощи',
+    '🆘 Просьба о помощи',
     '',
-    `От: ${senderInfo}`,
+    `👤 От: ${senderInfo}`,
     '',
     text,
     '',
-    `Ответьте ${senderInfo} напрямую в Telegram.`,
+    `💬 Ответьте ${senderInfo} напрямую в Telegram.`,
   ].join('\n');
 
   let notified = 0;
@@ -656,7 +658,7 @@ export async function handleHelpMe(message: TelegramMessage, user: TelegramUserI
     }
   }
 
-  await sendMessage(chatId, `Ваш вопрос отправлен ${notified} сотрудникам.`);
+  await sendMessage(chatId, `✅ Ваш вопрос отправлен ${notified} сотрудникам.`);
 }
 
 /**
@@ -666,7 +668,7 @@ export function formatAnswerResponse(result: EnhancedAnswerResult): string {
   let response = result.answer;
 
   if (result.citations.length > 0) {
-    response += '\n\nИсточники:';
+    response += '\n\n📚 Источники:';
     for (const citation of result.citations.slice(0, 3)) {
       if (citation.ruleCode) {
         response += `\n  ${citation.ruleCode}`;
@@ -681,7 +683,7 @@ export function formatAnswerResponse(result: EnhancedAnswerResult): string {
     : result.confidenceLevel === 'medium' ? 'Средняя'
     : result.confidenceLevel === 'low' ? 'Низкая'
     : 'Недостаточная';
-  response += `\n\nУверенность: ${confLabel} (${(result.confidence * 100).toFixed(0)}%)`;
+  response += `\n\n⭐ Уверенность: ${confLabel} (${(result.confidence * 100).toFixed(0)}%)`;
 
   return response;
 }

@@ -116,6 +116,7 @@ export async function setBotCommands(): Promise<void> {
   const userCommands = [
     { command: 'start', description: 'Приветствие и информация о боте' },
     { command: 'help', description: 'Справка по командам' },
+    { command: 'app', description: 'Открыть приложение базы знаний' },
     { command: 'report', description: 'Сообщить об ошибке в базе знаний' },
     { command: 'helpme', description: 'Отправить вопрос всем сотрудникам' },
   ];
@@ -136,6 +137,70 @@ export async function setBotCommands(): Promise<void> {
     }
   } catch (error) {
     console.error('[telegram-api] Error setting commands:', error);
+  }
+}
+
+/**
+ * Send a message with a Web App button (Mini App)
+ */
+export async function sendWebAppButton(
+  chatId: number,
+  text: string,
+  buttonText: string = '📱 Открыть приложение'
+): Promise<void> {
+  if (!TELEGRAM_BOT_TOKEN) return;
+
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://avrora-library-production.up.railway.app';
+
+  try {
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: buttonText,
+                web_app: { url: `${appUrl}/telegram-app` },
+              },
+            ],
+          ],
+        },
+      }),
+    });
+  } catch (error) {
+    console.error('[telegram-api] Error sending web app button:', error);
+  }
+}
+
+/**
+ * Set the menu button for the bot to open the Mini App
+ */
+export async function setMenuButton(): Promise<void> {
+  if (!TELEGRAM_BOT_TOKEN) return;
+
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setChatMenuButton`;
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://avrora-library-production.up.railway.app';
+
+  try {
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        menu_button: {
+          type: 'web_app',
+          text: '📚 База знаний',
+          web_app: { url: `${appUrl}/telegram-app` },
+        },
+      }),
+    });
+    console.log('[telegram-api] Menu button set successfully');
+  } catch (error) {
+    console.error('[telegram-api] Error setting menu button:', error);
   }
 }
 
