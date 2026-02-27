@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifyTelegramWebAppData } from '@/lib/telegram/mini-app-auth';
+import { createProcessingToken } from '@/lib/crypto';
 import prisma from '@/lib/db';
 
 /**
@@ -176,6 +177,7 @@ export async function POST(request: NextRequest) {
   // Try to authenticate but allow public actions
   let telegramId: string | null = null;
   let isAdmin = false;
+  let userRole = 'USER';
 
   if (initData && initData !== 'dev' && initData !== '') {
     const verified = verifyTelegramWebAppData(initData);
@@ -185,6 +187,7 @@ export async function POST(request: NextRequest) {
         where: { telegramId },
       });
       isAdmin = telegramUser?.role === 'ADMIN' || telegramUser?.role === 'SUPER_ADMIN';
+      userRole = telegramUser?.role || 'USER';
     }
   }
 
@@ -885,7 +888,7 @@ export async function POST(request: NextRequest) {
 
       // ========== DOCUMENT UPLOAD & PARSING ==========
       case 'uploadDocument': {
-        if (!isAdmin) return NextResponse.json({ error: 'Admin required' }, { status: 403 });
+        if (userRole !== 'SUPER_ADMIN') return NextResponse.json({ error: 'Только суперадмин может загружать документы' }, { status: 403 });
 
         const { fileBase64, filename, title } = body;
         if (!fileBase64 || !filename) {
@@ -933,8 +936,90 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({
           success: true,
           documentId: document.id,
-          message: `Документ "${document.title}" загружен (${rawText.length} символов). Откройте панель администратора для запуска обработки.`,
+          message: `Документ "${document.title}" загружен (${rawText.length} символов).`,
         });
+      }
+
+      case 'getProcessingToken': {
+        if (!isAdmin) return NextResponse.json({ error: 'Admin required' }, { status: 403 });
+
+        const { documentId } = body;
+        if (!documentId) return NextResponse.json({ error: 'Missing documentId' }, { status: 400 });
+
+        const doc = await prisma.document.findUnique({
+          where: { id: documentId },
+          select: { id: true, parseStatus: true },
+        });
+        if (!doc) return NextResponse.json({ error: 'Document not found' }, { status: 404 });
+
+        const token = createProcessingToken(documentId);
+        return NextResponse.json({ token, documentId });
+      }
+
+      case 'commitDocument': {
+        if (!isAdmin) return NextResponse.json({ error: 'Admin required' }, { status: 403 });
+
+        const { documentId } = body;
+        if (!documentId) return NextResponse.json({ error: 'Missing documentId' }, { status: 400 });
+
+        const doc = await prisma.document.findUnique({
+          where: { id: documentId },
+          select: { id: true, parseStatus: true, title: true },
+        });
+        if (!doc) return NextResponse.json({ error: 'Document not found' }, { status: 404 });
+
+        // Auto-verify all staged items
+        await prisma.stagedExtraction.updateMany({
+          where: { documentId },
+          data: { isVerified: true, isRejected: false, verifiedAt: new Date() },
+        });
+
+        const { commitDocumentKnowledge } = await import('@/lib/document-processing/commit');
+        const result = await commitDocumentKnowledge(documentId);
+        return NextResponse.json(result);
+      }
+
+      case 'addRule': {
+        if (!isAdmin) return NextResponse.json({ error: 'Admin required' }, { status: 403 });
+
+        const { title: ruleTitle, body: ruleBody, domainIds: ruleDomainIds } = body;
+        if (!ruleTitle || !ruleBody) {
+          return NextResponse.json({ error: 'Необходимо указать заголовок и описание' }, { status: 400 });
+        }
+
+        // Get next rule code
+        const maxRule = await prisma.rule.findFirst({
+          where: { ruleCode: { startsWith: 'R-' } },
+          orderBy: { ruleCode: 'desc' },
+          select: { ruleCode: true },
+        });
+        const nextNum = maxRule
+          ? Math.max(...[maxRule.ruleCode].map((c) => parseInt(c.replace(/^R-/i, '')) || 0)) + 1
+          : 1;
+        const newCode = `R-${nextNum}`;
+
+        const newRule = await prisma.rule.create({
+          data: {
+            ruleCode: newCode,
+            title: ruleTitle,
+            body: ruleBody,
+            confidence: 1.0,
+            sourceSpan: {
+              quote: ruleBody.slice(0, 200),
+              locationHint: `Добавлено вручную через Mini App (${telegramId})`,
+            },
+          },
+        });
+
+        if (Array.isArray(ruleDomainIds) && ruleDomainIds.length > 0) {
+          for (const domainId of ruleDomainIds) {
+            await prisma.ruleDomain.create({
+              data: { ruleId: newRule.id, domainId, confidence: 1.0 },
+            });
+          }
+        }
+
+        return NextResponse.json({ success: true, rule: newRule, message: `Правило ${newCode} создано` });
       }
 
       case 'getDocuments': {

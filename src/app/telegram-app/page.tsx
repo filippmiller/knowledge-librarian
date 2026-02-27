@@ -1,13 +1,14 @@
 'use client';
 
 import { useEffect, useState, useRef, createContext, useContext } from 'react';
-import { 
-  Search, BookOpen, FileText, MessageCircle, ChevronRight, Star, 
-  AlertCircle, Mic, MicOff, Filter, History, BarChart3, 
+import {
+  Search, BookOpen, FileText, MessageCircle, ChevronRight, Star,
+  AlertCircle, Mic, MicOff, Filter, History, BarChart3,
   Edit3, Trash2, CheckCircle, X, Save, ChevronLeft,
-  ThumbsUp, ThumbsDown, Clock, TrendingUp, Heart, Share2, 
+  ThumbsUp, ThumbsDown, Clock, TrendingUp, Heart, Share2,
   Bell, Moon, Sun, Settings, MessageSquare, Send, Reply,
-  WifiOff, Calendar, FileSearch, MoreHorizontal, Check, Upload, FolderOpen
+  WifiOff, Calendar, FileSearch, MoreHorizontal, Check, Upload, FolderOpen,
+  Plus, PlayCircle, DatabaseIcon
 } from 'lucide-react';
 
 // Theme Context
@@ -143,6 +144,19 @@ export default function TelegramMiniApp() {
   const [docUploading, setDocUploading] = useState(false);
   const [docUploadMessage, setDocUploadMessage] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Document processing (admin)
+  const [processingDocId, setProcessingDocId] = useState<string | null>(null);
+  const [processingDocTitle, setProcessingDocTitle] = useState('');
+  const [processingLog, setProcessingLog] = useState<string[]>([]);
+  const [processingDone, setProcessingDone] = useState(false);
+  const [processingErr, setProcessingErr] = useState<string | null>(null);
+
+  // Add rule (admin)
+  const [addingRule, setAddingRule] = useState(false);
+  const [newRuleTitle, setNewRuleTitle] = useState('');
+  const [newRuleBody, setNewRuleBody] = useState('');
+  const [actionMsg, setActionMsg] = useState<string | null>(null);
 
   // Voice recording
   const [isRecording, setIsRecording] = useState(false);
@@ -585,6 +599,202 @@ export default function TelegramMiniApp() {
     }
   };
 
+  // ======== ADMIN RULE ACTIONS ========
+
+  const handleEditRuleSave = async () => {
+    if (!selectedRule) return;
+    setLoading(true);
+    try {
+      const res = await fetch('/api/telegram/mini-app', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          initData: initData || 'dev',
+          action: 'editRule',
+          ruleId: selectedRule.id,
+          title: editTitle,
+          body: editBody,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setActionMsg(data.message || 'Правило обновлено');
+        setEditingRule(false);
+        // Refresh rule
+        await handleRuleClick(selectedRule);
+      } else {
+        setActionMsg(data.error || 'Ошибка обновления');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteRule = async (ruleId: string) => {
+    if (!confirm('Удалить это правило?')) return;
+    setLoading(true);
+    try {
+      const res = await fetch('/api/telegram/mini-app', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: initData || 'dev', action: 'deleteRule', ruleId }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setSelectedRule(null);
+        setActionMsg(data.message || 'Правило удалено');
+      } else {
+        setActionMsg(data.error || 'Ошибка удаления');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleConfirmRule = async (ruleId: string) => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/telegram/mini-app', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: initData || 'dev', action: 'confirmRule', ruleId }),
+      });
+      const data = await res.json();
+      setActionMsg(data.message || (res.ok ? 'Подтверждено' : data.error));
+      if (res.ok && selectedRule) await handleRuleClick(selectedRule);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAddRule = async () => {
+    if (!newRuleTitle.trim() || !newRuleBody.trim()) return;
+    setLoading(true);
+    try {
+      const res = await fetch('/api/telegram/mini-app', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          initData: initData || 'dev',
+          action: 'addRule',
+          title: newRuleTitle,
+          body: newRuleBody,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setActionMsg(data.message);
+        setAddingRule(false);
+        setNewRuleTitle('');
+        setNewRuleBody('');
+      } else {
+        setActionMsg(data.error || 'Ошибка создания правила');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // ======== DOCUMENT PROCESSING ========
+
+  const handleProcessDocument = async (docId: string, docTitle: string) => {
+    setProcessingDocId(docId);
+    setProcessingDocTitle(docTitle);
+    setProcessingLog([`Запускаем обработку: ${docTitle}`]);
+    setProcessingDone(false);
+    setProcessingErr(null);
+
+    try {
+      // 1. Get processing token
+      const tokenRes = await fetch('/api/telegram/mini-app', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: initData || 'dev', action: 'getProcessingToken', documentId: docId }),
+      });
+      if (!tokenRes.ok) {
+        const err = await tokenRes.json();
+        setProcessingErr(err.error || 'Не удалось получить токен');
+        return;
+      }
+      const { token } = await tokenRes.json();
+
+      // 2. Open SSE stream
+      setProcessingLog(prev => [...prev, 'Подключение к потоку обработки...']);
+      const evtSource = new EventSource(`/api/documents/${docId}/process-stream?token=${token}`);
+      let streamDone = false;
+
+      evtSource.onmessage = (e) => {
+        try {
+          const event = JSON.parse(e.data);
+          if (event.type === 'phase_start') {
+            const phaseNames: Record<string, string> = {
+              DOMAIN_CLASSIFICATION: '🏷 Классификация домена',
+              KNOWLEDGE_EXTRACTION: '📚 Извлечение знаний',
+              CHUNKING: '✂️ Нарезка на чанки',
+            };
+            setProcessingLog(prev => [...prev, `\n${phaseNames[event.phase] || event.phase}...`]);
+          } else if (event.type === 'item_extracted') {
+            const d = event.data as any;
+            const label = d?.itemType === 'RULE' ? `📌 ${d?.title || 'правило'}`
+              : d?.itemType === 'QA_PAIR' ? `❓ ${d?.question?.slice(0, 60) || 'вопрос'}`
+              : d?.itemType === 'CHUNK' ? `🧩 чанк ${d?.index ?? ''}`
+              : `✔ ${d?.itemType || 'элемент'}`;
+            setProcessingLog(prev => [...prev, label]);
+          } else if (event.type === 'phase_complete') {
+            setProcessingLog(prev => [...prev, '✅ Фаза завершена']);
+          } else if (event.type === 'complete') {
+            streamDone = true;
+            setProcessingLog(prev => [...prev, '\n🎉 Обработка завершена! Нажмите "Сохранить" для записи в базу.']);
+            setProcessingDone(true);
+            evtSource.close();
+          } else if (event.type === 'fatal_error' || event.type === 'error') {
+            streamDone = true;
+            setProcessingErr((event.data as any)?.message || 'Ошибка обработки');
+            evtSource.close();
+          }
+        } catch {}
+      };
+
+      evtSource.onerror = () => {
+        if (!streamDone) {
+          streamDone = true;
+          setProcessingErr('Соединение прервано');
+          evtSource.close();
+        }
+      };
+    } catch (err) {
+      setProcessingErr('Ошибка запуска обработки');
+    }
+  };
+
+  const handleCommitDocument = async () => {
+    if (!processingDocId) return;
+    setProcessingLog(prev => [...prev, '\nСохраняем в базу знаний...']);
+    setLoading(true);
+    try {
+      const res = await fetch('/api/telegram/mini-app', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: initData || 'dev', action: 'commitDocument', documentId: processingDocId }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        const r = data.results || {};
+        setProcessingLog(prev => [...prev,
+          `✅ Сохранено: ${r.rulesCreated || 0} правил, ${r.qaPairsCreated || 0} вопросов, ${r.chunksCreated || 0} чанков`
+        ]);
+        setProcessingDone(false);
+        await loadDocuments();
+        // Close after a moment
+        setTimeout(() => setProcessingDocId(null), 3000);
+      } else {
+        setProcessingLog(prev => [...prev, `❌ Ошибка: ${data.error || 'неизвестная ошибка'}`]);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const openDocument = async (documentId: string, quote?: string) => {
     try {
       const res = await fetch('/api/telegram/mini-app', {
@@ -666,6 +876,131 @@ export default function TelegramMiniApp() {
     if (confidence >= 0.7) return { text: 'Средняя', color: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300' };
     return { text: 'Низкая', color: 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300' };
   };
+
+  // ======== DOCUMENT PROCESSING SCREEN ========
+  if (processingDocId) {
+    return (
+      <ThemeContext.Provider value={{ theme, isDark, setTheme }}>
+        <div className={`min-h-screen flex flex-col ${isDark ? 'dark bg-gray-900' : 'bg-gray-50'}`}>
+          <div className={`border-b px-4 py-3 flex items-center gap-3 ${isDark ? 'bg-gray-800 border-gray-700' : 'bg-white'}`}>
+            <button onClick={() => { setProcessingDocId(null); loadDocuments(); }} className="p-1">
+              <ChevronLeft className={`w-5 h-5 ${isDark ? 'text-white' : 'text-gray-900'}`} />
+            </button>
+            <div className="flex-1 min-w-0">
+              <h2 className={`font-semibold truncate ${isDark ? 'text-white' : 'text-gray-900'}`}>Обработка</h2>
+              <p className={`text-xs truncate ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{processingDocTitle}</p>
+            </div>
+          </div>
+
+          <div className="flex-1 p-4 overflow-y-auto">
+            <div className={`rounded-xl p-4 font-mono text-xs space-y-1 min-h-[200px] ${isDark ? 'bg-gray-800 text-gray-300' : 'bg-white text-gray-700'} shadow-sm`}>
+              {processingLog.map((line, i) => (
+                <div key={i} className={line.startsWith('\n') ? 'mt-3 font-semibold' : ''}>{line.replace(/^\n/, '')}</div>
+              ))}
+              {!processingDone && !processingErr && (
+                <div className="flex items-center gap-2 mt-2 text-blue-500">
+                  <div className="animate-spin w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full" />
+                  <span>Обрабатываем...</span>
+                </div>
+              )}
+            </div>
+
+            {processingErr && (
+              <div className="mt-4 p-3 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 rounded-xl text-sm">
+                ❌ {processingErr}
+              </div>
+            )}
+          </div>
+
+          {processingDone && (
+            <div className="p-4 border-t border-gray-200 dark:border-gray-700">
+              <button
+                onClick={handleCommitDocument}
+                disabled={loading}
+                className="w-full py-3 bg-green-600 text-white rounded-xl font-semibold disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                <DatabaseIcon className="w-5 h-5" />
+                {loading ? 'Сохраняем...' : 'Сохранить в базу знаний'}
+              </button>
+            </div>
+          )}
+        </div>
+      </ThemeContext.Provider>
+    );
+  }
+
+  // ======== ADD RULE SCREEN ========
+  if (addingRule) {
+    return (
+      <ThemeContext.Provider value={{ theme, isDark, setTheme }}>
+        <div className={`min-h-screen flex flex-col ${isDark ? 'dark bg-gray-900' : 'bg-gray-50'}`}>
+          <div className={`border-b px-4 py-3 flex items-center gap-3 ${isDark ? 'bg-gray-800 border-gray-700' : 'bg-white'}`}>
+            <button onClick={() => setAddingRule(false)} className="p-1">
+              <ChevronLeft className={`w-5 h-5 ${isDark ? 'text-white' : 'text-gray-900'}`} />
+            </button>
+            <h2 className={`font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>Новое правило</h2>
+          </div>
+
+          <div className="flex-1 p-4 space-y-4 overflow-y-auto pb-32">
+            <div className={`rounded-xl p-4 shadow-sm ${isDark ? 'bg-gray-800' : 'bg-white'}`}>
+              <label className={`text-sm font-medium mb-2 block ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
+                Заголовок правила *
+              </label>
+              <input
+                type="text"
+                value={newRuleTitle}
+                onChange={(e) => setNewRuleTitle(e.target.value)}
+                placeholder="Краткое название правила"
+                className={`w-full px-3 py-2 border rounded-lg ${isDark ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-500' : 'border-gray-300'}`}
+              />
+            </div>
+
+            <div className={`rounded-xl p-4 shadow-sm ${isDark ? 'bg-gray-800' : 'bg-white'}`}>
+              <label className={`text-sm font-medium mb-2 block ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
+                Описание *
+              </label>
+              <textarea
+                value={newRuleBody}
+                onChange={(e) => setNewRuleBody(e.target.value)}
+                placeholder="Подробное описание правила..."
+                rows={8}
+                className={`w-full px-3 py-2 border rounded-lg resize-none ${isDark ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-500' : 'border-gray-300'}`}
+              />
+            </div>
+
+            {actionMsg && (
+              <div className={`p-3 rounded-xl text-sm ${
+                actionMsg.includes('создано') || actionMsg.includes('✅')
+                  ? 'bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400'
+                  : 'bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400'
+              }`}>
+                {actionMsg}
+              </div>
+            )}
+          </div>
+
+          <div className="fixed bottom-0 left-0 right-0 p-4 border-t border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
+            <div className="flex gap-2">
+              <button
+                onClick={() => setAddingRule(false)}
+                className={`px-4 py-3 border rounded-xl ${isDark ? 'border-gray-600 text-gray-300' : 'border-gray-300 text-gray-700'}`}
+              >
+                <X className="w-5 h-5" />
+              </button>
+              <button
+                onClick={handleAddRule}
+                disabled={loading || !newRuleTitle.trim() || !newRuleBody.trim()}
+                className="flex-1 py-3 bg-blue-600 text-white rounded-xl font-semibold disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                <Save className="w-4 h-4" />
+                {loading ? 'Создаём...' : 'Создать правило'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </ThemeContext.Provider>
+    );
+  }
 
   // Document viewer overlay
   if (docViewer) {
@@ -752,17 +1087,26 @@ export default function TelegramMiniApp() {
               {isAdmin && !editingRule && (
                 <>
                   {selectedRule.confidence < 1.0 && (
-                    <button className="p-2 text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-lg">
+                    <button
+                      onClick={() => handleConfirmRule(selectedRule.id)}
+                      title="Подтвердить правило (100%)"
+                      className="p-2 text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-lg"
+                    >
                       <CheckCircle className="w-5 h-5" />
                     </button>
                   )}
                   <button
                     onClick={() => setEditingRule(true)}
+                    title="Редактировать"
                     className="p-2 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-lg"
                   >
                     <Edit3 className="w-5 h-5" />
                   </button>
-                  <button className="p-2 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg">
+                  <button
+                    onClick={() => handleDeleteRule(selectedRule.id)}
+                    title="Удалить правило"
+                    className="p-2 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg"
+                  >
                     <Trash2 className="w-5 h-5" />
                   </button>
                 </>
@@ -786,12 +1130,21 @@ export default function TelegramMiniApp() {
                     onChange={(e) => setEditBody(e.target.value)}
                     className={`w-full px-3 py-2 border rounded-lg min-h-[200px] ${isDark ? 'bg-gray-700 border-gray-600 text-white' : ''}`}
                   />
+                  {actionMsg && (
+                    <div className={`p-2 rounded-lg text-sm ${actionMsg.includes('обновлен') ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+                      {actionMsg}
+                    </div>
+                  )}
                   <div className="flex gap-2">
-                    <button className="flex-1 bg-blue-600 text-white py-2 rounded-lg font-medium">
+                    <button
+                      onClick={handleEditRuleSave}
+                      disabled={loading}
+                      className="flex-1 bg-blue-600 text-white py-2 rounded-lg font-medium disabled:opacity-50"
+                    >
                       <Save className="w-4 h-4 inline mr-2" />
-                      Сохранить
+                      {loading ? 'Сохраняем...' : 'Сохранить'}
                     </button>
-                    <button onClick={() => setEditingRule(false)} className="px-4 py-2 border rounded-lg">
+                    <button onClick={() => { setEditingRule(false); setActionMsg(null); }} className="px-4 py-2 border rounded-lg">
                       <X className="w-4 h-4" />
                     </button>
                   </div>
@@ -986,13 +1339,36 @@ export default function TelegramMiniApp() {
                 <Settings className={`w-5 h-5 ${isDark ? 'text-gray-300' : 'text-gray-600'}`} />
               </button>
               {isAdmin && (
-                <span className="px-2 py-1 bg-purple-100 dark:bg-purple-900 text-purple-700 dark:text-purple-300 rounded-full text-xs font-medium">
-                  {role}
-                </span>
+                <>
+                  <button
+                    onClick={() => { setAddingRule(true); setActionMsg(null); setNewRuleTitle(''); setNewRuleBody(''); }}
+                    title="Добавить правило"
+                    className="p-2 rounded-lg bg-blue-600 text-white"
+                  >
+                    <Plus className="w-4 h-4" />
+                  </button>
+                  <span className="px-2 py-1 bg-purple-100 dark:bg-purple-900 text-purple-700 dark:text-purple-300 rounded-full text-xs font-medium">
+                    {role}
+                  </span>
+                </>
               )}
             </div>
           </div>
         </div>
+
+        {/* Action feedback banner */}
+        {actionMsg && (
+          <div className={`px-4 py-2 flex items-center justify-between text-sm ${
+            actionMsg.includes('Ошибка') || actionMsg.includes('ошибка')
+              ? 'bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400'
+              : 'bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400'
+          }`}>
+            <span>{actionMsg}</span>
+            <button onClick={() => setActionMsg(null)} className="ml-2 opacity-60 hover:opacity-100">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
 
         {/* Settings Panel */}
         {showSettings && (
@@ -1424,48 +1800,54 @@ export default function TelegramMiniApp() {
           {/* Documents tab (admin only) */}
           {activeTab === 'documents' && isAdmin && (
             <div className="space-y-4">
-              {/* Hidden file input */}
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".pdf,.doc,.docx,.txt"
-                className="hidden"
-                onChange={handleFileUpload}
-              />
-
-              {/* Upload button */}
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={docUploading}
-                className="w-full flex items-center justify-center gap-3 py-4 rounded-xl bg-blue-600 text-white font-medium disabled:opacity-50"
-              >
-                <Upload className="w-5 h-5" />
-                {docUploading ? 'Загружается...' : 'Загрузить документ'}
-              </button>
-
-              {docUploading && (
-                <div className="flex items-center justify-center gap-2 py-2 text-blue-600">
-                  <div className="animate-spin w-5 h-5 border-2 border-blue-600 border-t-transparent rounded-full" />
-                  <span className="text-sm">Читаем и сохраняем документ...</span>
-                </div>
+              {/* Hidden file input (SUPER_ADMIN only) */}
+              {role === 'SUPER_ADMIN' && (
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".pdf,.doc,.docx,.txt"
+                  className="hidden"
+                  onChange={handleFileUpload}
+                />
               )}
 
-              {docUploadMessage && (
-                <div className={`p-3 rounded-xl text-sm ${
-                  docUploadMessage.includes('загружен')
-                    ? 'bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400'
-                    : 'bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400'
-                }`}>
-                  {docUploadMessage}
-                </div>
-              )}
+              {/* Upload button — SUPER_ADMIN only */}
+              {role === 'SUPER_ADMIN' && (
+                <>
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={docUploading}
+                    className="w-full flex items-center justify-center gap-3 py-4 rounded-xl bg-blue-600 text-white font-medium disabled:opacity-50"
+                  >
+                    <Upload className="w-5 h-5" />
+                    {docUploading ? 'Загружается...' : 'Загрузить документ'}
+                  </button>
 
-              <p className={`text-xs ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
-                Поддерживаются: PDF, DOCX, DOC, TXT. После загрузки откройте панель администратора для запуска обработки AI.
-              </p>
+                  {docUploading && (
+                    <div className="flex items-center justify-center gap-2 py-2 text-blue-600">
+                      <div className="animate-spin w-5 h-5 border-2 border-blue-600 border-t-transparent rounded-full" />
+                      <span className="text-sm">Читаем и сохраняем документ...</span>
+                    </div>
+                  )}
+
+                  {docUploadMessage && (
+                    <div className={`p-3 rounded-xl text-sm ${
+                      docUploadMessage.includes('загружен') || docUploadMessage.includes('успешно')
+                        ? 'bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400'
+                        : 'bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400'
+                    }`}>
+                      {docUploadMessage}
+                    </div>
+                  )}
+
+                  <p className={`text-xs ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                    Поддерживаются: PDF, DOCX, DOC, TXT. После загрузки нажмите ▶ для запуска обработки AI.
+                  </p>
+                </>
+              )}
 
               {/* Document list */}
-              <h3 className={`font-semibold mt-4 ${isDark ? 'text-white' : 'text-gray-900'}`}>
+              <h3 className={`font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>
                 Все документы ({docList.length})
               </h3>
               {docList.length === 0 ? (
@@ -1476,7 +1858,7 @@ export default function TelegramMiniApp() {
               ) : (
                 docList.map((doc) => (
                   <div key={doc.id} className={`p-4 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-sm`}>
-                    <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-start gap-2">
                       <div className="flex-1 min-w-0">
                         <p className={`font-medium truncate ${isDark ? 'text-white' : 'text-gray-900'}`}>
                           {doc.title}
@@ -1484,29 +1866,53 @@ export default function TelegramMiniApp() {
                         <p className={`text-xs truncate ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
                           {doc.filename}
                         </p>
-                        <div className="flex gap-3 mt-2 text-xs text-gray-400">
+                        <div className="flex gap-3 mt-1 text-xs text-gray-400">
                           <span>{doc._count?.rules ?? 0} правил</span>
                           <span>{doc._count?.qaPairs ?? 0} вопросов</span>
                           <span>{new Date(doc.uploadedAt).toLocaleDateString('ru-RU')}</span>
                         </div>
                         {doc.parseError && (
-                          <p className="text-xs text-red-500 mt-1">{doc.parseError}</p>
+                          <p className="text-xs text-red-500 mt-1 truncate">{doc.parseError}</p>
                         )}
                       </div>
-                      <span className={`text-xs px-2 py-1 rounded-full font-medium flex-shrink-0 ${
-                        doc.parseStatus === 'COMPLETED'
-                          ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-                          : doc.parseStatus === 'PROCESSING'
-                          ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
-                          : doc.parseStatus === 'FAILED'
-                          ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
-                          : 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400'
-                      }`}>
-                        {doc.parseStatus === 'COMPLETED' ? '✓ Готов'
-                          : doc.parseStatus === 'PROCESSING' ? '⏳ Обработка'
-                          : doc.parseStatus === 'FAILED' ? '✗ Ошибка'
-                          : '⏸ Ожидание'}
-                      </span>
+                      <div className="flex flex-col items-end gap-2 flex-shrink-0">
+                        <span className={`text-xs px-2 py-1 rounded-full font-medium ${
+                          doc.parseStatus === 'COMPLETED'
+                            ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                            : doc.parseStatus === 'PROCESSING'
+                            ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
+                            : doc.parseStatus === 'FAILED'
+                            ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+                            : doc.parseStatus === 'EXTRACTED'
+                            ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+                            : 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400'
+                        }`}>
+                          {doc.parseStatus === 'COMPLETED' ? '✓ Готов'
+                            : doc.parseStatus === 'PROCESSING' ? '⏳ Обработка'
+                            : doc.parseStatus === 'FAILED' ? '✗ Ошибка'
+                            : doc.parseStatus === 'EXTRACTED' ? '📦 Извлечено'
+                            : '⏸ Ожидание'}
+                        </span>
+                        {/* Process button for PENDING/FAILED/EXTRACTED */}
+                        {(doc.parseStatus === 'PENDING' || doc.parseStatus === 'FAILED') && (
+                          <button
+                            onClick={() => handleProcessDocument(doc.id, doc.title)}
+                            className="flex items-center gap-1 px-2 py-1 bg-blue-600 text-white text-xs rounded-lg font-medium"
+                          >
+                            <PlayCircle className="w-3 h-3" />
+                            Обработать
+                          </button>
+                        )}
+                        {doc.parseStatus === 'EXTRACTED' && (
+                          <button
+                            onClick={() => handleProcessDocument(doc.id, doc.title)}
+                            className="flex items-center gap-1 px-2 py-1 bg-yellow-600 text-white text-xs rounded-lg font-medium"
+                          >
+                            <PlayCircle className="w-3 h-3" />
+                            Повтор
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 ))
