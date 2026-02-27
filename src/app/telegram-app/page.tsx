@@ -756,7 +756,9 @@ export default function TelegramMiniApp() {
             eventSourceRef.current = null;
           } else if (event.type === 'fatal_error' || event.type === 'error') {
             streamDone = true;
-            setProcessingErr((event.data as any)?.message || 'Ошибка обработки');
+            const isDead = (event.data as any)?.code === 'DEAD';
+            const errMsg = (event.data as any)?.message || 'Ошибка обработки';
+            setProcessingErr(isDead ? `__DLQ__${errMsg}` : errMsg);
             evtSource.close();
             eventSourceRef.current = null;
           }
@@ -915,9 +917,9 @@ export default function TelegramMiniApp() {
 
             {processingErr && (
               <div className="mt-4 p-3 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 rounded-xl text-sm space-y-2">
-                <p>❌ {processingErr}</p>
-                {processingErr.includes('DLQ') || processingErr.includes('лимит попыток') ? (
-                  <p className="text-xs opacity-80">Документ перемещён в DLQ. Используйте кнопку «Реанимировать» в списке документов.</p>
+                <p>❌ {processingErr.replace('__DLQ__', '')}</p>
+                {processingErr.startsWith('__DLQ__') ? (
+                  <p className="text-xs opacity-80 font-medium">⛔ Документ исчерпал попытки и перемещён в DLQ. Нажмите «Реанимировать» в списке документов.</p>
                 ) : (
                   <p className="text-xs opacity-80">Попытка не удалась. Вы можете попробовать снова.</p>
                 )}

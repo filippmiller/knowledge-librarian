@@ -191,10 +191,18 @@ export async function GET(
       // Acquire processing lock
       processingLocks.set(documentId, true);
 
-      // DLQ: create an attempt record
-      const attempt = await prisma.processingAttempt.create({
-        data: { documentId, status: 'RUNNING' },
-      });
+      // DLQ: create an attempt record — wrapped so lock is always released even if create fails
+      let attempt: { id: string };
+      try {
+        attempt = await prisma.processingAttempt.create({
+          data: { documentId, status: 'RUNNING' },
+        });
+      } catch (createErr) {
+        console.error(`[process-stream] Failed to create ProcessingAttempt for ${documentId}:`, createErr);
+        processingLocks.delete(documentId);
+        controller.close();
+        return;
+      }
       const attemptStart = Date.now();
       let currentPhase = 'INIT';
 
