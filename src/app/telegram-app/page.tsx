@@ -1583,7 +1583,7 @@ export default function TelegramMiniApp() {
             { id: 'recent', label: 'Новые', icon: FileText },
             { id: 'history', label: 'История', icon: History },
             { id: 'stats', label: 'Статистика', icon: BarChart3 },
-            ...(isAdmin ? [{ id: 'documents', label: 'Документы', icon: FolderOpen }] : []),
+            { id: 'documents', label: 'Документы', icon: FolderOpen },
           ].map((tab) => (
             <button
               key={tab.id}
@@ -1592,7 +1592,7 @@ export default function TelegramMiniApp() {
                 if (tab.id === 'history') loadInitialData();
                 if (tab.id === 'stats') loadStats();
                 if (tab.id === 'favorites') loadInitialData();
-                if (tab.id === 'documents') loadDocuments();
+                if (tab.id === 'documents' && isAdmin) loadDocuments();
               }}
               className={`flex items-center justify-center gap-2 py-3 px-4 font-medium text-sm whitespace-nowrap ${
                 activeTab === tab.id
@@ -1812,7 +1812,14 @@ export default function TelegramMiniApp() {
             </div>
           )}
 
-          {/* Documents tab (admin only) */}
+          {/* Documents tab */}
+          {activeTab === 'documents' && !isAdmin && (
+            <div className="text-center py-16">
+              <FolderOpen className={`w-16 h-16 mx-auto mb-4 opacity-30 ${isDark ? 'text-gray-500' : 'text-gray-400'}`} />
+              <p className={`text-lg font-medium ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>Требуется доступ администратора</p>
+              <p className={`text-sm mt-2 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>Откройте приложение через Telegram с учётной записью администратора</p>
+            </div>
+          )}
           {activeTab === 'documents' && isAdmin && (
             <div className="space-y-4">
               {/* Hidden file input (SUPER_ADMIN only) */}
