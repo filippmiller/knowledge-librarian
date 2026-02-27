@@ -302,12 +302,20 @@ export async function POST(request: NextRequest) {
               orderBy: { confidence: 'desc' },
             });
           } else {
-            // Strategy 3: Word-split ILIKE fallback (any word matches, no morphology)
+            // Strategy 3: Stem-based ILIKE fallback with Russian morphology approximation.
+            // For each word >5 chars, also search for the stem (word minus last 2 chars)
+            // so that "доставку" → "доставк" matches "доставка", "доставки", "доставке", etc.
             const searchTerms = queryWords.length > 0 ? queryWords : [query];
+            const stemmedTerms = searchTerms.flatMap((word: string) => {
+              const terms = [word];
+              if (word.length > 5) terms.push(word.slice(0, -2)); // strip 2-char suffix
+              if (word.length > 7) terms.push(word.slice(0, -3)); // strip 3-char suffix
+              return [...new Set(terms)];
+            });
             rules = await prisma.rule.findMany({
               where: {
                 ...baseWhere,
-                OR: searchTerms.flatMap((word: string) => [
+                OR: stemmedTerms.flatMap((word: string) => [
                   { title: { contains: word, mode: 'insensitive' as const } },
                   { body: { contains: word, mode: 'insensitive' as const } },
                   { ruleCode: { contains: word, mode: 'insensitive' as const } },
@@ -315,6 +323,7 @@ export async function POST(request: NextRequest) {
               },
               take: 50,
               select: ruleSelect,
+              orderBy: { confidence: 'desc' },
             });
           }
         } else {
@@ -369,12 +378,18 @@ export async function POST(request: NextRequest) {
               },
             });
           } else {
-            // ILIKE fallback for QA pairs
+            // ILIKE fallback for QA pairs with stem-based morphology
             const searchTerms = queryWords.length > 0 ? queryWords : [query];
+            const stemmedTerms = searchTerms.flatMap((word: string) => {
+              const terms = [word];
+              if (word.length > 5) terms.push(word.slice(0, -2));
+              if (word.length > 7) terms.push(word.slice(0, -3));
+              return [...new Set(terms)];
+            });
             qaPairs = await prisma.qAPair.findMany({
               where: {
                 status: 'ACTIVE',
-                OR: searchTerms.flatMap((word: string) => [
+                OR: stemmedTerms.flatMap((word: string) => [
                   { question: { contains: word, mode: 'insensitive' as const } },
                   { answer: { contains: word, mode: 'insensitive' as const } },
                 ]),
