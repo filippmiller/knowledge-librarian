@@ -51,7 +51,9 @@ export async function handleVoiceMessage(
       // Direct rule edit: "измени правило R-5 новый текст"
       const directEditMatch = text.match(DIRECT_EDIT_PATTERN);
       if (directEditMatch) {
-        const code = directEditMatch[1].toUpperCase().replace(/^R(\d)/, 'R-$1');
+        // Normalise: R-5, R5, р-5, р5, or just 5 → R-5
+        const digits = directEditMatch[1].match(/\d+/)?.[0] || '';
+        const code = `R-${digits}`;
         const newBody = directEditMatch[2].trim();
 
         const existing = await prisma.rule.findFirst({
