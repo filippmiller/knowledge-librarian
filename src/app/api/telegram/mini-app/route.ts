@@ -719,14 +719,15 @@ export async function POST(request: NextRequest) {
             data: { status: 'SUPERSEDED' },
           });
 
-          const maxRule = await prisma.rule.findFirst({
-            orderBy: { ruleCode: 'desc' },
+          const allCodes2 = await prisma.rule.findMany({
+            where: { ruleCode: { startsWith: 'R-' } },
             select: { ruleCode: true },
           });
-          const nextNum = maxRule
-            ? Math.max(...[maxRule.ruleCode].map((c) => parseInt(c.replace('R-', '')))) + 1
-            : 1;
-          const newCode = `R-${nextNum}`;
+          const maxNum2 = allCodes2.reduce((max, r) => {
+            const n = parseInt(r.ruleCode.replace(/^R-/i, '')) || 0;
+            return n > max ? n : max;
+          }, 0);
+          const newCode = `R-${maxNum2 + 1}`;
 
           const newRule = await prisma.rule.create({
             data: {
@@ -987,16 +988,16 @@ export async function POST(request: NextRequest) {
           return NextResponse.json({ error: 'Необходимо указать заголовок и описание' }, { status: 400 });
         }
 
-        // Get next rule code
-        const maxRule = await prisma.rule.findFirst({
+        // Get next rule code — must be numeric sort, not string sort (R-9 > R-100 alphabetically)
+        const allCodes = await prisma.rule.findMany({
           where: { ruleCode: { startsWith: 'R-' } },
-          orderBy: { ruleCode: 'desc' },
           select: { ruleCode: true },
         });
-        const nextNum = maxRule
-          ? Math.max(...[maxRule.ruleCode].map((c) => parseInt(c.replace(/^R-/i, '')) || 0)) + 1
-          : 1;
-        const newCode = `R-${nextNum}`;
+        const maxNum = allCodes.reduce((max, r) => {
+          const n = parseInt(r.ruleCode.replace(/^R-/i, '')) || 0;
+          return n > max ? n : max;
+        }, 0);
+        const newCode = `R-${maxNum + 1}`;
 
         const newRule = await prisma.rule.create({
           data: {

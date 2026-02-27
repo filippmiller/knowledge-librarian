@@ -144,6 +144,7 @@ export default function TelegramMiniApp() {
   const [docUploading, setDocUploading] = useState(false);
   const [docUploadMessage, setDocUploadMessage] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
 
   // Document processing (admin)
   const [processingDocId, setProcessingDocId] = useState<string | null>(null);
@@ -721,6 +722,7 @@ export default function TelegramMiniApp() {
       // 2. Open SSE stream
       setProcessingLog(prev => [...prev, 'Подключение к потоку обработки...']);
       const evtSource = new EventSource(`/api/documents/${docId}/process-stream?token=${token}`);
+      eventSourceRef.current = evtSource;
       let streamDone = false;
 
       evtSource.onmessage = (e) => {
@@ -747,10 +749,12 @@ export default function TelegramMiniApp() {
             setProcessingLog(prev => [...prev, '\n🎉 Обработка завершена! Нажмите "Сохранить" для записи в базу.']);
             setProcessingDone(true);
             evtSource.close();
+            eventSourceRef.current = null;
           } else if (event.type === 'fatal_error' || event.type === 'error') {
             streamDone = true;
             setProcessingErr((event.data as any)?.message || 'Ошибка обработки');
             evtSource.close();
+            eventSourceRef.current = null;
           }
         } catch {}
       };
@@ -883,7 +887,7 @@ export default function TelegramMiniApp() {
       <ThemeContext.Provider value={{ theme, isDark, setTheme }}>
         <div className={`min-h-screen flex flex-col ${isDark ? 'dark bg-gray-900' : 'bg-gray-50'}`}>
           <div className={`border-b px-4 py-3 flex items-center gap-3 ${isDark ? 'bg-gray-800 border-gray-700' : 'bg-white'}`}>
-            <button onClick={() => { setProcessingDocId(null); loadDocuments(); }} className="p-1">
+            <button onClick={() => { eventSourceRef.current?.close(); eventSourceRef.current = null; setProcessingDocId(null); loadDocuments(); }} className="p-1">
               <ChevronLeft className={`w-5 h-5 ${isDark ? 'text-white' : 'text-gray-900'}`} />
             </button>
             <div className="flex-1 min-w-0">
