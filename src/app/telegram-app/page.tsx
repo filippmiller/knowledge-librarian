@@ -31,6 +31,7 @@ type Rule = {
   body?: string;
   confidence: number;
   createdAt?: string;
+  sourceSpan?: { quote?: string; locationHint?: string } | null;
   document?: { title: string; id?: string };
   domains?: { domain: { slug: string; title: string } }[];
   qaPairs?: { id: string; question: string; answer: string }[];
@@ -126,6 +127,7 @@ export default function TelegramMiniApp() {
   
   // UI state
   const [selectedRule, setSelectedRule] = useState<Rule | null>(null);
+  const [docViewer, setDocViewer] = useState<{ title: string; text: string; quote?: string } | null>(null);
   const [comments, setComments] = useState<Comment[]>([]);
   const [isFavorited, setIsFavorited] = useState(false);
   const [newComment, setNewComment] = useState('');
@@ -218,12 +220,21 @@ export default function TelegramMiniApp() {
     const shouldBeDark = theme === 'dark' || (theme === 'system' && systemDark);
     setIsDark(shouldBeDark);
     document.body.classList.toggle('dark', shouldBeDark);
-    
+
     if (window.Telegram?.WebApp) {
       window.Telegram.WebApp.setHeaderColor(shouldBeDark ? '#1f2937' : '#ffffff');
       window.Telegram.WebApp.setBackgroundColor(shouldBeDark ? '#1f2937' : '#f5f5f5');
     }
   }, [theme]);
+
+  // Auto-scroll to highlighted quote in document viewer
+  useEffect(() => {
+    if (docViewer?.quote) {
+      setTimeout(() => {
+        document.getElementById('doc-highlight')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 100);
+    }
+  }, [docViewer]);
 
   const loadInitialData = async (dataParam?: string) => {
     const initDataToUse = dataParam || initData || 'dev';
@@ -574,6 +585,22 @@ export default function TelegramMiniApp() {
     }
   };
 
+  const openDocument = async (documentId: string, quote?: string) => {
+    try {
+      const res = await fetch('/api/telegram/mini-app', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: initData || 'dev', action: 'getDocument', documentId }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setDocViewer({ title: data.document.title, text: data.document.rawText, quote });
+      }
+    } catch (e) {
+      console.error('Failed to load document:', e);
+    }
+  };
+
   const handleRuleClick = async (rule: Rule) => {
     setLoading(true);
     try {
@@ -639,6 +666,54 @@ export default function TelegramMiniApp() {
     if (confidence >= 0.7) return { text: 'Средняя', color: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300' };
     return { text: 'Низкая', color: 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300' };
   };
+
+  // Document viewer overlay
+  if (docViewer) {
+    const { title, text, quote } = docViewer;
+    // Split text at the quote to highlight it
+    let before = text, highlighted = '', after = '';
+    if (quote) {
+      const idx = text.indexOf(quote);
+      if (idx !== -1) {
+        before = text.slice(0, idx);
+        highlighted = text.slice(idx, idx + quote.length);
+        after = text.slice(idx + quote.length);
+      }
+    }
+    return (
+      <ThemeContext.Provider value={{ theme, isDark, setTheme }}>
+        <div className={`min-h-screen flex flex-col ${isDark ? 'bg-gray-900' : 'bg-gray-50'}`}>
+          {/* Header */}
+          <div className={`sticky top-0 border-b px-4 py-3 flex items-center gap-3 z-10 ${isDark ? 'bg-gray-800 border-gray-700' : 'bg-white'}`}>
+            <button onClick={() => setDocViewer(null)} className="text-blue-600 font-medium flex items-center gap-1">
+              <ChevronLeft className="w-5 h-5" />
+              Назад
+            </button>
+            <span className={`font-semibold truncate flex-1 text-sm ${isDark ? 'text-white' : 'text-gray-800'}`}>{title}</span>
+          </div>
+          {/* Document text */}
+          <div className="flex-1 overflow-auto p-4">
+            <div className={`rounded-xl p-4 text-sm whitespace-pre-wrap leading-relaxed font-mono ${isDark ? 'bg-gray-800 text-gray-200' : 'bg-white text-gray-800'}`}>
+              {highlighted ? (
+                <>
+                  <span>{before}</span>
+                  <span
+                    id="doc-highlight"
+                    className="bg-yellow-300 dark:bg-yellow-600 text-gray-900 dark:text-white px-0.5 rounded"
+                  >
+                    {highlighted}
+                  </span>
+                  <span>{after}</span>
+                </>
+              ) : (
+                <span>{text}</span>
+              )}
+            </div>
+          </div>
+        </div>
+      </ThemeContext.Provider>
+    );
+  }
 
   // Rule detail view
   if (selectedRule) {
@@ -724,13 +799,25 @@ export default function TelegramMiniApp() {
               ) : (
                 <>
                   <h1 className={`text-lg font-bold mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>{selectedRule.title}</h1>
+                  {selectedRule.document?.id && (
+                    <button
+                      onClick={() => openDocument(selectedRule.document!.id!, selectedRule.sourceSpan?.quote)}
+                      className={`w-full text-left flex items-center gap-2 px-3 py-2 rounded-lg mb-2 text-sm transition-colors ${
+                        isDark ? 'bg-gray-700 hover:bg-gray-600 text-blue-400' : 'bg-blue-50 hover:bg-blue-100 text-blue-700'
+                      }`}
+                    >
+                      <FileText className="w-4 h-4 shrink-0" />
+                      <span className="truncate">{selectedRule.document.title}</span>
+                      <ChevronRight className="w-4 h-4 ml-auto shrink-0 opacity-60" />
+                    </button>
+                  )}
                   <div className="flex items-center gap-2 text-sm flex-wrap">
                     <span className={`px-2 py-1 rounded-full font-medium ${getConfidenceColor(selectedRule.confidence)}`}>
                       {Math.round(selectedRule.confidence * 100)}%
                     </span>
-                    {selectedRule.document && (
-                      <span className={isDark ? 'text-gray-400' : 'text-gray-500'}>
-                        📄 {selectedRule.document.title}
+                    {selectedRule.sourceSpan?.locationHint && (
+                      <span className={`text-xs ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                        📍 {selectedRule.sourceSpan.locationHint}
                       </span>
                     )}
                     {selectedRule._count && (

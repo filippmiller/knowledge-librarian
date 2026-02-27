@@ -189,7 +189,7 @@ export async function POST(request: NextRequest) {
   }
 
   // Define public actions that don't require auth
-  const publicActions = ['search', 'getRule', 'getStats', 'voiceSearch'];
+  const publicActions = ['search', 'getRule', 'getStats', 'voiceSearch', 'getDocument'];
   
   if (!publicActions.includes(action) && !telegramId) {
     return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
@@ -234,6 +234,7 @@ export async function POST(request: NextRequest) {
           body: true,
           confidence: true,
           createdAt: true,
+          sourceSpan: true,
           document: { select: { title: true, id: true } },
           domains: { include: { domain: { select: { slug: true, title: true } } } },
           _count: { select: { comments: true, favorites: true } },
@@ -409,6 +410,17 @@ export async function POST(request: NextRequest) {
         }
 
         return NextResponse.json({ rules, qaPairs, total: rules.length, _v: 'stem-v3' });
+      }
+
+      case 'getDocument': {
+        const { documentId } = body;
+        if (!documentId) return NextResponse.json({ error: 'Missing documentId' }, { status: 400 });
+        const doc = await prisma.document.findUnique({
+          where: { id: documentId },
+          select: { id: true, title: true, rawText: true },
+        });
+        if (!doc) return NextResponse.json({ error: 'Document not found' }, { status: 404 });
+        return NextResponse.json({ document: doc });
       }
 
       case 'voiceSearch': {
