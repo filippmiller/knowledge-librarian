@@ -408,7 +408,7 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        return NextResponse.json({ rules, qaPairs, total: rules.length });
+        return NextResponse.json({ rules, qaPairs, total: rules.length, _v: 'stem-v3' });
       }
 
       case 'voiceSearch': {
