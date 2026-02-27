@@ -253,68 +253,51 @@ export async function POST(request: NextRequest) {
           // Split query into meaningful words (>2 chars) for fallback strategies
           const queryWords = query.split(/\s+/).filter((w: string) => w.length > 2);
 
-          let matchedIds: string[] = [];
+          // Build stem-based search terms (always run alongside FTS)
+          // Strips 1-char suffix for words ≥7 chars: "доставку"→"доставк" matches all case forms
+          const searchTerms = queryWords.length > 0 ? queryWords : [query];
+          const stemmedTerms = searchTerms.flatMap((word: string) => {
+            const terms = [word];
+            if (word.length >= 7) terms.push(word.slice(0, -1));
+            return [...new Set(terms)];
+          });
 
-          try {
-            // Strategy 1: PostgreSQL FTS with Russian morphology (AND — all words must match)
-            // Handles inflections: ДОСТАВКУ → ДОСТАВКА, подаче → подача, etc.
-            const andResults = await prisma.$queryRaw<Array<{ id: string }>>`
-              SELECT r.id FROM "Rule" r
-              WHERE r.status = 'ACTIVE'
-                AND to_tsvector('russian', coalesce(r.title, '') || ' ' || coalesce(r.body, ''))
-                    @@ plainto_tsquery('russian', ${query})
-              ORDER BY ts_rank(
-                to_tsvector('russian', coalesce(r.title, '') || ' ' || coalesce(r.body, '')),
-                plainto_tsquery('russian', ${query})
-              ) DESC
-              LIMIT 100
-            `;
-            matchedIds = andResults.map((r: { id: string }) => r.id);
-
-            // Strategy 2: OR-based FTS if AND found nothing
-            // Handles phrase queries like "как подать СОН на апостиль" →
-            // finds rules containing ANY of: сон, апостиль, подать, etc.
-            if (matchedIds.length === 0 && queryWords.length > 1) {
-              const orQuery = queryWords.join(' OR ');
-              const orResults = await prisma.$queryRaw<Array<{ id: string }>>`
-                SELECT r.id FROM "Rule" r
-                WHERE r.status = 'ACTIVE'
-                  AND to_tsvector('russian', coalesce(r.title, '') || ' ' || coalesce(r.body, ''))
-                      @@ websearch_to_tsquery('russian', ${orQuery})
-                ORDER BY ts_rank(
-                  to_tsvector('russian', coalesce(r.title, '') || ' ' || coalesce(r.body, '')),
-                  websearch_to_tsquery('russian', ${orQuery})
-                ) DESC
-                LIMIT 100
-              `;
-              matchedIds = orResults.map((r: { id: string }) => r.id);
-            }
-          } catch (ftsError) {
-            console.error('[search] FTS failed, using ILIKE fallback:', ftsError);
-          }
-
-          if (matchedIds.length > 0) {
-            // Fetch full rule details for FTS-matched IDs, apply domain/confidence/date filters
-            rules = await prisma.rule.findMany({
-              where: { id: { in: matchedIds }, ...baseWhere },
-              take: 50,
-              select: ruleSelect,
-              orderBy: { confidence: 'desc' },
-            });
-          } else {
-            // Strategy 3: Stem-based ILIKE fallback with Russian morphology approximation.
-            // For each word >5 chars, also search for the stem (word minus last 2 chars)
-            // so that "доставку" → "доставк" matches "доставка", "доставки", "доставке", etc.
-            const searchTerms = queryWords.length > 0 ? queryWords : [query];
-            const stemmedTerms = searchTerms.flatMap((word: string) => {
-              const terms = [word];
-              // Strip 1-char suffix → pseudo-stem handles most Russian case endings:
-              // доставку/доставки/доставке → "доставк" matches all forms.
-              // Require ≥7 chars so stem stays ≥6 and doesn't over-match short words.
-              if (word.length >= 7) terms.push(word.slice(0, -1));
-              return [...new Set(terms)];
-            });
-            rules = await prisma.rule.findMany({
+          // Run FTS and stem-ILIKE in parallel, merge results
+          const [ftsIds, ilikeRules] = await Promise.all([
+            // Strategy 1: PostgreSQL FTS with Russian morphology
+            (async () => {
+              try {
+                const andResults = await prisma.$queryRaw<Array<{ id: string }>>`
+                  SELECT r.id FROM "Rule" r
+                  WHERE r.status = 'ACTIVE'
+                    AND to_tsvector('russian', coalesce(r.title, '') || ' ' || coalesce(r.body, ''))
+                        @@ plainto_tsquery('russian', ${query})
+                  ORDER BY ts_rank(
+                    to_tsvector('russian', coalesce(r.title, '') || ' ' || coalesce(r.body, '')),
+                    plainto_tsquery('russian', ${query})
+                  ) DESC
+                  LIMIT 100
+                `;
+                if (andResults.length > 0) return andResults.map((r: { id: string }) => r.id);
+                // OR fallback for multi-word queries
+                if (queryWords.length > 1) {
+                  const orQuery = queryWords.join(' OR ');
+                  const orResults = await prisma.$queryRaw<Array<{ id: string }>>`
+                    SELECT r.id FROM "Rule" r
+                    WHERE r.status = 'ACTIVE'
+                      AND to_tsvector('russian', coalesce(r.title, '') || ' ' || coalesce(r.body, ''))
+                          @@ websearch_to_tsquery('russian', ${orQuery})
+                    LIMIT 100
+                  `;
+                  return orResults.map((r: { id: string }) => r.id);
+                }
+                return [];
+              } catch {
+                return [];
+              }
+            })(),
+            // Strategy 2: Stem-based ILIKE (always runs, handles morphology gaps in FTS)
+            prisma.rule.findMany({
               where: {
                 ...baseWhere,
                 OR: stemmedTerms.flatMap((word: string) => [
@@ -326,8 +309,26 @@ export async function POST(request: NextRequest) {
               take: 50,
               select: ruleSelect,
               orderBy: { confidence: 'desc' },
+            }),
+          ]);
+
+          // Merge: FTS results first (by confidence), then add any ILIKE-only hits
+          const ilikeById = new Map(ilikeRules.map(r => [r.id, r]));
+          if (ftsIds.length > 0) {
+            const ftsRules = await prisma.rule.findMany({
+              where: { id: { in: ftsIds }, ...baseWhere },
+              take: 50,
+              select: ruleSelect,
+              orderBy: { confidence: 'desc' },
             });
+            const seen = new Set(ftsRules.map(r => r.id));
+            const extra = ilikeRules.filter(r => !seen.has(r.id));
+            rules = [...ftsRules, ...extra];
+          } else {
+            rules = ilikeRules;
           }
+          // Deduplicate by ID (safety)
+          rules = [...new Map(rules.map(r => [r.id, r])).values()];
         } else {
           // No text query — just apply filters
           rules = await prisma.rule.findMany({
