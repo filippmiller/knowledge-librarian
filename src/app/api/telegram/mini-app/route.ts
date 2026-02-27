@@ -308,8 +308,10 @@ export async function POST(request: NextRequest) {
             const searchTerms = queryWords.length > 0 ? queryWords : [query];
             const stemmedTerms = searchTerms.flatMap((word: string) => {
               const terms = [word];
-              if (word.length > 5) terms.push(word.slice(0, -2)); // strip 2-char suffix
-              if (word.length > 7) terms.push(word.slice(0, -3)); // strip 3-char suffix
+              // Strip 1-char suffix → pseudo-stem handles most Russian case endings:
+              // доставку/доставки/доставке → "доставк" matches all forms.
+              // Require ≥7 chars so stem stays ≥6 and doesn't over-match short words.
+              if (word.length >= 7) terms.push(word.slice(0, -1));
               return [...new Set(terms)];
             });
             rules = await prisma.rule.findMany({
