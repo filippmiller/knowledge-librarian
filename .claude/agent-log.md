@@ -9,6 +9,36 @@ Each entry tracks: timestamp, agent session, functionality area, files changed, 
 
 ---
 
+## [2026-02-28 22:30] — Fix JSON parsing pipeline + process error-logging document + verify Q&A
+
+**Area:** Document Processing / Knowledge Extraction / Q&A Engine
+**Type:** bugfix
+
+### Files Changed
+- `src/lib/ai/chat-provider.ts` — 3 fixes: position-based fence stripping, `escapeControlCharsInStrings()`, truncation artifact regex in `coerceJsonSyntax`
+- `src/lib/ai/knowledge-extractor-stream.ts` — raise `maxTokens` 8192→16000; relax validation to only require `rules`
+- `tmp-upload/test-qa.mjs` — fix endpoint URL `/api/answer` → `/api/ask`
+
+### Functions/Symbols Modified
+- `normalizeJsonResponse()` — replaced broken `[`*]{2,}` regex with position-based fence stripping
+- `escapeControlCharsInStrings()` — new function; escapes literal `\n`/`\r` inside JSON string values
+- `coerceJsonSyntax()` — added regex to repair `"key""` truncation artifact → `"key": ""`
+- `streamKnowledgeExtraction()` — maxTokens 8192→16000; optional fields default to `[]`
+
+### Database Tables
+- `Rule` — 41 new rules committed (R-234–R-274) from "Инструкция_по_фиксации_ошибок_в_чате"
+- `QaPair` — 10 new Q&A pairs committed
+- `AiQuestion` — 5 AI questions committed
+- `Chunk` — 5 chunks committed
+
+### Summary
+Root-cause investigation of "Не удалось распарсить ответ батча 1" revealed three layered bugs in `normalizeJsonResponse`: (1) a `[`*]{2,}` regex matching `**bold**` inside JSON bodies caused lazy match to cut content short; (2) Cyrillic AI responses contain literal `\n` chars inside JSON strings (invalid JSON), causing `coerceJsonSyntax` to fall back to `{}`; (3) `balanceJson` truncation at 8192-token limit produced `"key""` artifacts. All three fixed. maxTokens raised to 16000 to handle Cyrillic text (≈2 chars/token). Document processed successfully: 41 rules committed to KB. Q&A tested — 5/5 questions answered correctly (confidence 0.61–0.75).
+
+### Session Notes
+→ `.claude/sessions/2026-02-28-json-pipeline-fix-full.md`
+
+---
+
 ## [2026-02-28] — Fix knowledge extractor rejecting valid AI batch responses
 
 **Area:** Document Processing / Knowledge Extraction
