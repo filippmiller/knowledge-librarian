@@ -90,17 +90,21 @@ export function normalizeJsonResponse(raw: string): string {
 
   // Find the first JSON-like start
   const startIndex = trimmed.search(/[{[]/);
-  if (startIndex === -1) return '{}';
+  if (startIndex === -1) { console.log('[normalizeJson] no { found, returning {}'); return '{}'; }
   trimmed = trimmed.slice(startIndex);
+  console.log(`[normalizeJson] after fence+slice (first 120): ${JSON.stringify(trimmed.slice(0, 120))}`);
 
   // Escape literal newlines/carriage-returns inside JSON string values.
   // The AI sometimes puts real \n in long body fields, which makes JSON.parse fail.
   trimmed = escapeControlCharsInStrings(trimmed);
+  console.log(`[normalizeJson] after escape (first 120): ${JSON.stringify(trimmed.slice(0, 120))}`);
 
   // Attempt to fix truncated JSON by closing open brackets/braces
   const balanced = balanceJson(trimmed);
+  console.log(`[normalizeJson] after balance (first 120): ${JSON.stringify(balanced.slice(0, 120))}`);
 
   const sanitized = coerceJsonSyntax(balanced);
+  console.log(`[normalizeJson] final sanitized (first 120): ${JSON.stringify(sanitized.slice(0, 120))}`);
   return sanitized;
 }
 
