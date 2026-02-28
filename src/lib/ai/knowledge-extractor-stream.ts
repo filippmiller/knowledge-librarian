@@ -233,24 +233,24 @@ ${batch}
       const cleaned = normalizeJsonResponse(fullContent);
       const batchResult = JSON.parse(cleaned) as Partial<KnowledgeExtractionStreamResult>;
       
-      if (
-        !batchResult ||
-        !Array.isArray(batchResult.rules) ||
-        !Array.isArray(batchResult.qaPairs) ||
-        !Array.isArray(batchResult.uncertainties)
-      ) {
+      if (!batchResult || !Array.isArray(batchResult.rules)) {
         throw new Error('Knowledge Extractor returned invalid JSON');
       }
 
+      // Default optional fields the AI sometimes omits
+      const rules = batchResult.rules;
+      const qaPairs = Array.isArray(batchResult.qaPairs) ? batchResult.qaPairs : [];
+      const uncertainties = Array.isArray(batchResult.uncertainties) ? batchResult.uncertainties : [];
+
       // Accumulate results
-      allRules.push(...batchResult.rules);
-      allQAPairs.push(...batchResult.qaPairs);
-      allUncertainties.push(...batchResult.uncertainties);
+      allRules.push(...rules);
+      allQAPairs.push(...qaPairs);
+      allUncertainties.push(...uncertainties);
 
       // Update rule code for next batch
-      if (batchResult.rules.length > 0) {
+      if (rules.length > 0) {
         const maxCode = Math.max(
-          ...batchResult.rules.map(r => parseInt(r.ruleCode.replace('R-', '')))
+          ...rules.map(r => parseInt(r.ruleCode.replace('R-', '')))
         );
         currentRuleCode = maxCode + 1;
       }
@@ -260,7 +260,7 @@ ${batch}
         global.gc();
       }
 
-      console.log(`[Knowledge Extraction] Batch ${batchIndex + 1} complete: ${batchResult.rules.length} rules, ${batchResult.qaPairs.length} QAs`);
+      console.log(`[Knowledge Extraction] Batch ${batchIndex + 1} complete: ${rules.length} rules, ${qaPairs.length} QAs`);
     } catch (error) {
       console.error(`[Knowledge Extraction] Failed to parse batch ${batchIndex + 1}:`, error);
       throw new Error(`Не удалось распарсить ответ батча ${batchIndex + 1}: ${fullContent.slice(0, 200)}... Ошибка: ${error instanceof Error ? error.message : String(error)}`);
