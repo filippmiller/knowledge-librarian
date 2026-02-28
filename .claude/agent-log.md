@@ -9,6 +9,28 @@ Each entry tracks: timestamp, agent session, functionality area, files changed, 
 
 ---
 
+## [2026-02-28] — Fix knowledge extractor rejecting valid AI batch responses
+
+**Area:** Document Processing / Knowledge Extraction
+**Type:** bugfix
+
+### Files Changed
+- `src/lib/ai/knowledge-extractor-stream.ts` — relax batch validation; default optional fields to `[]`
+
+### Functions/Symbols Modified
+- batch parse block in `extractKnowledgeStream()` — only require `rules`; default `qaPairs` and `uncertainties` to `[]` if absent
+
+### Database Tables
+- N/A
+
+### Summary
+The AI occasionally returns a batch response containing only the `rules` array, omitting `qaPairs` and `uncertainties` when there are none. The strict three-field validation was throwing "Knowledge Extractor returned invalid JSON" even though the JSON was structurally correct. Fixed by validating only `rules` (required) and safely defaulting the optional fields.
+
+### Session Notes
+→ `.claude/sessions/2026-02-28-knowledge-extractor-fix.md`
+
+---
+
 ## [2026-02-19 16:00] — Forgiving bot: keyword detection in text, direct rule lookup, smarter search
 
 **Area:** Telegram Bot/Message Router, Smart Admin
