@@ -209,7 +209,9 @@ function coerceJsonSyntax(candidate: string): string {
     // Try to parse as-is first
     JSON.parse(candidate);
     return candidate;
-  } catch {
+  } catch (e1) {
+    console.log(`[coerceJson] first parse failed (len=${candidate.length}): ${(e1 as Error).message}`);
+    console.log(`[coerceJson] tail of candidate: ${JSON.stringify(candidate.slice(-200))}`);
     // Basic cleanup and try again
     const sanitized = candidate
       .replace(/,\s*([}\]])/g, '$1')
@@ -220,7 +222,8 @@ function coerceJsonSyntax(candidate: string): string {
     try {
       JSON.parse(sanitized);
       return sanitized;
-    } catch {
+    } catch (e2) {
+      console.log(`[coerceJson] second parse failed: ${(e2 as Error).message}`);
       return '{}';
     }
   }
