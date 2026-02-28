@@ -215,7 +215,7 @@ ${batch}
       messages,
       temperature: 0.1,
       responseFormat: 'json_object',
-      maxTokens: 8192,
+      maxTokens: 16000,
     });
 
     let fullContent = '';
@@ -231,10 +231,7 @@ ${batch}
     try {
       const { normalizeJsonResponse } = await import('@/lib/ai/chat-provider');
       const cleaned = normalizeJsonResponse(fullContent);
-      console.log(`[Knowledge Extraction] Batch ${batchIndex + 1} raw (first 300): ${fullContent.slice(0, 300)}`);
-      console.log(`[Knowledge Extraction] Batch ${batchIndex + 1} cleaned (first 300): ${cleaned.slice(0, 300)}`);
       const batchResult = JSON.parse(cleaned) as Partial<KnowledgeExtractionStreamResult>;
-      console.log(`[Knowledge Extraction] Batch ${batchIndex + 1} parsed keys: ${Object.keys(batchResult || {}).join(', ')}, rules type: ${typeof batchResult?.rules}, isArray: ${Array.isArray(batchResult?.rules)}`);
 
       if (!batchResult || !Array.isArray(batchResult.rules)) {
         throw new Error('Knowledge Extractor returned invalid JSON');

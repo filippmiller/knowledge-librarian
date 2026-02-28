@@ -90,21 +90,17 @@ export function normalizeJsonResponse(raw: string): string {
 
   // Find the first JSON-like start
   const startIndex = trimmed.search(/[{[]/);
-  if (startIndex === -1) { console.log('[normalizeJson] no { found, returning {}'); return '{}'; }
+  if (startIndex === -1) return '{}';
   trimmed = trimmed.slice(startIndex);
-  console.log(`[normalizeJson] after fence+slice (first 120): ${JSON.stringify(trimmed.slice(0, 120))}`);
 
   // Escape literal newlines/carriage-returns inside JSON string values.
   // The AI sometimes puts real \n in long body fields, which makes JSON.parse fail.
   trimmed = escapeControlCharsInStrings(trimmed);
-  console.log(`[normalizeJson] after escape (first 120): ${JSON.stringify(trimmed.slice(0, 120))}`);
 
   // Attempt to fix truncated JSON by closing open brackets/braces
   const balanced = balanceJson(trimmed);
-  console.log(`[normalizeJson] after balance (first 120): ${JSON.stringify(balanced.slice(0, 120))}`);
 
   const sanitized = coerceJsonSyntax(balanced);
-  console.log(`[normalizeJson] final sanitized (first 120): ${JSON.stringify(sanitized.slice(0, 120))}`);
   return sanitized;
 }
 
@@ -206,24 +202,24 @@ function balanceJson(json: string): string {
 
 function coerceJsonSyntax(candidate: string): string {
   try {
-    // Try to parse as-is first
     JSON.parse(candidate);
     return candidate;
-  } catch (e1) {
-    console.log(`[coerceJson] first parse failed (len=${candidate.length}): ${(e1 as Error).message}`);
-    console.log(`[coerceJson] tail of candidate: ${JSON.stringify(candidate.slice(-200))}`);
-    // Basic cleanup and try again
-    const sanitized = candidate
+  } catch {
+    // Basic cleanup
+    let sanitized = candidate
       .replace(/,\s*([}\]])/g, '$1')
       .replace(/([,{]\s*)'([^']+?)'\s*:/g, '$1"$2":')
       .replace(/:\s*'([^']*?)'/g, ': "$1"')
       .replace(/([{,]\s*)([A-Za-z0-9_]+)\s*:/g, '$1"$2":');
 
+    // Fix balanceJson truncation artifact: "key"" → "key": ""
+    // Happens when the AI response is cut off mid-value string.
+    sanitized = sanitized.replace(/"([^"\\]+)""\s*([},\]])/g, '"$1": ""$2');
+
     try {
       JSON.parse(sanitized);
       return sanitized;
-    } catch (e2) {
-      console.log(`[coerceJson] second parse failed: ${(e2 as Error).message}`);
+    } catch {
       return '{}';
     }
   }
