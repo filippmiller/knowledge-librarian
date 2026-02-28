@@ -70,25 +70,73 @@ export function normalizeJsonResponse(raw: string): string {
   let trimmed = raw.trim();
   if (!trimmed) return '{}';
 
-  // Handle markdown blocks (various formats: ```json, ***json, **json, *json, etc.)
-  const fenced = trimmed.match(/[`*]{2,}(?:json)?\s*([\s\S]*?)\s*[`*]{2,}/i);
-  if (fenced) {
-    trimmed = fenced[1].trim();
+  // Strip code fences.  Use a position-based approach that is immune to ** inside JSON bodies.
+  if (trimmed.startsWith('`')) {
+    // Remove the opening fence line (e.g. ```json or ```)
+    const firstNewline = trimmed.indexOf('\n');
+    if (firstNewline !== -1) {
+      trimmed = trimmed.slice(firstNewline + 1).trim();
+    } else {
+      trimmed = trimmed.replace(/^`+(?:json)?\s*/i, '').trim();
+    }
+    // Remove a closing fence (``` at start of a line, or at end of string)
+    const closingFence = trimmed.lastIndexOf('\n```');
+    if (closingFence !== -1) {
+      trimmed = trimmed.slice(0, closingFence).trim();
+    } else if (trimmed.endsWith('`')) {
+      trimmed = trimmed.replace(/`+\s*$/, '').trim();
+    }
   }
-  
-  // Also handle cases where markdown tag is at start but not closed (e.g., "***json {...")
-  trimmed = trimmed.replace(/^[`*]{1,}(?:json)?\s*/i, '');
 
   // Find the first JSON-like start
   const startIndex = trimmed.search(/[{[]/);
   if (startIndex === -1) return '{}';
   trimmed = trimmed.slice(startIndex);
 
+  // Escape literal newlines/carriage-returns inside JSON string values.
+  // The AI sometimes puts real \n in long body fields, which makes JSON.parse fail.
+  trimmed = escapeControlCharsInStrings(trimmed);
+
   // Attempt to fix truncated JSON by closing open brackets/braces
   const balanced = balanceJson(trimmed);
 
   const sanitized = coerceJsonSyntax(balanced);
   return sanitized;
+}
+
+/** Escape literal newlines/CRs that appear inside JSON string values. */
+function escapeControlCharsInStrings(json: string): string {
+  let result = '';
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < json.length; i++) {
+    const char = json[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        result += char;
+      } else if (char === '\\') {
+        escaped = true;
+        result += char;
+      } else if (char === '"') {
+        inString = false;
+        result += char;
+      } else if (char === '\n') {
+        result += '\\n';
+      } else if (char === '\r') {
+        result += '\\r';
+      } else {
+        result += char;
+      }
+    } else {
+      if (char === '"') inString = true;
+      result += char;
+    }
+  }
+
+  return result;
 }
 
 function balanceJson(json: string): string {
