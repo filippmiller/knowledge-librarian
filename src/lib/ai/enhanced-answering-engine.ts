@@ -47,6 +47,22 @@ export interface EnhancedAnswerResult {
       maxSimilarity: number;
     };
   };
+  clarificationQuestion?: {
+    question: string;
+    options: string[];
+  };
+  primarySource?: {
+    documentId: string;
+    documentTitle: string;
+    chunkContent: string;
+    relevanceScore: number;
+  };
+  supplementarySources?: Array<{
+    documentId: string;
+    documentTitle: string;
+    chunkContent: string;
+    relevanceScore: number;
+  }>;
 }
 
 interface IntentClassification {
@@ -111,7 +127,15 @@ const ENHANCED_ANSWERING_PROMPT = `Ты - ИИ-библиотекарь знан
 ДЛЯ ПРОЦЕДУР:
 - Опиши шаги последовательно
 - Укажи необходимые документы
-- Упомяни исключения, если есть`;
+- Упомяни исключения, если есть
+
+УТОЧНЯЮЩИЕ ВОПРОСЫ (КРИТИЧЕСКИ ВАЖНО):
+Если в базе знаний есть РАЗНЫЕ ответы на вопрос В ЗАВИСИМОСТИ от конкретного условия (например: регион выдачи документа, тип документа, гражданство клиента) — НЕ УГАДЫВАЙ, а задай уточняющий вопрос.
+
+Выдай ТОЛЬКО этот JSON (без \`\`\`json, без дополнительного текста вокруг):
+{"clarification":true,"question":"Текст уточняющего вопроса","options":["Вариант 1","Вариант 2"]}
+
+НЕ УТОЧНЯЙ если: информации достаточно без уточнений, или все варианты дают одинаковый ответ.`;
 
 async function classifyIntent(question: string): Promise<IntentClassification> {
   const { createChatCompletion, normalizeJsonResponse } = await import('@/lib/ai/chat-provider');
@@ -250,9 +274,39 @@ export async function answerQuestionEnhanced(
     throw error;
   }
 
+  // Fetch document titles for source attribution
+  const uniqueDocIds = [...new Set(chunks.map(c => c.documentId).filter(Boolean))];
+  const docTitleMap = new Map<string, string>();
+  if (uniqueDocIds.length > 0) {
+    try {
+      const docs = await prisma.document.findMany({
+        where: { id: { in: uniqueDocIds } },
+        select: { id: true, title: true },
+      });
+      for (const d of docs) docTitleMap.set(d.id, d.title);
+    } catch (e) {
+      console.warn('[enhanced-answering] Failed to fetch doc titles:', e);
+    }
+  }
+
   // Step 4: Select context chunks dynamically
   const contextChunks = selectContextChunks(chunks, 5);
   console.log('[enhanced-answering] Step 4: Selected', contextChunks.length, 'context chunks');
+
+  // Group context chunks by document for source attribution
+  const chunksByDoc = new Map<string, HybridSearchResult[]>();
+  for (const chunk of contextChunks) {
+    if (!chunk.documentId) continue;
+    const existing = chunksByDoc.get(chunk.documentId) ?? [];
+    existing.push(chunk);
+    chunksByDoc.set(chunk.documentId, existing);
+  }
+  let primaryDocId = '';
+  let bestDocScore = 0;
+  for (const [docId, docChunks] of chunksByDoc) {
+    const maxScore = Math.max(...docChunks.map(c => c.combinedScore));
+    if (maxScore > bestDocScore) { bestDocScore = maxScore; primaryDocId = docId; }
+  }
 
   // Step 5: Get relevant active rules
   console.log('[enhanced-answering] Step 5: Fetching rules and QA pairs...');
@@ -353,13 +407,48 @@ ${confidenceLevel === 'insufficient'
               : 'Предоставь полезный ответ на основе ВСЕХ приведённых знаний. Внимательно прочитай фрагменты документов - они содержат ключевую информацию.'}`,
         },
       ],
-      temperature: 0.3,
+      temperature: 0,
     })) || 'Не удалось сформировать ответ';
     console.log('[enhanced-answering] Answer generated successfully, length:', answer.length);
   } catch (error) {
     console.error('[enhanced-answering] Step 9 (answer generation) failed:', error);
     throw error;
   }
+
+  // Try to parse answer as clarification JSON
+  let clarificationQuestion: { question: string; options: string[] } | undefined;
+  const trimmedAnswer = answer.trim();
+  if (trimmedAnswer.startsWith('{') && trimmedAnswer.includes('"clarification"')) {
+    try {
+      const parsed = JSON.parse(trimmedAnswer);
+      if (parsed.clarification === true && typeof parsed.question === 'string' && Array.isArray(parsed.options)) {
+        clarificationQuestion = { question: parsed.question, options: parsed.options };
+        needsClarification = true;
+        answer = parsed.question; // Use question text as the answer text too
+      }
+    } catch { /* not valid JSON, treat as normal answer */ }
+  }
+
+  // Build source references from context chunks
+  const primarySource = primaryDocId ? {
+    documentId: primaryDocId,
+    documentTitle: docTitleMap.get(primaryDocId) ?? 'Документ',
+    chunkContent: [...(chunksByDoc.get(primaryDocId) ?? [])]
+      .sort((a, b) => b.combinedScore - a.combinedScore)[0]?.content?.slice(0, 400) ?? '',
+    relevanceScore: bestDocScore,
+  } : undefined;
+
+  const supplementarySources = [...chunksByDoc.entries()]
+    .filter(([docId]) => docId !== primaryDocId)
+    .map(([docId, docChunks]) => {
+      const bestChunk = [...docChunks].sort((a, b) => b.combinedScore - a.combinedScore)[0];
+      return {
+        documentId: docId,
+        documentTitle: docTitleMap.get(docId) ?? 'Документ',
+        chunkContent: bestChunk?.content?.slice(0, 400) ?? '',
+        relevanceScore: bestChunk?.combinedScore ?? 0,
+      };
+    });
 
   // Build citations with relevance scores
   const citations = rules.slice(0, 5).map((r, i) => ({
@@ -383,6 +472,9 @@ ${confidenceLevel === 'insufficient'
       extractedEntities: entities,
       isAmbiguous: expandedQueries.isAmbiguous,
     },
+    clarificationQuestion,
+    primarySource,
+    supplementarySources,
   };
 
   if (includeDebug) {

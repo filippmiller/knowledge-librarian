@@ -109,7 +109,13 @@ export default function TelegramMiniApp() {
   // Search
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<{ rules: Rule[]; qaPairs: any[]; total: number } | null>(null);
-  const [aiAnswer, setAiAnswer] = useState<string | null>(null);
+  const [aiAnswer, setAiAnswer] = useState<{
+    answer?: string;
+    needsClarification?: boolean;
+    clarificationQuestion?: { question: string; options: string[] };
+    primarySource?: { documentId: string; documentTitle: string; chunkContent: string; relevanceScore: number };
+    supplementarySources?: Array<{ documentId: string; documentTitle: string; chunkContent: string; relevanceScore: number }>;
+  } | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [showAdvancedSearch, setShowAdvancedSearch] = useState(false);
   const [confidenceFilter, setConfidenceFilter] = useState<'all' | 'high' | 'medium' | 'low'>('all');
@@ -397,7 +403,15 @@ export default function TelegramMiniApp() {
 
       if (aiRes.status === 'fulfilled' && aiRes.value?.ok) {
         const aiData = await aiRes.value.json();
-        if (aiData.answer) setAiAnswer(aiData.answer);
+        if (aiData.answer !== undefined || aiData.clarificationQuestion) {
+          setAiAnswer({
+            answer: aiData.answer,
+            needsClarification: aiData.needsClarification,
+            clarificationQuestion: aiData.clarificationQuestion,
+            primarySource: aiData.primarySource,
+            supplementarySources: aiData.supplementarySources,
+          });
+        }
       }
     } catch (error) {
       console.error('Search failed:', error);
@@ -408,6 +422,33 @@ export default function TelegramMiniApp() {
   };
 
   // All rules / pairs tabs
+  const handleClarificationAnswer = async (option: string) => {
+    if (!searchQuery.trim()) return;
+    setAiLoading(true);
+    setAiAnswer(null);
+    try {
+      const res = await fetch('/api/ask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: searchQuery, clarificationAnswer: option }),
+      });
+      if (res.ok) {
+        const aiData = await res.json();
+        setAiAnswer({
+          answer: aiData.answer,
+          needsClarification: aiData.needsClarification,
+          clarificationQuestion: aiData.clarificationQuestion,
+          primarySource: aiData.primarySource,
+          supplementarySources: aiData.supplementarySources,
+        });
+      }
+    } catch (e) {
+      console.error('Clarification fetch failed:', e);
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
   const loadAllRules = async (cursor?: string) => {
     setLoading(true);
     try {
@@ -2214,9 +2255,70 @@ export default function TelegramMiniApp() {
               {aiLoading && !aiAnswer && (
                 <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>Анализирую документы...</p>
               )}
-              {aiAnswer && (
+              {/* Clarification question with option buttons */}
+              {aiAnswer?.clarificationQuestion && (
+                <div className="space-y-3">
+                  <p className={`text-sm font-medium ${isDark ? 'text-gray-200' : 'text-gray-800'}`}>
+                    {aiAnswer.clarificationQuestion.question}
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {aiAnswer.clarificationQuestion.options.map((option) => (
+                      <button
+                        key={option}
+                        onClick={() => handleClarificationAnswer(option)}
+                        className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
+                          isDark
+                            ? 'bg-gray-700 border-gray-600 text-blue-400 hover:bg-blue-900/30 hover:border-blue-500'
+                            : 'bg-white border-blue-200 text-blue-700 hover:bg-blue-50 hover:border-blue-400'
+                        }`}
+                      >
+                        {option}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {/* Main answer text */}
+              {aiAnswer?.answer && !aiAnswer.clarificationQuestion && (
                 <div className={`text-sm whitespace-pre-wrap leading-relaxed ${isDark ? 'text-gray-200' : 'text-gray-800'}`}>
-                  {aiAnswer}
+                  {aiAnswer.answer}
+                </div>
+              )}
+              {/* Supplementary sources */}
+              {aiAnswer?.supplementarySources && aiAnswer.supplementarySources.length > 0 && !aiAnswer.clarificationQuestion && (
+                <>
+                  <div className={`my-3 border-t ${isDark ? 'border-gray-600' : 'border-blue-200'}`} />
+                  <p className={`text-xs mb-2 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>Дополнительные источники:</p>
+                  <div className="space-y-2">
+                    {aiAnswer.supplementarySources.map((src) => (
+                      <button
+                        key={src.documentId}
+                        onClick={() => openDocument(src.documentId, src.chunkContent)}
+                        className={`w-full text-left rounded-lg p-2 border text-xs transition-colors ${
+                          isDark
+                            ? 'bg-gray-700/50 border-gray-600 hover:bg-gray-700 text-gray-300'
+                            : 'bg-white border-blue-100 hover:bg-blue-50 text-gray-600'
+                        }`}
+                      >
+                        <div className="font-medium text-blue-500 truncate">{src.documentTitle}</div>
+                        <div className={`mt-0.5 line-clamp-2 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                          {src.chunkContent}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+              {/* Primary source link */}
+              {aiAnswer?.primarySource && !aiAnswer.clarificationQuestion && (
+                <div className={`mt-2 pt-2 border-t ${isDark ? 'border-gray-700' : 'border-blue-100'}`}>
+                  <button
+                    onClick={() => openDocument(aiAnswer.primarySource!.documentId, aiAnswer.primarySource!.chunkContent)}
+                    className={`text-xs flex items-center gap-1 ${isDark ? 'text-gray-500 hover:text-blue-400' : 'text-gray-400 hover:text-blue-600'}`}
+                  >
+                    <span>📄</span>
+                    <span className="truncate">Источник: {aiAnswer.primarySource.documentTitle}</span>
+                  </button>
                 </div>
               )}
             </div>

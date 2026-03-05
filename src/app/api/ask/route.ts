@@ -1,4 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
+
+// In-memory answer cache (1 hour TTL)
+const answerCache = new Map<string, { result: EnhancedAnswerResult; expiresAt: number }>();
+const CACHE_TTL = 60 * 60 * 1000;
+
+function getCacheKey(question: string, clarificationAnswer?: string): string {
+  const normalized = question.toLowerCase().trim().replace(/\s+/g, ' ');
+  return clarificationAnswer
+    ? `${normalized}|${clarificationAnswer.toLowerCase().trim()}`
+    : normalized;
+}
 import {
   answerQuestionEnhanced,
   answerWithContext,
@@ -49,12 +61,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid request body' }, { status: 400 });
     }
 
-    const { question, sessionId, includeDebug, useConversationContext } =
+    const { question, sessionId, includeDebug, useConversationContext, clarificationAnswer } =
       body as {
         question?: unknown;
         sessionId?: string;
         includeDebug?: boolean;
         useConversationContext?: boolean;
+        clarificationAnswer?: string;
       };
 
     if (!question || typeof question !== 'string') {
@@ -84,13 +97,33 @@ export async function POST(request: NextRequest) {
     console.log('[ASK] Saving user message...');
     await saveChatMessage(currentSessionId, 'USER', question);
 
+    // Check cache first (skip for debug requests)
+    const cacheKey = getCacheKey(question, clarificationAnswer);
+    if (!includeDebug) {
+      const cached = answerCache.get(cacheKey);
+      if (cached && cached.expiresAt > Date.now()) {
+        console.log('[ASK] Returning cached answer for:', question.substring(0, 60));
+        return NextResponse.json({ sessionId: currentSessionId, ...cached.result });
+      }
+    }
+
+    // Build effective question (append clarification context if provided)
+    const effectiveQuestion = clarificationAnswer
+      ? `${question}\n\nУточнение пользователя: ${clarificationAnswer}`
+      : question;
+
     // Generate answer using enhanced engine
     // Use conversation context if session exists and flag is set
     console.log('[ASK] Generating answer...');
     const result = useConversationContext && sessionId
-      ? await answerWithContext(question, currentSessionId, includeDebug === true)
-      : await answerQuestionEnhanced(question, currentSessionId, includeDebug === true);
+      ? await answerWithContext(effectiveQuestion, currentSessionId, includeDebug === true)
+      : await answerQuestionEnhanced(effectiveQuestion, currentSessionId, includeDebug === true);
     console.log('[ASK] Answer generated successfully');
+
+    // Cache the result (only if no clarification question returned)
+    if (!result.clarificationQuestion && !includeDebug) {
+      answerCache.set(cacheKey, { result, expiresAt: Date.now() + CACHE_TTL });
+    }
 
     // Save assistant message with enhanced metadata
     await saveChatMessage(currentSessionId, 'ASSISTANT', result.answer, {
