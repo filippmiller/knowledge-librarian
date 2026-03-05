@@ -1088,6 +1088,33 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ documents });
       }
 
+      case 'deleteDocument': {
+        if (!isAdmin) return NextResponse.json({ error: 'Admin required' }, { status: 403 });
+        const { documentId } = body;
+        if (!documentId) return NextResponse.json({ error: 'Missing documentId' }, { status: 400 });
+
+        // Delete child records first (in case CASCADE isn't set), then document
+        await prisma.stagedExtraction.deleteMany({ where: { documentId } });
+        await prisma.processingAttempt.deleteMany({ where: { documentId } });
+        await prisma.document.delete({ where: { id: documentId } });
+
+        return NextResponse.json({ success: true });
+      }
+
+      case 'discardStaged': {
+        if (!isAdmin) return NextResponse.json({ error: 'Admin required' }, { status: 403 });
+        const { documentId } = body;
+        if (!documentId) return NextResponse.json({ error: 'Missing documentId' }, { status: 400 });
+
+        await prisma.stagedExtraction.deleteMany({ where: { documentId } });
+        await prisma.document.update({
+          where: { id: documentId },
+          data: { parseStatus: 'PENDING', parseError: null },
+        });
+
+        return NextResponse.json({ success: true });
+      }
+
       case 'reviveDocument': {
         if (!isAdmin) return NextResponse.json({ error: 'Admin required' }, { status: 403 });
         const { documentId } = body;

@@ -151,6 +151,7 @@ export default function TelegramMiniApp() {
   const [docUploadMessage, setDocUploadMessage] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const listScrollRef = useRef(0);
 
   // Document processing (admin)
   const [processingDocId, setProcessingDocId] = useState<string | null>(null);
@@ -264,6 +265,15 @@ export default function TelegramMiniApp() {
       }, 100);
     }
   }, [docViewer]);
+
+  // Restore scroll position when returning from rule detail to list
+  useEffect(() => {
+    if (!selectedRule && listScrollRef.current > 0) {
+      const pos = listScrollRef.current;
+      listScrollRef.current = 0;
+      setTimeout(() => window.scrollTo({ top: pos, behavior: 'instant' as ScrollBehavior }), 0);
+    }
+  }, [selectedRule]);
 
   const loadInitialData = async (dataParam?: string) => {
     const initDataToUse = dataParam || initData || 'dev';
@@ -696,7 +706,14 @@ export default function TelegramMiniApp() {
       });
       const data = await res.json();
       setActionMsg(data.message || (res.ok ? 'Подтверждено' : data.error));
-      if (res.ok && selectedRule) await handleRuleClick(selectedRule);
+      if (res.ok) {
+        // Update confidence in the list so badge refreshes when user goes back
+        setSearchResults(prev => prev ? {
+          ...prev,
+          rules: prev.rules.map(r => r.id === ruleId ? { ...r, confidence: 1.0 } : r),
+        } : prev);
+        if (selectedRule) await handleRuleClick(selectedRule);
+      }
     } finally {
       setLoading(false);
     }
@@ -912,6 +929,8 @@ export default function TelegramMiniApp() {
   };
 
   const handleRuleClick = async (rule: Rule) => {
+    // Save current scroll so we can restore it when user goes back
+    if (!selectedRule) listScrollRef.current = window.scrollY;
     setLoading(true);
     try {
       const response = await fetch('/api/telegram/mini-app', {
@@ -1267,6 +1286,25 @@ export default function TelegramMiniApp() {
               >
                 <DatabaseIcon className="w-4 h-4" />
                 {loading ? 'Сохраняем...' : 'Сохранить без проверки'}
+              </button>
+              <button
+                onClick={async () => {
+                  if (!confirm('Отменить обработку и удалить все извлечённые данные? Документ останется в списке.')) return;
+                  const res = await fetch('/api/telegram/mini-app', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ initData: initData || 'dev', action: 'discardStaged', documentId: processingDocId }),
+                  });
+                  if (res.ok) {
+                    setProcessingDocId(null);
+                    setProcessingDone(false);
+                    await loadDocuments();
+                  }
+                }}
+                className={`w-full py-2 rounded-xl font-medium text-sm flex items-center justify-center gap-2 border ${isDark ? 'border-gray-600 text-gray-400 hover:bg-gray-700' : 'border-gray-300 text-gray-500 hover:bg-gray-50'}`}
+              >
+                <X className="w-4 h-4" />
+                Отменить и удалить результаты
               </button>
             </div>
           )}
@@ -2320,6 +2358,24 @@ export default function TelegramMiniApp() {
                             ↺ Реанимировать
                           </button>
                         )}
+                        <button
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            if (!confirm(`Удалить документ «${doc.title}»? Это также удалит все связанные правила и вопросы.`)) return;
+                            const res = await fetch('/api/telegram/mini-app', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ initData: initData || 'dev', action: 'deleteDocument', documentId: doc.id }),
+                            });
+                            const data = await res.json();
+                            if (data.success) { setActionMsg('Документ удалён'); loadDocuments(); }
+                            else setActionMsg(data.error || 'Ошибка удаления');
+                          }}
+                          className="flex items-center gap-1 px-2 py-1 bg-red-50 text-red-600 dark:bg-red-900/20 dark:text-red-400 text-xs rounded-lg font-medium border border-red-200 dark:border-red-800"
+                          title="Удалить документ"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
                       </div>
                     </div>
                   </div>
