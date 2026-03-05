@@ -1106,6 +1106,15 @@ export default function TelegramMiniApp() {
                               {d.body && <p className={`text-sm mt-1 line-clamp-3 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{d.body}</p>}
                             </div>
                             <div className="flex gap-1 flex-shrink-0">
+                              {d.confidence < 1.0 && (
+                                <button
+                                  onClick={() => handleUpdateStagedItem(item.id, { ...d, confidence: 1.0 })}
+                                  title="Подтвердить — 100% уверенность"
+                                  className={`p-2 rounded-lg ${isDark ? 'hover:bg-green-900/30 text-green-400' : 'hover:bg-green-50 text-green-600'}`}
+                                >
+                                  <CheckCircle className="w-4 h-4" />
+                                </button>
+                              )}
                               <button
                                 onClick={() => { setEditingStagedId(item.id); setEditStagedData(null); }}
                                 className={`p-2 rounded-lg ${isDark ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`}
@@ -1120,11 +1129,9 @@ export default function TelegramMiniApp() {
                               </button>
                             </div>
                           </div>
-                          {d.confidence && (
-                            <span className={`text-xs mt-2 inline-block px-2 py-0.5 rounded-full ${getConfidenceColor(d.confidence)}`}>
-                              {Math.round(d.confidence * 100)}%
-                            </span>
-                          )}
+                          <span className={`text-xs mt-2 inline-block px-2 py-0.5 rounded-full ${getConfidenceColor(d.confidence ?? 0)}`}>
+                            {Math.round((d.confidence ?? 0) * 100)}%
+                          </span>
                         </div>
                       )}
                     </div>
