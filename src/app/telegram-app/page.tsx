@@ -142,8 +142,18 @@ export default function TelegramMiniApp() {
   const [editingRule, setEditingRule] = useState(false);
   const [editTitle, setEditTitle] = useState('');
   const [editBody, setEditBody] = useState('');
-  const [activeTab, setActiveTab] = useState<'search' | 'domains' | 'recent' | 'history' | 'stats' | 'favorites' | 'notifications' | 'documents'>('search');
+  const [activeTab, setActiveTab] = useState<'search' | 'rules' | 'pairs' | 'recent' | 'history' | 'stats' | 'favorites' | 'notifications' | 'documents'>('search');
+  const [allRules, setAllRules] = useState<any[]>([]);
+  const [allPairs, setAllPairs] = useState<any[]>([]);
+  const [allRulesTotal, setAllRulesTotal] = useState(0);
+  const [allPairsTotal, setAllPairsTotal] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
+
+  // Document knowledge viewer
+  const [viewingDocKnowledge, setViewingDocKnowledge] = useState<any | null>(null);
+  const [docKnowledge, setDocKnowledge] = useState<{ rules: any[]; pairs: any[]; chunks: any[] } | null>(null);
+  const [docKnowledgeTab, setDocKnowledgeTab] = useState<'rules' | 'pairs' | 'chunks'>('rules');
+  const [docKnowledgeLoading, setDocKnowledgeLoading] = useState(false);
   
   // Document upload (admin only)
   const [docList, setDocList] = useState<any[]>([]);
@@ -394,6 +404,69 @@ export default function TelegramMiniApp() {
     } finally {
       setLoading(false);
       setAiLoading(false);
+    }
+  };
+
+  // All rules / pairs tabs
+  const loadAllRules = async (cursor?: string) => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/telegram/mini-app', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: initData || 'dev', action: 'getAllRules', cursor, limit: 50 }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAllRules(prev => cursor ? [...prev, ...data.rules] : data.rules);
+        setAllRulesTotal(data.total);
+      }
+    } catch (e) {
+      console.error('loadAllRules failed:', e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadAllPairs = async (cursor?: string) => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/telegram/mini-app', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: initData || 'dev', action: 'getAllPairs', cursor, limit: 50 }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAllPairs(prev => cursor ? [...prev, ...data.pairs] : data.pairs);
+        setAllPairsTotal(data.total);
+      }
+    } catch (e) {
+      console.error('loadAllPairs failed:', e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadDocumentKnowledge = async (doc: any, initialTab: 'rules' | 'pairs' | 'chunks' = 'rules') => {
+    setViewingDocKnowledge(doc);
+    setDocKnowledge(null);
+    setDocKnowledgeLoading(true);
+    setDocKnowledgeTab(initialTab);
+    try {
+      const res = await fetch('/api/telegram/mini-app', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: initData || 'dev', action: 'getDocumentKnowledge', documentId: doc.id }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setDocKnowledge(data);
+      }
+    } catch (e) {
+      console.error('loadDocumentKnowledge failed:', e);
+    } finally {
+      setDocKnowledgeLoading(false);
     }
   };
 
@@ -995,6 +1068,114 @@ export default function TelegramMiniApp() {
     if (confidence >= 0.7) return { text: 'Средняя', color: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300' };
     return { text: 'Низкая', color: 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300' };
   };
+
+  // ======== DOCUMENT KNOWLEDGE VIEWER (committed data) ========
+  if (viewingDocKnowledge) {
+    const knowledgeTabItems = docKnowledgeTab === 'rules'
+      ? (docKnowledge?.rules ?? [])
+      : docKnowledgeTab === 'pairs'
+        ? (docKnowledge?.pairs ?? [])
+        : (docKnowledge?.chunks ?? []);
+
+    return (
+      <ThemeContext.Provider value={{ theme, isDark, setTheme }}>
+        <div className={`min-h-screen flex flex-col ${isDark ? 'dark bg-gray-900' : 'bg-gray-50'}`}>
+          {/* Header */}
+          <div className={`flex items-center gap-3 px-4 py-3 border-b ${isDark ? 'bg-gray-800 border-gray-700' : 'bg-white'}`}>
+            <button onClick={() => setViewingDocKnowledge(null)} className="p-1">
+              <ChevronLeft className={`w-5 h-5 ${isDark ? 'text-gray-300' : 'text-gray-700'}`} />
+            </button>
+            <div className="flex-1 min-w-0">
+              <p className={`font-semibold text-sm truncate ${isDark ? 'text-white' : 'text-gray-900'}`}>
+                {viewingDocKnowledge.title}
+              </p>
+              <p className={`text-xs truncate ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                База знаний документа
+              </p>
+            </div>
+          </div>
+
+          {/* Tabs */}
+          <div className={`flex border-b ${isDark ? 'bg-gray-800 border-gray-700' : 'bg-white'}`}>
+            {[
+              { id: 'rules', label: `Правила (${docKnowledge?.rules.length ?? '…'})` },
+              { id: 'pairs', label: `Вопросы (${docKnowledge?.pairs.length ?? '…'})` },
+              { id: 'chunks', label: `Чанки (${docKnowledge?.chunks.length ?? '…'})` },
+            ].map(t => (
+              <button
+                key={t.id}
+                onClick={() => setDocKnowledgeTab(t.id as any)}
+                className={`flex-1 py-3 text-sm font-medium border-b-2 ${
+                  docKnowledgeTab === t.id
+                    ? 'border-blue-600 text-blue-600'
+                    : `border-transparent ${isDark ? 'text-gray-400' : 'text-gray-500'}`
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Content */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-3 pb-8">
+            {docKnowledgeLoading && (
+              <div className="text-center py-12 text-gray-400">Загрузка...</div>
+            )}
+            {!docKnowledgeLoading && knowledgeTabItems.length === 0 && (
+              <div className={`text-center py-12 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                Нет элементов этого типа
+              </div>
+            )}
+
+            {docKnowledgeTab === 'rules' && docKnowledge?.rules.map(rule => (
+              <div
+                key={rule.id}
+                onClick={() => { setViewingDocKnowledge(null); handleRuleClick(rule); }}
+                className={`p-4 rounded-xl shadow-sm cursor-pointer hover:shadow-md transition-shadow ${isDark ? 'bg-gray-800' : 'bg-white'}`}
+              >
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-xs font-mono text-blue-600 bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 rounded">
+                    {rule.ruleCode}
+                  </span>
+                  <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                    (rule.confidence ?? 0) >= 0.9
+                      ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                      : (rule.confidence ?? 0) >= 0.7
+                        ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+                        : 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400'
+                  }`}>
+                    {Math.round((rule.confidence ?? 0) * 100)}%
+                  </span>
+                </div>
+                <p className={`text-sm font-medium mb-1 ${isDark ? 'text-white' : 'text-gray-900'}`}>{rule.title}</p>
+                {rule.body && (
+                  <p className={`text-xs line-clamp-2 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{rule.body}</p>
+                )}
+              </div>
+            ))}
+
+            {docKnowledgeTab === 'pairs' && docKnowledge?.pairs.map(pair => (
+              <div key={pair.id} className={`p-4 rounded-xl shadow-sm ${isDark ? 'bg-gray-800' : 'bg-white'}`}>
+                <p className={`text-sm font-medium mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>{pair.question}</p>
+                <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{pair.answer}</p>
+              </div>
+            ))}
+
+            {docKnowledgeTab === 'chunks' && docKnowledge?.chunks.map(chunk => (
+              <div key={chunk.id} className={`p-3 rounded-xl shadow-sm ${isDark ? 'bg-gray-800' : 'bg-white'}`}>
+                <div className={`flex gap-2 mb-1 text-xs ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                  <span>#{chunk.chunkIndex + 1}</span>
+                </div>
+                <p className={`text-xs leading-relaxed line-clamp-4 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
+                  {chunk.content}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </ThemeContext.Provider>
+    );
+  }
 
   // ======== STAGED ITEMS REVIEW SCREEN ========
   if (reviewingDoc) {
@@ -1958,7 +2139,8 @@ export default function TelegramMiniApp() {
           {[
             { id: 'search', label: 'Поиск', icon: Search },
             { id: 'favorites', label: 'Избранное', icon: Heart },
-            { id: 'domains', label: 'Домены', icon: BookOpen },
+            { id: 'rules', label: 'Правила', icon: BookOpen },
+            { id: 'pairs', label: 'Пары', icon: MessageCircle },
             { id: 'recent', label: 'Новые', icon: FileText },
             { id: 'history', label: 'История', icon: History },
             { id: 'stats', label: 'Статистика', icon: BarChart3 },
@@ -1972,6 +2154,8 @@ export default function TelegramMiniApp() {
                 if (tab.id === 'stats') loadStats();
                 if (tab.id === 'favorites') loadInitialData();
                 if (tab.id === 'documents' && isAdmin) loadDocuments();
+                if (tab.id === 'rules') loadAllRules();
+                if (tab.id === 'pairs') loadAllPairs();
               }}
               className={`flex items-center justify-center gap-2 py-3 px-4 font-medium text-sm whitespace-nowrap ${
                 activeTab === tab.id
@@ -2179,33 +2363,113 @@ export default function TelegramMiniApp() {
             </div>
           )}
 
-          {/* Other tabs... */}
-          {activeTab === 'domains' && !loading && (
-            <div className="grid grid-cols-1 gap-2">
-              {domains.map((domain) => (
-                <button
-                  key={domain.id}
-                  onClick={() => {
-                    setSearchQuery('');
-                    setDomainFilter(domain.slug);
-                    setShowAdvancedSearch(true);
-                    handleSearch();
-                  }}
-                  className={`p-4 rounded-xl shadow-sm text-left ${isDark ? 'bg-gray-800' : 'bg-white'}`}
+          {/* Rules tab */}
+          {activeTab === 'rules' && (
+            <div className="space-y-2">
+              <div className={`text-xs px-1 pb-1 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                Всего правил: {allRulesTotal}
+              </div>
+              {loading && allRules.length === 0 && (
+                <div className="text-center py-12 text-gray-400">Загрузка...</div>
+              )}
+              {!loading && allRules.length === 0 && (
+                <div className="text-center py-12 text-gray-400">Правила не найдены</div>
+              )}
+              {allRules.map((rule) => (
+                <div
+                  key={rule.id}
+                  onClick={() => handleRuleClick(rule)}
+                  className={`p-4 rounded-xl shadow-sm cursor-pointer hover:shadow-md transition-shadow ${isDark ? 'bg-gray-800' : 'bg-white'}`}
                 >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h4 className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>{domain.title}</h4>
-                      {domain.description && (
-                        <p className={`text-sm mt-1 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{domain.description}</p>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-xs font-mono text-blue-600 bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 rounded">
+                          {rule.ruleCode}
+                        </span>
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                          (rule.confidence ?? 0) >= 0.9
+                            ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                            : (rule.confidence ?? 0) >= 0.7
+                              ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+                              : 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400'
+                        }`}>
+                          {Math.round((rule.confidence ?? 0) * 100)}%
+                        </span>
+                      </div>
+                      <p className={`text-sm font-medium leading-snug ${isDark ? 'text-white' : 'text-gray-900'}`}>
+                        {rule.title}
+                      </p>
+                      {rule.document?.title && (
+                        <p className={`text-xs mt-1 truncate ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                          {rule.document.title}
+                        </p>
                       )}
                     </div>
-                    <span className="text-sm font-medium text-blue-600 bg-blue-50 dark:bg-blue-900/30 px-3 py-1 rounded-full">
-                      {domain._count.rules}
-                    </span>
+                    <ChevronRight className={`w-4 h-4 flex-shrink-0 mt-1 ${isDark ? 'text-gray-600' : 'text-gray-300'}`} />
                   </div>
-                </button>
+                </div>
               ))}
+              {allRules.length > 0 && allRules.length < allRulesTotal && (
+                <button
+                  onClick={() => loadAllRules(allRules[allRules.length - 1].id)}
+                  disabled={loading}
+                  className="w-full py-3 text-sm text-blue-600 font-medium"
+                >
+                  {loading ? 'Загрузка...' : `Загрузить ещё (${allRulesTotal - allRules.length})`}
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Pairs tab */}
+          {activeTab === 'pairs' && (
+            <div className="space-y-2">
+              <div className={`text-xs px-1 pb-1 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                Всего пар: {allPairsTotal}
+              </div>
+              {loading && allPairs.length === 0 && (
+                <div className="text-center py-12 text-gray-400">Загрузка...</div>
+              )}
+              {!loading && allPairs.length === 0 && (
+                <div className="text-center py-12 text-gray-400">Пары не найдены</div>
+              )}
+              {allPairs.map((pair) => (
+                <div
+                  key={pair.id}
+                  className={`p-4 rounded-xl shadow-sm ${isDark ? 'bg-gray-800' : 'bg-white'}`}
+                >
+                  <p className={`text-sm font-medium mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
+                    {pair.question}
+                  </p>
+                  <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+                    {pair.answer}
+                  </p>
+                  {(pair.rule?.ruleCode || pair.document?.title) && (
+                    <div className="flex items-center gap-2 mt-2">
+                      {pair.rule?.ruleCode && (
+                        <span className="text-xs font-mono text-blue-600 bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 rounded">
+                          {pair.rule.ruleCode}
+                        </span>
+                      )}
+                      {pair.document?.title && (
+                        <span className={`text-xs truncate ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                          {pair.document.title}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+              {allPairs.length > 0 && allPairs.length < allPairsTotal && (
+                <button
+                  onClick={() => loadAllPairs(allPairs[allPairs.length - 1].id)}
+                  disabled={loading}
+                  className="w-full py-3 text-sm text-blue-600 font-medium"
+                >
+                  {loading ? 'Загрузка...' : `Загрузить ещё (${allPairsTotal - allPairs.length})`}
+                </button>
+              )}
             </div>
           )}
 
@@ -2289,9 +2553,19 @@ export default function TelegramMiniApp() {
                         <p className={`text-xs truncate ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
                           {doc.filename}
                         </p>
-                        <div className="flex gap-3 mt-1 text-xs text-gray-400">
-                          <span>{doc._count?.rules ?? 0} правил</span>
-                          <span>{doc._count?.qaPairs ?? 0} вопросов</span>
+                        <div className="flex gap-3 mt-1 text-xs text-gray-400 flex-wrap">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); loadDocumentKnowledge(doc); }}
+                            className="text-blue-600 underline font-medium"
+                          >
+                            {doc._count?.rules ?? 0} правил
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); loadDocumentKnowledge(doc, 'pairs'); }}
+                            className="text-blue-600 underline font-medium"
+                          >
+                            {doc._count?.qaPairs ?? 0} вопросов
+                          </button>
                           <span>{new Date(doc.uploadedAt).toLocaleDateString('ru-RU')}</span>
                         </div>
                         {doc.parseError && doc.parseStatus !== 'DEAD' && (

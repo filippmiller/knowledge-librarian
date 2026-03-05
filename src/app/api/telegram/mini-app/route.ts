@@ -1199,6 +1199,69 @@ export async function POST(request: NextRequest) {
         });
       }
 
+      case 'getAllRules': {
+        const { cursor, limit: lim = 50 } = body;
+        const rules = await prisma.rule.findMany({
+          where: { status: 'ACTIVE' },
+          orderBy: { ruleCode: 'asc' },
+          take: lim,
+          ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+          select: {
+            id: true,
+            ruleCode: true,
+            title: true,
+            confidence: true,
+            document: { select: { title: true, id: true } },
+            _count: { select: { comments: true, favorites: true } },
+          },
+        });
+        const total = await prisma.rule.count({ where: { status: 'ACTIVE' } });
+        return NextResponse.json({ rules, total, nextCursor: rules.length === lim ? rules[rules.length - 1].id : null });
+      }
+
+      case 'getAllPairs': {
+        const { cursor, limit: lim = 50 } = body;
+        const pairs = await prisma.qAPair.findMany({
+          where: { status: 'ACTIVE' },
+          orderBy: { createdAt: 'asc' },
+          take: lim,
+          ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+          select: {
+            id: true,
+            question: true,
+            answer: true,
+            rule: { select: { ruleCode: true, title: true } },
+            document: { select: { title: true } },
+          },
+        });
+        const total = await prisma.qAPair.count({ where: { status: 'ACTIVE' } });
+        return NextResponse.json({ pairs, total, nextCursor: pairs.length === lim ? pairs[pairs.length - 1].id : null });
+      }
+
+      case 'getDocumentKnowledge': {
+        const { documentId } = body;
+        if (!documentId) return NextResponse.json({ error: 'documentId required' }, { status: 400 });
+        const [rules, pairs, chunks] = await Promise.all([
+          prisma.rule.findMany({
+            where: { documentId, status: 'ACTIVE' },
+            orderBy: { ruleCode: 'asc' },
+            select: { id: true, ruleCode: true, title: true, body: true, confidence: true },
+          }),
+          prisma.qAPair.findMany({
+            where: { documentId, status: 'ACTIVE' },
+            orderBy: { createdAt: 'asc' },
+            select: { id: true, question: true, answer: true },
+          }),
+          prisma.docChunk.findMany({
+            where: { documentId },
+            orderBy: { chunkIndex: 'asc' },
+            select: { id: true, chunkIndex: true, content: true },
+            take: 100,
+          }),
+        ]);
+        return NextResponse.json({ rules, pairs, chunks });
+      }
+
       default:
         return NextResponse.json({ error: 'Unknown action' }, { status: 400 });
     }
