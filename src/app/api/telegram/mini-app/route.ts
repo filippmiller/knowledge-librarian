@@ -957,6 +957,50 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ token, documentId });
       }
 
+      case 'getStagedItems': {
+        if (!isAdmin) return NextResponse.json({ error: 'Admin required' }, { status: 403 });
+
+        const { documentId } = body;
+        if (!documentId) return NextResponse.json({ error: 'Missing documentId' }, { status: 400 });
+
+        const items = await prisma.stagedExtraction.findMany({
+          where: { documentId, isRejected: false },
+          orderBy: { createdAt: 'asc' },
+          select: { id: true, itemType: true, data: true, isVerified: true },
+        });
+
+        return NextResponse.json({ items });
+      }
+
+      case 'updateStagedItem': {
+        if (!isAdmin) return NextResponse.json({ error: 'Admin required' }, { status: 403 });
+
+        const { stagedId, data: newData } = body;
+        if (!stagedId || !newData) return NextResponse.json({ error: 'Missing stagedId or data' }, { status: 400 });
+
+        const updated = await prisma.stagedExtraction.update({
+          where: { id: stagedId },
+          data: { data: newData },
+          select: { id: true, itemType: true, data: true },
+        });
+
+        return NextResponse.json({ item: updated });
+      }
+
+      case 'deleteStagedItem': {
+        if (!isAdmin) return NextResponse.json({ error: 'Admin required' }, { status: 403 });
+
+        const { stagedId } = body;
+        if (!stagedId) return NextResponse.json({ error: 'Missing stagedId' }, { status: 400 });
+
+        await prisma.stagedExtraction.update({
+          where: { id: stagedId },
+          data: { isRejected: true },
+        });
+
+        return NextResponse.json({ success: true });
+      }
+
       case 'commitDocument': {
         if (!isAdmin) return NextResponse.json({ error: 'Admin required' }, { status: 403 });
 

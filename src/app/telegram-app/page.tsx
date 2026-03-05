@@ -159,6 +159,14 @@ export default function TelegramMiniApp() {
   const [processingDone, setProcessingDone] = useState(false);
   const [processingErr, setProcessingErr] = useState<string | null>(null);
 
+  // Staged items review
+  const [reviewingDoc, setReviewingDoc] = useState<{ id: string; title: string } | null>(null);
+  const [stagedItems, setStagedItems] = useState<any[]>([]);
+  const [stagedTab, setStagedTab] = useState<'rules' | 'qa' | 'chunks'>('rules');
+  const [editingStagedId, setEditingStagedId] = useState<string | null>(null);
+  const [editStagedData, setEditStagedData] = useState<any>(null);
+  const [stagedLoading, setStagedLoading] = useState(false);
+
   // Add rule (admin)
   const [addingRule, setAddingRule] = useState(false);
   const [newRuleTitle, setNewRuleTitle] = useState('');
@@ -827,6 +835,59 @@ export default function TelegramMiniApp() {
     }
   };
 
+  const loadStagedItems = async (docId: string, docTitle: string) => {
+    setStagedLoading(true);
+    try {
+      const res = await fetch('/api/telegram/mini-app', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: initData || 'dev', action: 'getStagedItems', documentId: docId }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setStagedItems(data.items || []);
+        setStagedTab('rules');
+        setEditingStagedId(null);
+        setReviewingDoc({ id: docId, title: docTitle });
+      }
+    } catch (e) {
+      console.error('Failed to load staged items:', e);
+    } finally {
+      setStagedLoading(false);
+    }
+  };
+
+  const handleUpdateStagedItem = async (stagedId: string, newData: any) => {
+    try {
+      const res = await fetch('/api/telegram/mini-app', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: initData || 'dev', action: 'updateStagedItem', stagedId, data: newData }),
+      });
+      if (res.ok) {
+        setStagedItems(prev => prev.map(item => item.id === stagedId ? { ...item, data: newData } : item));
+        setEditingStagedId(null);
+      }
+    } catch (e) {
+      console.error('Failed to update staged item:', e);
+    }
+  };
+
+  const handleDeleteStagedItem = async (stagedId: string) => {
+    try {
+      const res = await fetch('/api/telegram/mini-app', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: initData || 'dev', action: 'deleteStagedItem', stagedId }),
+      });
+      if (res.ok) {
+        setStagedItems(prev => prev.filter(item => item.id !== stagedId));
+      }
+    } catch (e) {
+      console.error('Failed to delete staged item:', e);
+    }
+  };
+
   const openDocument = async (documentId: string, quote?: string) => {
     try {
       const res = await fetch('/api/telegram/mini-app', {
@@ -916,6 +977,239 @@ export default function TelegramMiniApp() {
     return { text: 'Низкая', color: 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300' };
   };
 
+  // ======== STAGED ITEMS REVIEW SCREEN ========
+  if (reviewingDoc) {
+    const rules  = stagedItems.filter(i => i.itemType === 'RULE');
+    const qaPairs = stagedItems.filter(i => i.itemType === 'QA_PAIR');
+    const chunks  = stagedItems.filter(i => i.itemType === 'CHUNK');
+
+    const tabItems = stagedTab === 'rules' ? rules : stagedTab === 'qa' ? qaPairs : chunks;
+    const totalActive = stagedItems.length;
+
+    return (
+      <ThemeContext.Provider value={{ theme, isDark, setTheme }}>
+        <div className={`min-h-screen flex flex-col ${isDark ? 'dark bg-gray-900' : 'bg-gray-50'}`}>
+          {/* Header */}
+          <div className={`sticky top-0 z-10 border-b px-4 py-3 flex items-center gap-3 ${isDark ? 'bg-gray-800 border-gray-700' : 'bg-white'}`}>
+            <button onClick={() => setReviewingDoc(null)} className="p-1">
+              <ChevronLeft className={`w-5 h-5 ${isDark ? 'text-white' : 'text-gray-900'}`} />
+            </button>
+            <div className="flex-1 min-w-0">
+              <h2 className={`font-semibold truncate ${isDark ? 'text-white' : 'text-gray-900'}`}>Проверка результатов</h2>
+              <p className={`text-xs truncate ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{reviewingDoc.title}</p>
+            </div>
+          </div>
+
+          {/* Summary pills */}
+          <div className="flex gap-2 px-4 pt-3 pb-1">
+            <span className={`text-xs px-2 py-1 rounded-full font-medium ${isDark ? 'bg-blue-900/40 text-blue-300' : 'bg-blue-100 text-blue-700'}`}>
+              📌 {rules.length} правил
+            </span>
+            <span className={`text-xs px-2 py-1 rounded-full font-medium ${isDark ? 'bg-purple-900/40 text-purple-300' : 'bg-purple-100 text-purple-700'}`}>
+              ❓ {qaPairs.length} вопросов
+            </span>
+            <span className={`text-xs px-2 py-1 rounded-full font-medium ${isDark ? 'bg-gray-700 text-gray-300' : 'bg-gray-100 text-gray-600'}`}>
+              🧩 {chunks.length} чанков
+            </span>
+          </div>
+
+          {/* Tabs */}
+          <div className={`flex border-b ${isDark ? 'border-gray-700' : 'border-gray-200'} px-4`}>
+            {(['rules', 'qa', 'chunks'] as const).map(tab => {
+              const label = tab === 'rules' ? `Правила (${rules.length})` : tab === 'qa' ? `Вопросы (${qaPairs.length})` : `Чанки (${chunks.length})`;
+              return (
+                <button
+                  key={tab}
+                  onClick={() => { setStagedTab(tab); setEditingStagedId(null); }}
+                  className={`py-2 px-3 text-sm font-medium border-b-2 transition-colors ${
+                    stagedTab === tab
+                      ? 'border-blue-500 text-blue-600'
+                      : `border-transparent ${isDark ? 'text-gray-400' : 'text-gray-500'}`
+                  }`}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Items list */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-3 pb-32">
+            {tabItems.length === 0 && (
+              <div className={`text-center py-12 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                Нет элементов этого типа
+              </div>
+            )}
+
+            {tabItems.map(item => {
+              const isEditing = editingStagedId === item.id;
+              const d = item.data as any;
+
+              return (
+                <div key={item.id} className={`rounded-xl shadow-sm ${isDark ? 'bg-gray-800' : 'bg-white'}`}>
+                  {item.itemType === 'RULE' && (
+                    <div className="p-4">
+                      {isEditing ? (
+                        <div className="space-y-2">
+                          <input
+                            className={`w-full px-3 py-2 border rounded-lg text-sm font-medium ${isDark ? 'bg-gray-700 border-gray-600 text-white' : 'border-gray-300'}`}
+                            value={editStagedData?.title ?? d.title}
+                            onChange={e => setEditStagedData((prev: any) => ({ ...(prev ?? d), title: e.target.value }))}
+                            placeholder="Заголовок правила"
+                          />
+                          <textarea
+                            rows={5}
+                            className={`w-full px-3 py-2 border rounded-lg text-sm resize-none ${isDark ? 'bg-gray-700 border-gray-600 text-white' : 'border-gray-300'}`}
+                            value={editStagedData?.body ?? d.body}
+                            onChange={e => setEditStagedData((prev: any) => ({ ...(prev ?? d), body: e.target.value }))}
+                            placeholder="Описание"
+                          />
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => handleUpdateStagedItem(item.id, { ...d, ...(editStagedData ?? {}) })}
+                              className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium"
+                            >
+                              Сохранить
+                            </button>
+                            <button
+                              onClick={() => { setEditingStagedId(null); setEditStagedData(null); }}
+                              className={`px-4 py-2 rounded-lg text-sm border ${isDark ? 'border-gray-600 text-gray-300' : 'border-gray-300 text-gray-600'}`}
+                            >
+                              Отмена
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div>
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex-1 min-w-0">
+                              <p className={`font-semibold text-sm ${isDark ? 'text-white' : 'text-gray-900'}`}>{d.ruleCode} — {d.title}</p>
+                              {d.body && <p className={`text-sm mt-1 line-clamp-3 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{d.body}</p>}
+                            </div>
+                            <div className="flex gap-1 flex-shrink-0">
+                              <button
+                                onClick={() => { setEditingStagedId(item.id); setEditStagedData(null); }}
+                                className={`p-2 rounded-lg ${isDark ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`}
+                              >
+                                <Edit3 className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={() => handleDeleteStagedItem(item.id)}
+                                className={`p-2 rounded-lg ${isDark ? 'hover:bg-red-900/30 text-red-400' : 'hover:bg-red-50 text-red-500'}`}
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </div>
+                          {d.confidence && (
+                            <span className={`text-xs mt-2 inline-block px-2 py-0.5 rounded-full ${getConfidenceColor(d.confidence)}`}>
+                              {Math.round(d.confidence * 100)}%
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {item.itemType === 'QA_PAIR' && (
+                    <div className="p-4">
+                      {isEditing ? (
+                        <div className="space-y-2">
+                          <input
+                            className={`w-full px-3 py-2 border rounded-lg text-sm ${isDark ? 'bg-gray-700 border-gray-600 text-white' : 'border-gray-300'}`}
+                            value={editStagedData?.question ?? d.question}
+                            onChange={e => setEditStagedData((prev: any) => ({ ...(prev ?? d), question: e.target.value }))}
+                            placeholder="Вопрос"
+                          />
+                          <textarea
+                            rows={4}
+                            className={`w-full px-3 py-2 border rounded-lg text-sm resize-none ${isDark ? 'bg-gray-700 border-gray-600 text-white' : 'border-gray-300'}`}
+                            value={editStagedData?.answer ?? d.answer}
+                            onChange={e => setEditStagedData((prev: any) => ({ ...(prev ?? d), answer: e.target.value }))}
+                            placeholder="Ответ"
+                          />
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => handleUpdateStagedItem(item.id, { ...d, ...(editStagedData ?? {}) })}
+                              className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium"
+                            >
+                              Сохранить
+                            </button>
+                            <button
+                              onClick={() => { setEditingStagedId(null); setEditStagedData(null); }}
+                              className={`px-4 py-2 rounded-lg text-sm border ${isDark ? 'border-gray-600 text-gray-300' : 'border-gray-300 text-gray-600'}`}
+                            >
+                              Отмена
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1 min-w-0">
+                            <p className={`font-medium text-sm ${isDark ? 'text-white' : 'text-gray-900'}`}>{d.question}</p>
+                            <p className={`text-sm mt-1 line-clamp-3 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{d.answer}</p>
+                          </div>
+                          <div className="flex gap-1 flex-shrink-0">
+                            <button
+                              onClick={() => { setEditingStagedId(item.id); setEditStagedData(null); }}
+                              className={`p-2 rounded-lg ${isDark ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`}
+                            >
+                              <Edit3 className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteStagedItem(item.id)}
+                              className={`p-2 rounded-lg ${isDark ? 'hover:bg-red-900/30 text-red-400' : 'hover:bg-red-50 text-red-500'}`}
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {item.itemType === 'CHUNK' && (
+                    <div className="p-4">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <p className={`text-xs font-medium mb-1 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                            Чанк #{d.index ?? '—'} · {d.metadata?.startChar ?? 0}–{d.metadata?.endChar ?? 0} символов
+                          </p>
+                          <p className={`text-sm line-clamp-4 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>{d.content}</p>
+                        </div>
+                        <button
+                          onClick={() => handleDeleteStagedItem(item.id)}
+                          className={`p-2 rounded-lg flex-shrink-0 ${isDark ? 'hover:bg-red-900/30 text-red-400' : 'hover:bg-red-50 text-red-500'}`}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Footer: commit button */}
+          <div className={`fixed bottom-0 left-0 right-0 p-4 border-t ${isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
+            <button
+              onClick={async () => {
+                setReviewingDoc(null);
+                await handleCommitDocument();
+              }}
+              disabled={loading || totalActive === 0}
+              className="w-full py-3 bg-green-600 text-white rounded-xl font-semibold disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              <DatabaseIcon className="w-5 h-5" />
+              {loading ? 'Сохраняем...' : `Сохранить ${totalActive} элементов в базу знаний`}
+            </button>
+          </div>
+        </div>
+      </ThemeContext.Provider>
+    );
+  }
+
   // ======== DOCUMENT PROCESSING SCREEN ========
   if (processingDocId) {
     return (
@@ -957,14 +1251,22 @@ export default function TelegramMiniApp() {
           </div>
 
           {processingDone && (
-            <div className="p-4 border-t border-gray-200 dark:border-gray-700">
+            <div className="p-4 border-t border-gray-200 dark:border-gray-700 space-y-2">
+              <button
+                onClick={() => loadStagedItems(processingDocId!, processingDocTitle)}
+                disabled={stagedLoading}
+                className="w-full py-3 bg-blue-600 text-white rounded-xl font-semibold disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                <Edit3 className="w-5 h-5" />
+                {stagedLoading ? 'Загружаем...' : 'Просмотреть и редактировать'}
+              </button>
               <button
                 onClick={handleCommitDocument}
                 disabled={loading}
-                className="w-full py-3 bg-green-600 text-white rounded-xl font-semibold disabled:opacity-50 flex items-center justify-center gap-2"
+                className="w-full py-2 bg-green-600 text-white rounded-xl font-medium disabled:opacity-50 flex items-center justify-center gap-2 text-sm"
               >
-                <DatabaseIcon className="w-5 h-5" />
-                {loading ? 'Сохраняем...' : 'Сохранить в базу знаний'}
+                <DatabaseIcon className="w-4 h-4" />
+                {loading ? 'Сохраняем...' : 'Сохранить без проверки'}
               </button>
             </div>
           )}
