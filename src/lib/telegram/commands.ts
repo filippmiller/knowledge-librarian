@@ -664,18 +664,36 @@ export async function handleHelpMe(message: TelegramMessage, user: TelegramUserI
 
 /**
  * Format an answer result for Telegram.
+ *
+ * Three shapes:
+ *   - Scenario clarification → just the question + numbered options, no meta
+ *   - Out of scope            → just the short "no data" message
+ *   - Scenario_clear answer   → answer + scenario badge + sources + confidence
  */
 export function formatAnswerResponse(result: EnhancedAnswerResult): string {
-  let response = result.answer;
+  // Decision-gate short-circuit responses already contain a clean question +
+  // options list. Adding citations/confidence to them is noise.
+  if (result.scenarioClarification) {
+    return result.answer;
+  }
+  if (result.confidenceLevel === 'insufficient' && !result.scenarioKey) {
+    return result.answer;
+  }
+
+  const lines: string[] = [];
+  if (result.scenarioLabel) {
+    lines.push(`✦ Ответ для: ${result.scenarioLabel}`);
+    lines.push('');
+  }
+  lines.push(result.answer);
 
   if (result.citations.length > 0) {
-    response += '\n\n📚 Источники:';
+    lines.push('');
+    lines.push('📚 Источники:');
     for (const citation of result.citations.slice(0, 3)) {
       if (citation.ruleCode) {
-        response += `\n  ${citation.ruleCode}`;
-        if (citation.documentTitle) {
-          response += ` (${citation.documentTitle})`;
-        }
+        const title = citation.documentTitle ? ` (${citation.documentTitle})` : '';
+        lines.push(`  ${citation.ruleCode}${title}`);
       }
     }
   }
@@ -684,7 +702,8 @@ export function formatAnswerResponse(result: EnhancedAnswerResult): string {
     : result.confidenceLevel === 'medium' ? 'Средняя'
     : result.confidenceLevel === 'low' ? 'Низкая'
     : 'Недостаточная';
-  response += `\n\n⭐ Уверенность: ${confLabel} (${(result.confidence * 100).toFixed(0)}%)`;
+  lines.push('');
+  lines.push(`⭐ Уверенность: ${confLabel} (${(result.confidence * 100).toFixed(0)}%)`);
 
-  return response;
+  return lines.join('\n');
 }

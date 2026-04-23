@@ -56,6 +56,35 @@ export async function sendMessage(chatId: number, text: string): Promise<void> {
   }
 }
 
+/**
+ * Send a message with an inline keyboard. Used for scenario-clarification
+ * prompts — each button carries callback_data the bot can match on a
+ * subsequent callback_query to re-query the answering engine with the chosen
+ * scenario already baked in.
+ */
+export async function sendInlineKeyboard(
+  chatId: number,
+  text: string,
+  buttons: Array<{ text: string; callback_data: string }>
+): Promise<void> {
+  if (!TELEGRAM_BOT_TOKEN) return;
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+  try {
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        // One button per row — wraps better on mobile than packed rows.
+        reply_markup: { inline_keyboard: buttons.map((b) => [b]) },
+      }),
+    });
+  } catch (error) {
+    console.error('[telegram-api] Error sending inline keyboard:', error);
+  }
+}
+
 function splitMessage(text: string, maxLen: number): string[] {
   const parts: string[] = [];
   let remaining = text;

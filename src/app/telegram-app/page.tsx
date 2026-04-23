@@ -115,8 +115,15 @@ export default function TelegramMiniApp() {
     clarificationQuestion?: { question: string; options: string[] };
     primarySource?: { documentId: string; documentTitle: string; chunkContent: string; relevanceScore: number };
     supplementarySources?: Array<{ documentId: string; documentTitle: string; chunkContent: string; relevanceScore: number }>;
+    scenarioKey?: string;
+    scenarioLabel?: string;
   } | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
+  // Accumulates clarification-answer labels across multiple disambiguation
+  // steps (e.g. apostille → zags → spb needs two clicks). Reset on new
+  // search. Sent as a single joined string so the gate can reclassify against
+  // the full user context, not just the latest click.
+  const [clarificationChain, setClarificationChain] = useState<string[]>([]);
   const [showAdvancedSearch, setShowAdvancedSearch] = useState(false);
   const [confidenceFilter, setConfidenceFilter] = useState<'all' | 'high' | 'medium' | 'low'>('all');
   const [domainFilter, setDomainFilter] = useState<string>('');
@@ -404,12 +411,15 @@ export default function TelegramMiniApp() {
       if (aiRes.status === 'fulfilled' && aiRes.value?.ok) {
         const aiData = await aiRes.value.json();
         if (aiData.answer !== undefined || aiData.clarificationQuestion) {
+          setClarificationChain([]); // new query → reset chain
           setAiAnswer({
             answer: aiData.answer,
             needsClarification: aiData.needsClarification,
             clarificationQuestion: aiData.clarificationQuestion,
             primarySource: aiData.primarySource,
             supplementarySources: aiData.supplementarySources,
+            scenarioKey: aiData.scenarioKey,
+            scenarioLabel: aiData.scenarioLabel,
           });
         }
       }
@@ -421,16 +431,22 @@ export default function TelegramMiniApp() {
     }
   };
 
-  // All rules / pairs tabs
+  // Accumulate clarification choices so multi-level paths (e.g. apostille →
+  // zags → spb) preserve earlier answers instead of overwriting them.
   const handleClarificationAnswer = async (option: string) => {
     if (!searchQuery.trim()) return;
     setAiLoading(true);
     setAiAnswer(null);
+    const nextChain = [...clarificationChain, option];
+    setClarificationChain(nextChain);
     try {
       const res = await fetch('/api/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: searchQuery, clarificationAnswer: option }),
+        body: JSON.stringify({
+          question: searchQuery,
+          clarificationAnswer: nextChain.join(' → '),
+        }),
       });
       if (res.ok) {
         const aiData = await res.json();
@@ -440,6 +456,8 @@ export default function TelegramMiniApp() {
           clarificationQuestion: aiData.clarificationQuestion,
           primarySource: aiData.primarySource,
           supplementarySources: aiData.supplementarySources,
+          scenarioKey: aiData.scenarioKey,
+          scenarioLabel: aiData.scenarioLabel,
         });
       }
     } catch (e) {
@@ -2276,6 +2294,15 @@ export default function TelegramMiniApp() {
                       </button>
                     ))}
                   </div>
+                </div>
+              )}
+              {/* Scenario badge — tells user which procedure this answer is scoped to */}
+              {aiAnswer?.scenarioLabel && !aiAnswer.clarificationQuestion && (
+                <div className={`text-xs mb-2 inline-flex items-center gap-1 px-2 py-1 rounded ${
+                  isDark ? 'bg-blue-900/30 text-blue-300' : 'bg-blue-100 text-blue-700'
+                }`}>
+                  <span>✦</span>
+                  <span>Ответ для: <b>{aiAnswer.scenarioLabel}</b></span>
                 </div>
               )}
               {/* Main answer text */}
