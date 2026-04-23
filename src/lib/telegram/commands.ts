@@ -556,15 +556,20 @@ export async function handleQuestion(message: TelegramMessage, user: TelegramUse
 
     const result = await answerQuestionEnhanced(question, session.id);
 
+    // Persist scenarioClarification in metadata so the callback handler
+    // can resolve option IDs to their labels on the next button click.
     await saveChatMessage(session.id, 'ASSISTANT', result.answer, {
       confidence: result.confidence,
       confidenceLevel: result.confidenceLevel,
       domainsUsed: result.domainsUsed,
       citationCount: result.citations.length,
+      scenarioKey: result.scenarioKey,
+      scenarioClarification: result.scenarioClarification,
     });
 
-    const response = formatAnswerResponse(result);
-    await sendMessage(chatId, response);
+    // Use the shared helper so text path and callback path format identically.
+    const { sendClarificationOrAnswer } = await import('./scenario-callback');
+    await sendClarificationOrAnswer(chatId, result);
   } catch (error) {
     console.error('[commands] Question error:', error);
     await sendMessage(chatId, '❌ Произошла ошибка при обработке вопроса. Попробуйте позже.');

@@ -1,5 +1,6 @@
-import { sendMessage, sendTypingIndicator, sendWebAppButton } from './telegram-api';
-import type { TelegramUpdate, TelegramMessage } from './telegram-api';
+import { sendMessage, sendTypingIndicator, sendWebAppButton, answerCallbackQuery } from './telegram-api';
+import type { TelegramUpdate, TelegramMessage, TelegramCallbackQuery } from './telegram-api';
+import { handleScenarioCallback } from './scenario-callback';
 import { checkAccess, isAdmin, isSuperAdmin } from './access-control';
 import type { TelegramUserInfo } from './access-control';
 import {
@@ -34,10 +35,48 @@ import prisma from '@/lib/db';
 import { ADD_KEYWORDS, CORRECT_KEYWORDS, PRICE_CHANGE_PATTERN, RULE_LOOKUP_PATTERN } from './constants';
 
 /**
+ * Dispatch a callback_query (inline-keyboard click) to the right handler.
+ * Currently only scenario-clarification buttons use callbacks; "sc:<id>"
+ * prefix routes to handleScenarioCallback which re-queries the answering
+ * engine with the user's chosen option.
+ */
+async function handleCallback(cq: TelegramCallbackQuery): Promise<void> {
+  const data = cq.data ?? '';
+  const chatId = cq.message?.chat.id;
+  const telegramId = cq.from.id.toString();
+
+  // Always acknowledge the click so Telegram stops spinning.
+  await answerCallbackQuery(cq.id);
+
+  if (!chatId) return;
+
+  // Access check mirrors the text path.
+  const accessResult = await checkAccess(telegramId, cq.from.username, cq.from.first_name);
+  if (!accessResult.allowed) {
+    await sendMessage(chatId, 'Нет доступа к боту.');
+    return;
+  }
+
+  if (data.startsWith('sc:')) {
+    await handleScenarioCallback(chatId, telegramId, data.slice(3), accessResult.user);
+    return;
+  }
+
+  console.log('[callback] unknown data prefix:', data);
+}
+
+/**
  * Main entry point for all Telegram updates.
  * Checks access, then routes to the appropriate handler.
  */
 export async function handleUpdate(update: TelegramUpdate): Promise<void> {
+  // Route 1: inline-keyboard button click. Scenario clarification uses
+  // callback_data prefixed with "sc:" (scenario choice).
+  if (update.callback_query) {
+    await handleCallback(update.callback_query);
+    return;
+  }
+
   const message = update.message;
   if (!message) return;
 

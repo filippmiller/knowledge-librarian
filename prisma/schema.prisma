@@ -532,6 +532,26 @@ enum FeedbackType {
   GREAT // Answer was great (positive feedback)
 }
 
+// Consistency-gate telemetry: every time the gate finds unsupported factual
+// claims in a synthesized answer, log it here. Lets us track which scenarios
+// produce the most hallucinations and whether regeneration actually fixes
+// them. See src/lib/ai/consistency-gate.ts.
+model HallucinationLog {
+  id                  String   @id @default(cuid())
+  sessionId           String?
+  question            String   @db.Text
+  scenarioKey         String?
+  initialAnswer       String   @db.Text
+  regeneratedAnswer   String?  @db.Text
+  unsupportedClaims   Json // Array<{ claim, reasoning?, supported: false }>
+  unsupportedCount    Int
+  regenerated         Boolean  @default(false)
+  createdAt           DateTime @default(now())
+
+  @@index([scenarioKey])
+  @@index([createdAt])
+}
+
 // ============================================
 // LIBRARIAN KNOWLEDGE MANAGEMENT SYSTEM
 // ============================================

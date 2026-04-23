@@ -310,13 +310,14 @@ export async function answerQuestionEnhanced(
   const allQueries = [question, ...expandedQueries.variants];
   console.log('[enhanced-answering] Step 2: Built', allQueries.length, 'query variants');
 
-  // Step 3: Run hybrid multi-query search (scenario-filtered)
+  // Step 3: Run hybrid multi-query search (scenario-filtered, no domain
+  // filter — see Step 5 comment for why domains are now ignored at retrieval).
   console.log('[enhanced-answering] Step 3: Running hybrid search...');
   let chunks;
   try {
     chunks = await multiQuerySearch(
       allQueries,
-      intentResult.domains,
+      [], // domains disabled — scenario filter does the narrowing
       10,
       scenarioAncestors
     );
@@ -360,7 +361,16 @@ export async function answerQuestionEnhanced(
     if (maxScore > bestDocScore) { bestDocScore = maxScore; primaryDocId = docId; }
   }
 
-  // Step 5: Get relevant active rules (scenario-filtered when gate picked one)
+  // Step 5: Get relevant active rules (scenario-filtered).
+  //
+  // NB: we deliberately DO NOT filter by intentResult.domains anymore. Audit
+  // on 2026-04-23 showed the existing Domain assignments are over-broad —
+  // notary/legal_compliance/pricing/general_ops each cover 161 of 163 rules
+  // (every rule gets ~4 domains tagged at extraction time), making the
+  // domain filter equivalent to no filter. Scenario filtering does the
+  // meaningful narrowing; domains were adding zero signal and creating a
+  // false sense of precision. Intent classification still returns domains
+  // for logging/debugging purposes, but they no longer gate retrieval.
   console.log('[enhanced-answering] Step 5: Fetching rules and QA pairs...');
   const scenarioWhere = scenarioAncestors.length > 0
     ? { OR: [{ scenarioKey: null }, { scenarioKey: { in: scenarioAncestors } }] }
@@ -368,35 +378,29 @@ export async function answerQuestionEnhanced(
   let rules;
   try {
     rules = await prisma.rule.findMany({
-    where: {
-      status: 'ACTIVE',
-      ...scenarioWhere,
-      domains: intentResult.domains.length > 0
-        ? { some: { domain: { slug: { in: intentResult.domains } } } }
-        : undefined,
-    },
-    include: {
-      document: { select: { title: true } },
-    },
-    take: 10,
-    orderBy: { confidence: 'desc' },
-  });
-  console.log('[enhanced-answering] Found', rules.length, 'rules');
+      where: {
+        status: 'ACTIVE',
+        ...scenarioWhere,
+      },
+      include: {
+        document: { select: { title: true } },
+      },
+      take: 10,
+      orderBy: { confidence: 'desc' },
+    });
+    console.log('[enhanced-answering] Found', rules.length, 'rules');
   } catch (error) {
     console.error('[enhanced-answering] Step 5 (rules fetch) failed:', error);
     throw error;
   }
 
-  // Step 6: Get relevant Q&A pairs (scenario-filtered)
+  // Step 6: Get relevant Q&A pairs (scenario-filtered, no domain filter).
   let qaPairs;
   try {
     qaPairs = await prisma.qAPair.findMany({
       where: {
         status: 'ACTIVE',
         ...scenarioWhere,
-        domains: intentResult.domains.length > 0
-          ? { some: { domain: { slug: { in: intentResult.domains } } } }
-          : undefined,
       },
       take: 5,
     });
@@ -482,8 +486,12 @@ ${confidenceLevel === 'insufficient'
   // claim isn't supported, regenerate ONCE with the unsupported claims flagged
   // as errors to remove. This catches the "Вторник-пятница 10-17" class of
   // hallucinations where the model invents a plausible schedule/address/price
-  // that isn't actually in the retrieved chunks.
+  // that isn't actually in the retrieved chunks. Every finding is persisted
+  // to HallucinationLog for post-hoc analysis (which scenarios are worst,
+  // does regeneration actually fix them, etc.).
   let consistency: ConsistencyReport | undefined;
+  let initialAnswerForLog = answer;
+  let regenerated = false;
   if (contextChunks.length > 0 && confidenceLevel !== 'insufficient') {
     try {
       consistency = await verifyAnswer(
@@ -492,10 +500,8 @@ ${confidenceLevel === 'insufficient'
       );
       console.log(`[enhanced-answering] Consistency: ${consistency.claims.length} claims, ${consistency.unsupported.length} unsupported`);
       if (consistency.unsupported.length > 0) {
-        // Log for telemetry — which specific phrases the model fabricated.
         console.warn('[enhanced-answering] Unsupported claims:',
           consistency.unsupported.map((c) => `"${c.claim}" (${c.reasoning ?? '?'})`).join(' | '));
-        // Regenerate once with explicit instruction to remove the claims.
         const fixList = consistency.unsupported
           .map((c, i) => `${i + 1}. "${c.claim}" — ${c.reasoning ?? 'not in sources'}`)
           .join('\n');
@@ -525,10 +531,25 @@ ${fixList}
           if (revised.trim().length > 0) {
             console.log('[enhanced-answering] Regenerated after consistency flag, new length:', revised.length);
             answer = revised;
+            regenerated = true;
           }
         } catch (e) {
           console.warn('[enhanced-answering] Regeneration failed, keeping original answer:', e);
         }
+
+        // Persist telemetry — fire-and-forget, never block the response.
+        prisma.hallucinationLog.create({
+          data: {
+            sessionId: sessionId ?? null,
+            question,
+            scenarioKey: scenarioDecision.scenarioKey,
+            initialAnswer: initialAnswerForLog,
+            regeneratedAnswer: regenerated ? answer : null,
+            unsupportedClaims: consistency.unsupported as unknown as object,
+            unsupportedCount: consistency.unsupported.length,
+            regenerated,
+          },
+        }).catch((e) => console.warn('[enhanced-answering] HallucinationLog write failed:', e));
       }
     } catch (e) {
       console.warn('[enhanced-answering] Consistency gate failed (fail-open):', e);

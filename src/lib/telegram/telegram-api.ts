@@ -3,6 +3,15 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
+  callback_query?: TelegramCallbackQuery;
+}
+
+export interface TelegramCallbackQuery {
+  id: string;
+  from: { id: number; first_name?: string; username?: string };
+  message?: TelegramMessage;
+  chat_instance?: string;
+  data?: string;
 }
 
 export interface TelegramMessage {
@@ -82,6 +91,24 @@ export async function sendInlineKeyboard(
     });
   } catch (error) {
     console.error('[telegram-api] Error sending inline keyboard:', error);
+  }
+}
+
+/**
+ * Acknowledge a callback_query click — Telegram requires this within a few
+ * seconds or the client shows a loading spinner indefinitely.
+ */
+export async function answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
+  if (!TELEGRAM_BOT_TOKEN) return;
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/answerCallbackQuery`;
+  try {
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query_id: callbackQueryId, text }),
+    });
+  } catch (error) {
+    console.error('[telegram-api] Error answering callback_query:', error);
   }
 }
 
