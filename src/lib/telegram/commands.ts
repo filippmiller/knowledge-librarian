@@ -552,12 +552,14 @@ export async function handleQuestion(message: TelegramMessage, user: TelegramUse
 
   try {
     const session = await getOrCreateSession('TELEGRAM', user.telegramId);
-    await saveChatMessage(session.id, 'USER', question);
+    const userMsg = await saveChatMessage(session.id, 'USER', question);
 
     const result = await answerQuestionEnhanced(question, session.id);
 
-    // Persist scenarioClarification in metadata so the callback handler
-    // can resolve option IDs to their labels on the next button click.
+    // Persist scenarioClarification + the original question anchor (text +
+    // its timestamp) so the callback handler can reconstruct the full
+    // "original + chain" query deterministically across any number of
+    // clarification clicks. No reliance on LLM follow-up detection.
     await saveChatMessage(session.id, 'ASSISTANT', result.answer, {
       confidence: result.confidence,
       confidenceLevel: result.confidenceLevel,
@@ -565,6 +567,8 @@ export async function handleQuestion(message: TelegramMessage, user: TelegramUse
       citationCount: result.citations.length,
       scenarioKey: result.scenarioKey,
       scenarioClarification: result.scenarioClarification,
+      originalQuestion: question,
+      originalQuestionAt: userMsg.createdAt.toISOString(),
     });
 
     // Use the shared helper so text path and callback path format identically.
