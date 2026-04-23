@@ -267,13 +267,20 @@ async function routeTextMessage(message: TelegramMessage, user: TelegramUserInfo
     // Rule not found — fall through to RAG, maybe it can find something relevant
   }
 
-  // 5. SUPER_ADMIN plain text → AI intent classification
+  // 5. SUPER_ADMIN plain text → AI intent classification.
+  //    Admin-specific intents (add/delete/confirm/list/stats) route to
+  //    smart-admin. `search_rules` and `question` are knowledge lookups —
+  //    those route to the scenario-aware handleQuestion so admins get the
+  //    same gate+clarification UX as regular users (addresses, graphs,
+  //    prices from a single scenario instead of a rule-code list).
   if (isSuperAdmin(user.role)) {
     try {
       const classified = await classifyAdminIntent(text);
       console.log(`[message-router] Smart admin: "${text.substring(0, 60)}" → ${classified.intent} (${classified.confidence})`);
 
-      if (classified.confidence > 0.7 && classified.intent !== 'question') {
+      const isKnowledgeLookup =
+        classified.intent === 'question' || classified.intent === 'search_rules';
+      if (classified.confidence > 0.7 && !isKnowledgeLookup) {
         await handleSmartAdminAction(chatId, classified, user);
         return;
       }
