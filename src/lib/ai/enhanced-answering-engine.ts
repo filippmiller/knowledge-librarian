@@ -15,6 +15,7 @@ import { hybridSearch, HybridSearchResult } from './vector-search';
 import { expandQuery, ExpandedQueries, ExtractedEntities, extractEntities } from './query-expansion';
 import { classifyScenario, type ScenarioDecision } from '@/lib/knowledge/scenario-classifier';
 import { ancestorsOf } from '@/lib/knowledge/scenarios';
+import { verifyAnswer, type ConsistencyReport } from '@/lib/ai/consistency-gate';
 
 // Confidence thresholds
 const CONFIDENCE_THRESHOLD_HIGH = 0.7;    // Answer confidently
@@ -118,37 +119,40 @@ const INTENT_CLASSIFIER_PROMPT = `Ты - классификатор намере
   "reasoning": "краткое объяснение"
 }`;
 
-const ENHANCED_ANSWERING_PROMPT = `Ты - ИИ-библиотекарь знаний для бюро переводов.
+const ENHANCED_ANSWERING_PROMPT = `Ты — ИИ-библиотекарь знаний для бюро переводов.
 
-КРИТИЧЕСКИЕ ПРАВИЛА:
-1. Отвечай СТРОГО на основе предоставленных знаний (правил, Q&A, фрагментов документов)
-2. Используй ВСЮ предоставленную информацию - правила, Q&A пары И фрагменты документов одинаково важны
-3. Если во фрагментах документов есть ответ на вопрос - используй его, даже если в правилах точного совпадения нет
-4. Будь краток и точен
-5. Отвечай на русском языке
+СЦЕНАРИЙ ПРОИЗВОДСТВА ОТВЕТА УЖЕ ЗАФИКСИРОВАН. Все приведённые ниже цитаты (правила, Q&A, фрагменты документов) принадлежат ЭТОМУ сценарию. Отвечай ТОЛЬКО на его основе.
 
-ВАЖНО:
-- Говори "Я не нашёл информации" ТОЛЬКО если ни в правилах, ни в Q&A, ни во фрагментах документов нет НИЧЕГО по теме вопроса
-- Если информация есть хотя бы во фрагментах документов - отвечай на её основе
-- Ссылайся на коды правил [R-xxx] если они есть, но фрагменты документов тоже являются надёжным источником
+═══ ЖЕЛЕЗНЫЕ ПРАВИЛА (нарушение недопустимо) ═══
 
-ДЛЯ ЦЕН И СРОКОВ:
-- Цитируй точные значения из базы знаний
-- Если цена может быть устаревшей (более 6 месяцев) - предупреди
-- Если есть несколько вариантов - перечисли все
+1. **НЕ ВЫДУМЫВАЙ КОНКРЕТИКУ**, которой нет в цитатах:
+   — адреса и телефоны копируй СИМВОЛ-В-СИМВОЛ из цитат
+   — цены и числа — строго по источнику (не "примерно 5000", а "2500₽" как в цитате)
+   — дни недели и часы работы — только если явно указаны в цитате
+   — URL, фамилии, названия учреждений — ТОЛЬКО из цитат
 
-ДЛЯ ПРОЦЕДУР:
-- Опиши шаги последовательно
-- Укажи необходимые документы
-- Упомяни исключения, если есть
+2. **ПРИ ОТСУТСТВИИ ДАННЫХ** — не придумывай, а напиши "в источнике не указано" или просто не упоминай.
 
-УТОЧНЯЮЩИЕ ВОПРОСЫ (КРИТИЧЕСКИ ВАЖНО):
-Если в базе знаний есть РАЗНЫЕ ответы на вопрос В ЗАВИСИМОСТИ от конкретного условия (например: регион выдачи документа, тип документа, гражданство клиента) — НЕ УГАДЫВАЙ, а задай уточняющий вопрос.
+3. **НЕ ОБОБЩАЙ И НЕ ЭКСТРАПОЛИРУЙ**: если в источнике написано "2500₽ за документ" — не добавляй "значит 5000₽ за два"; если написано "нотариус СПб" — не расширяй до "нотариус СПб или ЛО".
 
-Выдай ТОЛЬКО этот JSON (без \`\`\`json, без дополнительного текста вокруг):
-{"clarification":true,"question":"Текст уточняющего вопроса","options":["Вариант 1","Вариант 2"]}
+4. **НЕ СМЕШИВАЙ** факты из разных цитат в один: если цитата 1 говорит "Вторник 10-12", а цитата 2 "Четверг 14-16", пиши их раздельно с указанием источника, не склеивай в "Вторник-четверг 10-16".
 
-НЕ УТОЧНЯЙ если: информации достаточно без уточнений, или все варианты дают одинаковый ответ.`;
+5. **НЕ РЕДАКТИРУЙ ПРАВИЛА**: не предупреждай "цена может быть устаревшей", не добавляй юридических оговорок, которых нет в источнике.
+
+6. **Цитируй точно**: если факт важен — приведи дословно из цитаты в кавычках "...".
+
+═══ ФОРМАТ ОТВЕТА ═══
+
+- Язык ответа: русский, кратко и по делу.
+- Ссылайся на правила формата [R-123] если они есть в цитатах.
+- Если в цитатах есть **адрес/телефон/график/цена** — процитируй их дословно, не пересказывай.
+- Структурируй длинные ответы подзаголовками, но не раздувай пустыми секциями.
+
+═══ КАК ПОНИМАТЬ ЦИТАТЫ ═══
+
+Все три типа источника (правила, Q&A, фрагменты документов) — равнозначные цитаты из базы знаний. Фрагменты документов — наиболее полный и точный источник; правила — извлечённые ключевые факты; Q&A — уже сформулированные готовые ответы.
+
+Если по конкретному аспекту вопроса НЕТ ни одной цитаты — скажи это прямо ("в базе знаний не указано, уточните у …"), НЕ ВЫДУМЫВАЙ.`;
 
 async function classifyIntent(question: string): Promise<IntentClassification> {
   const { createChatCompletion, normalizeJsonResponse } = await import('@/lib/ai/chat-provider');
@@ -437,10 +441,14 @@ export async function answerQuestionEnhanced(
   console.log('[enhanced-answering] Step 9: Generating answer with confidence level:', confidenceLevel);
   const context = buildEnhancedContext(contextChunks, rules, qaPairs, confidenceLevel);
 
-  const systemPrompt = ENHANCED_ANSWERING_PROMPT + `
+  // Declare the chosen scenario explicitly so the synthesizer knows the
+  // frame. This amplifies the evidence-only contract: "all your citations
+  // belong to {{scenarioLabel}} — don't mention any other scenario".
+  const scenarioPreamble =
+    `СЦЕНАРИЙ: ${scenarioDecision.scenarioLabel}  (ключ: ${scenarioDecision.scenarioKey})\n` +
+    `Все цитаты ниже относятся к этому сценарию. НЕ упоминай другие процедуры (например другие регионы или учреждения), даже если они существуют вообще.\n`;
 
-ТЕКУЩИЙ УРОВЕНЬ УВЕРЕННОСТИ: ${confidenceLevel}
-${needsClarification ? 'РЕКОМЕНДУЕТСЯ УТОЧНЕНИЕ' : ''}`;
+  const systemPrompt = ENHANCED_ANSWERING_PROMPT;
 
   let answer: string;
   try {
@@ -450,14 +458,16 @@ ${needsClarification ? 'РЕКОМЕНДУЕТСЯ УТОЧНЕНИЕ' : ''}`;
         { role: 'system', content: systemPrompt },
         {
           role: 'user',
-          content: `Вопрос: ${question}
+          content: `${scenarioPreamble}
+Вопрос пользователя: ${question}
 
-Доступные знания:
+═══ ЦИТАТЫ ИЗ БАЗЫ ЗНАНИЙ ═══
 ${context}
 
+═══ ЗАДАЧА ═══
 ${confidenceLevel === 'insufficient'
-              ? 'Информации недостаточно. Ответь, что не нашёл релевантной информации, и предложи уточнить вопрос.'
-              : 'Предоставь полезный ответ на основе ВСЕХ приведённых знаний. Внимательно прочитай фрагменты документов - они содержат ключевую информацию.'}`,
+              ? 'Релевантных цитат не найдено. Ответь: "В базе знаний по этому вопросу нет данных." Ни в коем случае не выдумывай факты.'
+              : 'Ответь на вопрос, СТРОГО опираясь только на приведённые цитаты. Адреса, телефоны, цены, графики работы — цитируй дословно. Если какой-то аспект не покрыт цитатами, так и скажи: "в источнике не указано". Не добавляй информацию, которой нет выше.'}`,
         },
       ],
       temperature: 0,
@@ -468,19 +478,65 @@ ${confidenceLevel === 'insufficient'
     throw error;
   }
 
-  // Try to parse answer as clarification JSON
-  let clarificationQuestion: { question: string; options: string[] } | undefined;
-  const trimmedAnswer = answer.trim();
-  if (trimmedAnswer.startsWith('{') && trimmedAnswer.includes('"clarification"')) {
+  // Step 9.5: Consistency gate — verify claims against source chunks. If any
+  // claim isn't supported, regenerate ONCE with the unsupported claims flagged
+  // as errors to remove. This catches the "Вторник-пятница 10-17" class of
+  // hallucinations where the model invents a plausible schedule/address/price
+  // that isn't actually in the retrieved chunks.
+  let consistency: ConsistencyReport | undefined;
+  if (contextChunks.length > 0 && confidenceLevel !== 'insufficient') {
     try {
-      const parsed = JSON.parse(trimmedAnswer);
-      if (parsed.clarification === true && typeof parsed.question === 'string' && Array.isArray(parsed.options)) {
-        clarificationQuestion = { question: parsed.question, options: parsed.options };
-        needsClarification = true;
-        answer = parsed.question; // Use question text as the answer text too
+      consistency = await verifyAnswer(
+        answer,
+        contextChunks.map((c) => c.content)
+      );
+      console.log(`[enhanced-answering] Consistency: ${consistency.claims.length} claims, ${consistency.unsupported.length} unsupported`);
+      if (consistency.unsupported.length > 0) {
+        // Log for telemetry — which specific phrases the model fabricated.
+        console.warn('[enhanced-answering] Unsupported claims:',
+          consistency.unsupported.map((c) => `"${c.claim}" (${c.reasoning ?? '?'})`).join(' | '));
+        // Regenerate once with explicit instruction to remove the claims.
+        const fixList = consistency.unsupported
+          .map((c, i) => `${i + 1}. "${c.claim}" — ${c.reasoning ?? 'not in sources'}`)
+          .join('\n');
+        try {
+          const revised = (await createChatCompletion({
+            messages: [
+              { role: 'system', content: ENHANCED_ANSWERING_PROMPT },
+              {
+                role: 'user',
+                content: `${scenarioPreamble}
+Вопрос пользователя: ${question}
+
+═══ ЦИТАТЫ ИЗ БАЗЫ ЗНАНИЙ ═══
+${context}
+
+═══ ПРЕДЫДУЩИЙ ОТВЕТ (нужна правка) ═══
+${answer}
+
+═══ ФАКТЫ НЕ ПОДТВЕРЖДЕНЫ ЦИТАТАМИ — УДАЛИ ИЛИ ЗАМЕНИ НА "в источнике не указано" ═══
+${fixList}
+
+Перепиши ответ, убрав указанные неподтверждённые факты. Остальное сохрани максимально близко к оригиналу.`,
+              },
+            ],
+            temperature: 0,
+          })) ?? '';
+          if (revised.trim().length > 0) {
+            console.log('[enhanced-answering] Regenerated after consistency flag, new length:', revised.length);
+            answer = revised;
+          }
+        } catch (e) {
+          console.warn('[enhanced-answering] Regeneration failed, keeping original answer:', e);
+        }
       }
-    } catch { /* not valid JSON, treat as normal answer */ }
+    } catch (e) {
+      console.warn('[enhanced-answering] Consistency gate failed (fail-open):', e);
+    }
   }
+
+  // Clarification is handled by the scenario decision gate upstream.
+  const clarificationQuestion: { question: string; options: string[] } | undefined = undefined;
 
   // Build source references from context chunks
   const primarySource = primaryDocId ? {
@@ -503,12 +559,23 @@ ${confidenceLevel === 'insufficient'
       };
     });
 
-  // Build citations with relevance scores
-  const citations = rules.slice(0, 5).map((r, i) => ({
+  // Build citations with REAL relevance scores.
+  // Rules don't come with their own retrieval score (they're fetched by domain
+  // filter, not ranked by the query). We approximate by matching each rule's
+  // source document to the best chunk we retrieved for that document — so a
+  // rule from the primary-source document gets its doc's score, a rule from a
+  // supplementary doc gets that doc's score, and an unlinked rule gets 0.
+  // This is honest even if imperfect: "scores reflect how close your question
+  // was to the document this rule came from" — not an arbitrary rank decay.
+  const docScoreByDocId = new Map<string, number>();
+  for (const [docId, docChunks] of chunksByDoc) {
+    docScoreByDocId.set(docId, Math.max(...docChunks.map((c) => c.combinedScore)));
+  }
+  const citations = rules.slice(0, 5).map((r) => ({
     ruleCode: r.ruleCode,
     documentTitle: r.document?.title,
     quote: r.body.slice(0, 200) + (r.body.length > 200 ? '...' : ''),
-    relevanceScore: Math.max(0.9 - (i * 0.1), 0.5),
+    relevanceScore: r.documentId ? (docScoreByDocId.get(r.documentId) ?? 0) : 0,
   }));
 
   const result: EnhancedAnswerResult = {
