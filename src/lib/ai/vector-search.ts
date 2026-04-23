@@ -81,7 +81,8 @@ export async function searchSimilarChunksPgvector(
   queryEmbedding: number[],
   domainSlugs: string[] = [],
   limit: number = 5,
-  minSimilarity: number = 0.3
+  minSimilarity: number = 0.3,
+  scenarioAncestors: string[] = []
 ): Promise<SearchResult[]> {
   try {
     const embeddingStr = `[${queryEmbedding.join(',')}]`;
@@ -98,6 +99,15 @@ export async function searchSimilarChunksPgvector(
           WHERE d.slug IN (${slugList})
         )
       `;
+    }
+
+    // Scenario filter: accept chunks tagged with the chosen leaf OR any of
+    // its ancestors, OR untagged (universal cross-service). Inputs come only
+    // from ancestorsOf() which emits known strings — safe to interpolate.
+    let scenarioFilter = '';
+    if (scenarioAncestors.length > 0) {
+      const keyList = scenarioAncestors.map(s => `'${s.replace(/'/g, "''")}'`).join(',');
+      scenarioFilter = `AND (c."scenarioKey" IS NULL OR c."scenarioKey" IN (${keyList}))`;
     }
 
     // Use cosine distance operator <=> (returns 1 - similarity)
@@ -117,6 +127,7 @@ export async function searchSimilarChunksPgvector(
       FROM "DocChunk" c
       WHERE c."embeddingVector" IS NOT NULL
       ${Prisma.raw(domainFilter)}
+      ${Prisma.raw(scenarioFilter)}
       AND 1 - (c."embeddingVector" <=> ${embeddingStr}::vector) >= ${minSimilarity}
       ORDER BY c."embeddingVector" <=> ${embeddingStr}::vector
       LIMIT ${limit}
@@ -160,11 +171,17 @@ function cosineSimilarity(a: number[], b: number[]): number {
 async function searchSimilarChunksInMemory(
   queryEmbedding: number[],
   domainSlugs: string[] = [],
-  limit: number = 5
+  limit: number = 5,
+  scenarioAncestors: string[] = []
 ): Promise<SearchResult[]> {
-  const whereClause: Prisma.DocChunkWhereInput = domainSlugs.length > 0
-    ? { domains: { some: { domain: { slug: { in: domainSlugs } } } } }
-    : {};
+  const conditions: Prisma.DocChunkWhereInput[] = [];
+  if (domainSlugs.length > 0) {
+    conditions.push({ domains: { some: { domain: { slug: { in: domainSlugs } } } } });
+  }
+  if (scenarioAncestors.length > 0) {
+    conditions.push({ OR: [{ scenarioKey: null }, { scenarioKey: { in: scenarioAncestors } }] });
+  }
+  const whereClause: Prisma.DocChunkWhereInput = conditions.length > 0 ? { AND: conditions } : {};
 
   const chunks = await prisma.docChunk.findMany({
     where: whereClause,
@@ -206,7 +223,8 @@ async function searchSimilarChunksInMemory(
 export async function searchSimilarChunks(
   query: string,
   domainSlugs: string[] = [],
-  limit: number = 5
+  limit: number = 5,
+  scenarioAncestors: string[] = []
 ): Promise<SearchResult[]> {
   // Generate query embedding
   const [queryEmbedding] = await generateEmbeddings([query]);
@@ -215,14 +233,14 @@ export async function searchSimilarChunks(
 
   if (usePgvector) {
     try {
-      return await searchSimilarChunksPgvector(queryEmbedding, domainSlugs, limit);
+      return await searchSimilarChunksPgvector(queryEmbedding, domainSlugs, limit, 0.3, scenarioAncestors);
     } catch (error) {
       // Fallback to in-memory if pgvector fails unexpectedly
       console.warn('[vector-search] Falling back to in-memory search due to pgvector error');
-      return searchSimilarChunksInMemory(queryEmbedding, domainSlugs, limit);
+      return searchSimilarChunksInMemory(queryEmbedding, domainSlugs, limit, scenarioAncestors);
     }
   } else {
-    return searchSimilarChunksInMemory(queryEmbedding, domainSlugs, limit);
+    return searchSimilarChunksInMemory(queryEmbedding, domainSlugs, limit, scenarioAncestors);
   }
 }
 
@@ -233,7 +251,8 @@ export async function searchSimilarChunks(
 export async function searchByKeywords(
   query: string,
   domainSlugs: string[] = [],
-  limit: number = 10
+  limit: number = 10,
+  scenarioAncestors: string[] = []
 ): Promise<SearchResult[]> {
   // Normalize query for Russian text search
   const normalizedQuery = query
@@ -258,6 +277,12 @@ export async function searchByKeywords(
     `;
   }
 
+  let scenarioFilter = '';
+  if (scenarioAncestors.length > 0) {
+    const keyList = scenarioAncestors.map(s => `'${s.replace(/'/g, "''")}'`).join(',');
+    scenarioFilter = `AND (c."scenarioKey" IS NULL OR c."scenarioKey" IN (${keyList}))`;
+  }
+
   try {
     // Use PostgreSQL full-text search with Russian configuration
     const results = await prisma.$queryRaw<Array<{
@@ -274,6 +299,7 @@ export async function searchByKeywords(
       FROM "DocChunk" c
       WHERE to_tsvector('russian', c.content) @@ plainto_tsquery('russian', ${query})
       ${Prisma.raw(domainFilter)}
+      ${Prisma.raw(scenarioFilter)}
       ORDER BY rank DESC
       LIMIT ${limit}
     `;
@@ -289,18 +315,20 @@ export async function searchByKeywords(
     const searchTerms = query.split(/\s+/).filter(t => t.length > 2);
     if (searchTerms.length === 0) return [];
 
-    const whereClause: Prisma.DocChunkWhereInput = {
-      AND: [
-        {
-          OR: searchTerms.map(term => ({
-            content: { contains: term, mode: 'insensitive' as const },
-          })),
-        },
-        domainSlugs.length > 0
-          ? { domains: { some: { domain: { slug: { in: domainSlugs } } } } }
-          : {},
-      ],
-    };
+    const fallbackConditions: Prisma.DocChunkWhereInput[] = [
+      {
+        OR: searchTerms.map(term => ({
+          content: { contains: term, mode: 'insensitive' as const },
+        })),
+      },
+    ];
+    if (domainSlugs.length > 0) {
+      fallbackConditions.push({ domains: { some: { domain: { slug: { in: domainSlugs } } } } });
+    }
+    if (scenarioAncestors.length > 0) {
+      fallbackConditions.push({ OR: [{ scenarioKey: null }, { scenarioKey: { in: scenarioAncestors } }] });
+    }
+    const whereClause: Prisma.DocChunkWhereInput = { AND: fallbackConditions };
 
     const chunks = await prisma.docChunk.findMany({
       where: whereClause,
@@ -329,12 +357,13 @@ export async function hybridSearch(
   query: string,
   domainSlugs: string[] = [],
   limit: number = 5,
-  semanticWeight: number = 0.7
+  semanticWeight: number = 0.7,
+  scenarioAncestors: string[] = []
 ): Promise<HybridSearchResult[]> {
   // Run both searches in parallel
   const [semanticResults, keywordResults] = await Promise.all([
-    searchSimilarChunks(query, domainSlugs, limit * 2),
-    searchByKeywords(query, domainSlugs, limit * 2),
+    searchSimilarChunks(query, domainSlugs, limit * 2, scenarioAncestors),
+    searchByKeywords(query, domainSlugs, limit * 2, scenarioAncestors),
   ]);
 
   // Build combined results using RRF

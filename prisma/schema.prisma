@@ -26,16 +26,22 @@ model Document {
   parseError  String?
   retryCount  Int         @default(0)
 
+  // Scenario tagging — see src/lib/knowledge/scenarios.ts. Null = universal
+  // (cross-service) or not-yet-classified. See scenarioFilterClause() for
+  // retrieval semantics (ancestor path + null).
+  scenarioKey String?
+
   // Relations
-  domains             DocumentDomain[]
-  rules               Rule[]
-  qaPairs             QAPair[]
-  chunks              DocChunk[]
-  domainSuggestions   DomainSuggestion[]
-  stagedExtractions   StagedExtraction[]
-  processingAttempts  ProcessingAttempt[]
+  domains            DocumentDomain[]
+  rules              Rule[]
+  qaPairs            QAPair[]
+  chunks             DocChunk[]
+  domainSuggestions  DomainSuggestion[]
+  stagedExtractions  StagedExtraction[]
+  processingAttempts ProcessingAttempt[]
 
   @@index([parseStatus])
+  @@index([scenarioKey])
 }
 
 enum ParseStatus {
@@ -44,7 +50,7 @@ enum ParseStatus {
   EXTRACTED // All processing phases complete, staged data ready for user review/commit
   COMPLETED
   FAILED
-  DEAD      // Exceeded max retries — needs manual revival
+  DEAD // Exceeded max retries — needs manual revival
 }
 
 // Dead Letter Queue — logs every processing attempt for a document
@@ -54,9 +60,9 @@ model ProcessingAttempt {
   document     Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
   startedAt    DateTime  @default(now())
   completedAt  DateTime?
-  status       String    // RUNNING | SUCCESS | FAILED
+  status       String // RUNNING | SUCCESS | FAILED
   errorMessage String?   @db.Text
-  failedPhase  String?   // DOMAIN_CLASSIFICATION | KNOWLEDGE_EXTRACTION | CHUNKING
+  failedPhase  String? // DOMAIN_CLASSIFICATION | KNOWLEDGE_EXTRACTION | CHUNKING
   durationMs   Int?
 
   @@index([documentId])
@@ -136,6 +142,11 @@ model Rule {
   createdAt        DateTime        @default(now())
   updatedAt        DateTime        @updatedAt
 
+  // Scenario tagging — rules inherit from their source Document by default
+  // but may be placed at a broader ancestor (applies to multiple procedures)
+  // or left null (universal cross-service). See src/lib/knowledge/scenarios.ts.
+  scenarioKey String?
+
   // Relations
   document       Document?          @relation(fields: [documentId], references: [id])
   supersedesRule Rule?              @relation("RuleVersions", fields: [supersedesRuleId], references: [id])
@@ -150,6 +161,7 @@ model Rule {
   @@index([status])
   @@index([ruleCode])
   @@index([documentId])
+  @@index([scenarioKey])
 }
 
 // Q&A pairs extracted from documents
@@ -165,6 +177,8 @@ model QAPair {
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
 
+  scenarioKey String?
+
   // Relations
   document     Document?         @relation(fields: [documentId], references: [id])
   rule         Rule?             @relation(fields: [ruleId], references: [id])
@@ -176,6 +190,7 @@ model QAPair {
   @@index([status])
   @@index([documentId])
   @@index([ruleId])
+  @@index([scenarioKey])
 }
 
 enum KnowledgeStatus {
@@ -197,12 +212,15 @@ model DocChunk {
   metadata   Json? // additional context
   createdAt  DateTime @default(now())
 
+  scenarioKey String?
+
   // Relations
   document Document      @relation(fields: [documentId], references: [id], onDelete: Cascade)
   domains  ChunkDomain[]
 
   @@unique([documentId, chunkIndex])
   @@index([documentId])
+  @@index([scenarioKey])
 }
 
 // ============================================

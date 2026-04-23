@@ -13,6 +13,8 @@ import { createChatCompletion } from '@/lib/ai/chat-provider';
 import prisma from '@/lib/db';
 import { hybridSearch, HybridSearchResult } from './vector-search';
 import { expandQuery, ExpandedQueries, ExtractedEntities, extractEntities } from './query-expansion';
+import { classifyScenario, type ScenarioDecision } from '@/lib/knowledge/scenario-classifier';
+import { ancestorsOf } from '@/lib/knowledge/scenarios';
 
 // Confidence thresholds
 const CONFIDENCE_THRESHOLD_HIGH = 0.7;    // Answer confidently
@@ -63,6 +65,17 @@ export interface EnhancedAnswerResult {
     chunkContent: string;
     relevanceScore: number;
   }>;
+  // Scenario decision gate output — present after Пачка A lands.
+  // scenarioKey/scenarioLabel set when the gate picked a concrete scenario;
+  // scenarioClarification set when the gate needs a user choice (and no
+  // retrieval/synthesis was run — answer field will hold the prompt text).
+  scenarioKey?: string;
+  scenarioLabel?: string;
+  scenarioClarification?: {
+    atNodeKey: string;
+    prompt: string;
+    options: Array<{ id: string; label: string; targetScenarioKey: string }>;
+  };
 }
 
 interface IntentClassification {
@@ -177,11 +190,12 @@ async function classifyIntent(question: string): Promise<IntentClassification> {
 async function multiQuerySearch(
   queries: string[],
   domainSlugs: string[],
-  limit: number
+  limit: number,
+  scenarioAncestors: string[] = []
 ): Promise<HybridSearchResult[]> {
   // Run searches in parallel
   const allResults = await Promise.all(
-    queries.map(q => hybridSearch(q, domainSlugs, limit))
+    queries.map(q => hybridSearch(q, domainSlugs, limit, 0.7, scenarioAncestors))
   );
 
   // Merge and deduplicate results using max score
@@ -231,7 +245,40 @@ export async function answerQuestionEnhanced(
   includeDebug: boolean = false
 ): Promise<EnhancedAnswerResult> {
   console.log('[enhanced-answering] Starting for question:', question.substring(0, 100));
-  
+
+  // Step 0: Scenario decision gate — decides whether we have enough info to
+  // pick a single procedure, need to ask the user, or should say "out of
+  // scope". Runs BEFORE retrieval so ambiguous queries never trigger a
+  // cross-scenario blended synthesis.
+  console.log('[enhanced-answering] Step 0: Scenario decision gate...');
+  let scenarioDecision: ScenarioDecision;
+  try {
+    scenarioDecision = await classifyScenario(question);
+    console.log('[enhanced-answering] Scenario decision:', scenarioDecision.kind,
+      'kind' in scenarioDecision && scenarioDecision.kind === 'scenario_clear' ? `→ ${scenarioDecision.scenarioKey}` :
+      'kind' in scenarioDecision && scenarioDecision.kind === 'needs_clarification' ? `at ${scenarioDecision.atNodeKey}` : '');
+  } catch (e) {
+    console.warn('[enhanced-answering] Scenario gate failed, proceeding without filter:', e);
+    scenarioDecision = { kind: 'out_of_scope', reasoning: 'gate error; fell through to open retrieval' };
+  }
+
+  // Short-circuit: if the gate needs clarification, skip retrieval entirely
+  // and return a structured clarification response. The mini-app renders this
+  // as buttons (Пачка B); legacy clients see the prompt text in `answer`.
+  if (scenarioDecision.kind === 'needs_clarification') {
+    return buildClarificationResult(question, scenarioDecision);
+  }
+
+  // Short-circuit: out of scope → honest "no data" result, no LLM synthesis.
+  if (scenarioDecision.kind === 'out_of_scope') {
+    return buildOutOfScopeResult(question, scenarioDecision);
+  }
+
+  // From here on we have a concrete leaf scenario. Threading its ancestor
+  // chain into retrieval makes cross-scenario contamination impossible.
+  const scenarioAncestors = ancestorsOf(scenarioDecision.scenarioKey);
+  console.log('[enhanced-answering] Scenario-filtered retrieval:', scenarioAncestors.join(' > '));
+
   // Step 1: Expand query and extract entities in parallel (resilient - each can fail independently)
   console.log('[enhanced-answering] Step 1: Query expansion and intent classification...');
   const [expandedResult, entitiesResult, intentSettled] = await Promise.allSettled([
@@ -259,14 +306,15 @@ export async function answerQuestionEnhanced(
   const allQueries = [question, ...expandedQueries.variants];
   console.log('[enhanced-answering] Step 2: Built', allQueries.length, 'query variants');
 
-  // Step 3: Run hybrid multi-query search
+  // Step 3: Run hybrid multi-query search (scenario-filtered)
   console.log('[enhanced-answering] Step 3: Running hybrid search...');
   let chunks;
   try {
     chunks = await multiQuerySearch(
       allQueries,
       intentResult.domains,
-      10
+      10,
+      scenarioAncestors
     );
     console.log('[enhanced-answering] Step 3 completed. Found', chunks.length, 'chunks');
   } catch (error) {
@@ -308,13 +356,17 @@ export async function answerQuestionEnhanced(
     if (maxScore > bestDocScore) { bestDocScore = maxScore; primaryDocId = docId; }
   }
 
-  // Step 5: Get relevant active rules
+  // Step 5: Get relevant active rules (scenario-filtered when gate picked one)
   console.log('[enhanced-answering] Step 5: Fetching rules and QA pairs...');
+  const scenarioWhere = scenarioAncestors.length > 0
+    ? { OR: [{ scenarioKey: null }, { scenarioKey: { in: scenarioAncestors } }] }
+    : {};
   let rules;
   try {
     rules = await prisma.rule.findMany({
     where: {
       status: 'ACTIVE',
+      ...scenarioWhere,
       domains: intentResult.domains.length > 0
         ? { some: { domain: { slug: { in: intentResult.domains } } } }
         : undefined,
@@ -331,12 +383,13 @@ export async function answerQuestionEnhanced(
     throw error;
   }
 
-  // Step 6: Get relevant Q&A pairs
+  // Step 6: Get relevant Q&A pairs (scenario-filtered)
   let qaPairs;
   try {
     qaPairs = await prisma.qAPair.findMany({
       where: {
         status: 'ACTIVE',
+        ...scenarioWhere,
         domains: intentResult.domains.length > 0
           ? { some: { domain: { slug: { in: intentResult.domains } } } }
           : undefined,
@@ -475,6 +528,8 @@ ${confidenceLevel === 'insufficient'
     clarificationQuestion,
     primarySource,
     supplementarySources,
+    scenarioKey: scenarioDecision.scenarioKey,
+    scenarioLabel: scenarioDecision.scenarioLabel,
   };
 
   if (includeDebug) {
@@ -637,4 +692,77 @@ ${context}
     console.error('Follow-up detection parse failed:', error);
     return { isFollowUp: false };
   }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Decision-gate short-circuit builders — keep the shape of EnhancedAnswerResult
+// so downstream consumers (API route, mini-app, Telegram bot) don't need
+// special cases. The `answer` field carries the user-facing prompt; structured
+// fields (scenarioClarification, scenarioKey) let UI render buttons.
+// ────────────────────────────────────────────────────────────────────────────
+
+function buildClarificationResult(
+  question: string,
+  decision: Extract<ScenarioDecision, { kind: 'needs_clarification' }>
+): EnhancedAnswerResult {
+  const { disambiguation } = decision;
+  // User-facing answer = the disambiguation prompt + options, plain text so
+  // legacy clients still show something useful. Buttons come from the
+  // structured `scenarioClarification` field.
+  const answer = [
+    disambiguation.prompt,
+    '',
+    ...disambiguation.options.map((o, i) => `${i + 1}. ${o.label}`),
+  ].join('\n');
+
+  return {
+    answer,
+    confidence: 0,
+    confidenceLevel: 'insufficient',
+    needsClarification: true,
+    suggestedClarification: disambiguation.prompt,
+    citations: [],
+    domainsUsed: [],
+    queryAnalysis: {
+      originalQuery: question,
+      expandedQueries: [],
+      extractedEntities: { dates: [], prices: [], documentTypes: [], services: [] },
+      isAmbiguous: true,
+    },
+    clarificationQuestion: {
+      question: disambiguation.prompt,
+      options: disambiguation.options.map((o) => o.label),
+    },
+    scenarioClarification: {
+      atNodeKey: decision.atNodeKey,
+      prompt: disambiguation.prompt,
+      options: disambiguation.options.map((o) => ({
+        id: o.id,
+        label: o.label,
+        targetScenarioKey: o.targetScenarioKey,
+      })),
+    },
+  };
+}
+
+function buildOutOfScopeResult(
+  question: string,
+  decision: Extract<ScenarioDecision, { kind: 'out_of_scope' }>
+): EnhancedAnswerResult {
+  return {
+    answer:
+      'В базе знаний нет данных по этому вопросу. Уточните, пожалуйста, о какой услуге идёт речь — апостиль, перевод, нотариальное заверение?',
+    confidence: 0,
+    confidenceLevel: 'insufficient',
+    needsClarification: true,
+    suggestedClarification: decision.reasoning,
+    citations: [],
+    domainsUsed: [],
+    queryAnalysis: {
+      originalQuery: question,
+      expandedQueries: [],
+      extractedEntities: { dates: [], prices: [], documentTypes: [], services: [] },
+      isAmbiguous: false,
+    },
+  };
 }
