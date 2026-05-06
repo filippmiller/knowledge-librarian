@@ -14,6 +14,8 @@ import {
 } from './access-control';
 import { addKnowledge, correctKnowledge } from './knowledge-manager';
 import { answerQuestionEnhanced, type EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
+import { getCachedAnswer, storeCachedAnswer } from '@/lib/ai/answer-cache';
+import { escalateUnconvincingAIAnswer } from './ai-escalation';
 import { getOrCreateSession, saveChatMessage } from '@/lib/ai/answering-engine';
 import prisma from '@/lib/db';
 
@@ -57,7 +59,8 @@ export async function handleStart(message: TelegramMessage, user: TelegramUserIn
 /**
  * Handle /app command - open Mini App.
  */
-export async function handleApp(message: TelegramMessage, user: TelegramUserInfo): Promise<void> {
+export async function handleApp(message: TelegramMessage, _user: TelegramUserInfo): Promise<void> {
+  void _user;
   const chatId = message.chat.id;
 
   const text = `📱 *База знаний Аврора*\n\n` +
@@ -554,7 +557,16 @@ export async function handleQuestion(message: TelegramMessage, user: TelegramUse
     const session = await getOrCreateSession('TELEGRAM', user.telegramId);
     const userMsg = await saveChatMessage(session.id, 'USER', question);
 
-    const result = await answerQuestionEnhanced(question, session.id);
+    const cached = getCachedAnswer(question);
+    const result = cached?.result ?? await answerQuestionEnhanced(question, session.id);
+    if (!cached) storeCachedAnswer(question, result);
+    void escalateUnconvincingAIAnswer({
+      question,
+      result,
+      source: 'TELEGRAM',
+      userId: user.telegramId,
+      sessionId: session.id,
+    });
 
     // Persist scenarioClarification + the original question anchor (text +
     // its timestamp) so the callback handler can reconstruct the full

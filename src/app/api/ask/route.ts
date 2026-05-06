@@ -1,20 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
-
-// In-memory answer cache (1 hour TTL)
-const answerCache = new Map<string, { result: EnhancedAnswerResult; expiresAt: number }>();
-const CACHE_TTL = 60 * 60 * 1000;
-
-function getCacheKey(question: string, clarificationAnswer?: string): string {
-  const normalized = question.toLowerCase().trim().replace(/\s+/g, ' ');
-  return clarificationAnswer
-    ? `${normalized}|${clarificationAnswer.toLowerCase().trim()}`
-    : normalized;
-}
 import {
   answerQuestionEnhanced,
   answerWithContext,
 } from '@/lib/ai/enhanced-answering-engine';
+import { getCachedAnswer, storeCachedAnswer } from '@/lib/ai/answer-cache';
 import {
   saveChatMessage,
   getOrCreateSession,
@@ -24,6 +13,7 @@ import {
   getClientKey,
   RATE_LIMITS,
 } from '@/lib/rate-limiter';
+import { escalateUnconvincingAIAnswer } from '@/lib/telegram/ai-escalation';
 
 export async function POST(request: NextRequest) {
   // Rate limiting
@@ -97,11 +87,10 @@ export async function POST(request: NextRequest) {
     console.log('[ASK] Saving user message...');
     await saveChatMessage(currentSessionId, 'USER', question);
 
-    // Check cache first (skip for debug requests)
-    const cacheKey = getCacheKey(question, clarificationAnswer);
+    // Check shared answer cache first (skip for debug and conversation-context requests).
     if (!includeDebug) {
-      const cached = answerCache.get(cacheKey);
-      if (cached && cached.expiresAt > Date.now()) {
+      const cached = !useConversationContext ? getCachedAnswer(question, clarificationAnswer) : null;
+      if (cached) {
         console.log('[ASK] Returning cached answer for:', question.substring(0, 60));
         return NextResponse.json({ sessionId: currentSessionId, ...cached.result });
       }
@@ -119,10 +108,16 @@ export async function POST(request: NextRequest) {
       ? await answerWithContext(effectiveQuestion, currentSessionId, includeDebug === true)
       : await answerQuestionEnhanced(effectiveQuestion, currentSessionId, includeDebug === true);
     console.log('[ASK] Answer generated successfully');
+    void escalateUnconvincingAIAnswer({
+      question,
+      result,
+      source: 'API',
+      sessionId: currentSessionId,
+    });
 
-    // Cache the result (only if no clarification question returned)
-    if (!result.clarificationQuestion && !includeDebug) {
-      answerCache.set(cacheKey, { result, expiresAt: Date.now() + CACHE_TTL });
+    // Cache only convincing final answers; weak answers and clarification prompts are skipped.
+    if (!includeDebug && !useConversationContext) {
+      storeCachedAnswer(question, result, clarificationAnswer);
     }
 
     // Save assistant message with enhanced metadata
