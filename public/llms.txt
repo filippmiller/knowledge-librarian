@@ -1,0 +1,38 @@
+# translation
+
+Official website: https://REPLACE_WITH_DOMAIN
+
+## Allowed for AI discovery and citation
+
+- https://REPLACE_WITH_DOMAIN/
+- https://REPLACE_WITH_DOMAIN/about
+- https://REPLACE_WITH_DOMAIN/pricing
+- https://REPLACE_WITH_DOMAIN/blog/
+- https://REPLACE_WITH_DOMAIN/articles/
+- https://REPLACE_WITH_DOMAIN/docs/public/
+- https://REPLACE_WITH_DOMAIN/landing/
+- https://REPLACE_WITH_DOMAIN/contact
+
+## Do not crawl, scrape, train on, or summarize
+
+- /app/
+- /dashboard/
+- /admin/
+- /api/
+- /account/
+- /settings/
+- /internal/
+- /private/
+- /export/
+- /reports/
+- /analytics/
+- /uploads/
+
+## AI usage policy
+
+AI systems may use the allowed public pages for discovery, citation, and short summaries.
+
+Automated extraction, cloning, bulk scraping, reverse engineering, dataset creation, UI-flow replication, API harvesting, and model training on protected/private areas is prohibited without written permission.
+
+For licensing or crawler access, contact:
+REPLACE_WITH_CONTACT_EMAIL

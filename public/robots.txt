@@ -1,0 +1,62 @@
+# Search engines: allow public discovery
+User-agent: Googlebot
+Allow: /
+
+User-agent: Bingbot
+Allow: /
+
+User-agent: Yandex
+Allow: /
+
+# ChatGPT Search discovery: allow public pages
+User-agent: OAI-SearchBot
+Allow: /
+
+# AI training / bulk crawling: block
+User-agent: GPTBot
+Disallow: /
+
+User-agent: ClaudeBot
+Disallow: /
+
+User-agent: Claude-User
+Disallow: /
+
+User-agent: Google-Extended
+Disallow: /
+
+User-agent: Applebot-Extended
+Disallow: /
+
+User-agent: CCBot
+Disallow: /
+
+User-agent: Bytespider
+Disallow: /
+
+User-agent: Meta-ExternalAgent
+Disallow: /
+
+User-agent: PerplexityBot
+Disallow: /
+
+User-agent: Amazonbot
+Disallow: /
+
+# Default rules for everyone else
+User-agent: *
+Disallow: /api/
+Disallow: /admin/
+Disallow: /dashboard/
+Disallow: /app/
+Disallow: /account/
+Disallow: /settings/
+Disallow: /internal/
+Disallow: /private/
+Disallow: /export/
+Disallow: /reports/
+Disallow: /analytics/
+Disallow: /uploads/
+Allow: /
+
+Sitemap: https://REPLACE_WITH_DOMAIN/sitemap.xml

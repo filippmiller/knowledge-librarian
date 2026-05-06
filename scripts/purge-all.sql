@@ -1,0 +1,14 @@
+DELETE FROM "RuleComment";
+DELETE FROM "UserFavorite";
+DELETE FROM "UserNotification";
+DELETE FROM "RuleDomain";
+DELETE FROM "QADomain";
+DELETE FROM "ChunkDomain";
+DELETE FROM "DocumentDomain";
+DELETE FROM "StagedExtraction";
+DELETE FROM "DocChunk";
+DELETE FROM "QAPair";
+DELETE FROM "Rule";
+DELETE FROM "ProcessingAttempt";
+DELETE FROM "KnowledgeChange";
+DELETE FROM "Document";
