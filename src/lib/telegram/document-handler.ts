@@ -4,6 +4,7 @@ import type { TelegramUserInfo } from './access-control';
 import { parseDocument, detectMimeType } from '@/lib/document-parser';
 import { createChatCompletion, normalizeJsonResponse } from '@/lib/ai/chat-provider';
 import { generateEmbeddings } from '@/lib/openai';
+import { classifyDocumentScenario } from '@/lib/knowledge/scenario-assignment';
 import prisma from '@/lib/db';
 
 interface DomainClassResult {
@@ -80,14 +81,16 @@ export async function handleDocumentUpload(
     }
 
     // Step 3: Create document record
+    const title = message.caption || fileName.replace(/\.[^.]+$/, '');
     const document = await prisma.document.create({
       data: {
-        title: message.caption || fileName.replace(/\.[^.]+$/, ''),
+        title,
         filename: fileName,
         mimeType,
         rawText,
         rawBytes: buffer,
         parseStatus: 'PROCESSING',
+        scenarioKey: classifyDocumentScenario(fileName, title),
       },
     });
 
@@ -288,6 +291,10 @@ async function extractKnowledge(
   const ruleCodeToId = new Map<string, string>();
   const rulesList: { code: string; title: string }[] = [];
   let rulesCreated = 0;
+  const document = await prisma.document.findUnique({
+    where: { id: documentId },
+    select: { scenarioKey: true },
+  });
 
   for (const rule of (result.rules || [])) {
     const created = await prisma.rule.create({
@@ -298,6 +305,7 @@ async function extractKnowledge(
         body: rule.body,
         confidence: rule.confidence,
         sourceSpan: rule.sourceSpan,
+        scenarioKey: document?.scenarioKey ?? null,
       },
     });
 
@@ -325,6 +333,7 @@ async function extractKnowledge(
         ruleId: ruleId || null,
         question: qa.question,
         answer: qa.answer,
+        scenarioKey: document?.scenarioKey ?? null,
       },
     });
 
@@ -345,6 +354,10 @@ async function extractKnowledge(
 
 async function createChunks(rawText: string, documentId: string, domainIds: string[]): Promise<number> {
   const { splitTextIntoChunks } = await import('@/lib/ai/chunker');
+  const document = await prisma.document.findUnique({
+    where: { id: documentId },
+    select: { scenarioKey: true },
+  });
 
   const chunks = splitTextIntoChunks(rawText);
   let created = 0;
@@ -366,6 +379,7 @@ async function createChunks(rawText: string, documentId: string, domainIds: stri
           content: chunk.content,
           embedding,
           metadata: chunk.metadata,
+          scenarioKey: document?.scenarioKey ?? null,
         },
       });
 

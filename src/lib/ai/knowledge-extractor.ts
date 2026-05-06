@@ -1,5 +1,6 @@
 import { createChatCompletion, normalizeJsonResponse } from '@/lib/ai/chat-provider';
 import prisma from '@/lib/db';
+import { buildExtractionBatches, dedupeAndRenumberRules } from '@/lib/ai/extraction-batches';
 
 export interface ExtractedRule {
   ruleCode: string;
@@ -57,9 +58,6 @@ sourceSpan.quote: дословная цитата (макс. 150 символо�
 
 Коды правил: R-1, R-2, R-3 ... (строго последовательно)`;
 
-const BATCH_SIZE = 8000;
-const BATCH_OVERLAP = 600;
-
 export async function extractKnowledge(
   documentText: string,
   existingRuleCodes: string[] = []
@@ -68,15 +66,7 @@ export async function extractKnowledge(
     ? Math.max(...existingRuleCodes.map(c => parseInt(c.replace('R-', '')))) + 1
     : 1;
 
-  // Split document into batches so the full text is processed, not just the first 12k chars
-  const batches: string[] = [];
-  let offset = 0;
-  while (offset < documentText.length) {
-    const end = Math.min(offset + BATCH_SIZE, documentText.length);
-    batches.push(documentText.slice(offset, end));
-    if (end >= documentText.length) break;
-    offset = end - BATCH_OVERLAP;
-  }
+  const batches = buildExtractionBatches(documentText);
 
   const allRules: ExtractedRule[] = [];
   const allQAPairs: ExtractedQA[] = [];
@@ -91,12 +81,18 @@ export async function extractKnowledge(
         {
           role: 'user',
           content: `Извлеки ВСЕ правила из этой части документа. Нумерация начинается с R-${currentRuleCode}.
-${batches.length > 1 ? `Часть ${i + 1} из ${batches.length}.` : ''}
+${batches.length > 1 ? `Часть ${batch.index} из ${batch.total}. Строки ${batch.startLine}-${batch.endLine}.` : ''}
 
-ТЕКСТ ДОКУМЕНТА:
-${batch}
+ТЕКСТ ДОКУМЕНТА С НОМЕРАМИ СТРОК:
+${batch.numberedText}
 
-ВАЖНО: Пройди текст построчно. Каждая строка с конкретным значением (цена, срок, требование, шаг) = отдельное правило.
+ВАЖНО:
+1. Пройди строки сверху вниз. Каждая атомарная строка с ценой, сроком, адресом, телефоном, требованием, исключением, шагом процедуры, вариантом подачи, способом оплаты, ответственным или аббревиатурой = отдельное правило.
+2. Не объединяй несколько разных фактов в одно правило. Лучше 3 коротких правила, чем 1 длинное.
+3. Для списков создай отдельное правило на каждый пункт списка.
+4. Если строка является заголовком раздела, используй её как locationHint для следующих правил.
+5. В sourceSpan.locationHint указывай номер строки или диапазон строк, например "L0012-L0014".
+6. Цель плотности: из 20 содержательных строк обычно должно получиться 12-25 правил. Не экономь правила.
 Аббревиатуры (СОН, ГТД, ДМС и т.д.) тоже оформляй как правило с расшифровкой.
 
 Ответь в формате JSON:
@@ -131,9 +127,13 @@ ${batch}
     }
   }
 
+  const deduped = dedupeAndRenumberRules(allRules, allQAPairs, existingRuleCodes.length > 0
+    ? Math.max(...existingRuleCodes.map(c => parseInt(c.replace('R-', '')))) + 1
+    : 1);
+
   return {
-    rules: allRules,
-    qaPairs: allQAPairs,
+    rules: deduped.rules,
+    qaPairs: deduped.qaPairs,
     uncertainties: allUncertainties,
   };
 }
@@ -144,6 +144,10 @@ export async function saveExtractedRules(
   domainIds: string[]
 ) {
   const createdRules: { id: string; ruleCode: string }[] = [];
+  const document = await prisma.document.findUnique({
+    where: { id: documentId },
+    select: { scenarioKey: true },
+  });
 
   for (const rule of rules) {
     const created = await prisma.rule.create({
@@ -154,6 +158,7 @@ export async function saveExtractedRules(
         body: rule.body,
         confidence: rule.confidence,
         sourceSpan: rule.sourceSpan,
+        scenarioKey: document?.scenarioKey ?? null,
       },
     });
 
@@ -180,6 +185,10 @@ export async function saveExtractedQAs(
   ruleCodeToId: Map<string, string>,
   domainIds: string[]
 ) {
+  const document = await prisma.document.findUnique({
+    where: { id: documentId },
+    select: { scenarioKey: true },
+  });
   for (const qa of qaPairs) {
     const ruleId = qa.linkedRuleCode ? ruleCodeToId.get(qa.linkedRuleCode) : null;
 
@@ -189,6 +198,7 @@ export async function saveExtractedQAs(
         ruleId,
         question: qa.question,
         answer: qa.answer,
+        scenarioKey: document?.scenarioKey ?? null,
       },
     });
 

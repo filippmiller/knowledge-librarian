@@ -3,11 +3,11 @@
 import { useEffect, useState, useRef, createContext, useContext } from 'react';
 import {
   Search, BookOpen, FileText, MessageCircle, ChevronRight, Star,
-  AlertCircle, Mic, MicOff, Filter, History, BarChart3,
+  AlertCircle, Mic, MicOff, History, BarChart3,
   Edit3, Trash2, CheckCircle, X, Save, ChevronLeft,
   ThumbsUp, ThumbsDown, Clock, TrendingUp, Heart, Share2,
   Bell, Moon, Sun, Settings, MessageSquare, Send, Reply,
-  WifiOff, Calendar, FileSearch, MoreHorizontal, Check, Upload, FolderOpen,
+  WifiOff, MoreHorizontal, Check, Upload, FolderOpen,
   Plus, PlayCircle, DatabaseIcon
 } from 'lucide-react';
 
@@ -31,7 +31,9 @@ type Rule = {
   title: string;
   body?: string;
   confidence: number;
+  status?: string;
   createdAt?: string;
+  updatedAt?: string;
   sourceSpan?: { quote?: string; locationHint?: string } | null;
   document?: { title: string; id?: string };
   domains?: { domain: { slug: string; title: string } }[];
@@ -72,6 +74,37 @@ type Comment = {
   isDeleted: boolean;
   replies?: Comment[];
 };
+
+type SourceMarker = {
+  token: string;
+  sourceType: 'rule' | 'document' | 'qa';
+  documentId?: string;
+  documentTitle?: string;
+  quote: string;
+  ruleCode?: string;
+  label: string;
+};
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function findQuoteRange(text: string, quote?: string): { start: number; end: number } | null {
+  const needle = quote?.trim();
+  if (!needle) return null;
+
+  const exactIndex = text.indexOf(needle);
+  if (exactIndex !== -1) return { start: exactIndex, end: exactIndex + needle.length };
+
+  const compactNeedle = needle.replace(/\s+/g, ' ').slice(0, 220).trim();
+  if (compactNeedle.length < 12) return null;
+
+  const pattern = compactNeedle.split(/\s+/).map(escapeRegExp).join('\\s+');
+  const match = new RegExp(pattern, 'i').exec(text);
+  if (!match || match.index === undefined) return null;
+
+  return { start: match.index, end: match.index + match[0].length };
+}
 
 type Notification = {
   id: string;
@@ -115,6 +148,7 @@ export default function TelegramMiniApp() {
     clarificationQuestion?: { question: string; options: string[] };
     primarySource?: { documentId: string; documentTitle: string; chunkContent: string; relevanceScore: number };
     supplementarySources?: Array<{ documentId: string; documentTitle: string; chunkContent: string; relevanceScore: number }>;
+    sourceMarkers?: SourceMarker[];
     scenarioKey?: string;
     scenarioLabel?: string;
   } | null>(null);
@@ -124,12 +158,6 @@ export default function TelegramMiniApp() {
   // search. Sent as a single joined string so the gate can reclassify against
   // the full user context, not just the latest click.
   const [clarificationChain, setClarificationChain] = useState<string[]>([]);
-  const [showAdvancedSearch, setShowAdvancedSearch] = useState(false);
-  const [confidenceFilter, setConfidenceFilter] = useState<'all' | 'high' | 'medium' | 'low'>('all');
-  const [domainFilter, setDomainFilter] = useState<string>('');
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
-  const [documentFilter, setDocumentFilter] = useState('');
   const [documents, setDocuments] = useState<{
     id: string; title: string; filename: string; parseStatus: string;
     parseError?: string | null; retryCount?: number; uploadedAt: string;
@@ -147,7 +175,10 @@ export default function TelegramMiniApp() {
   
   // UI state
   const [selectedRule, setSelectedRule] = useState<Rule | null>(null);
-  const [docViewer, setDocViewer] = useState<{ title: string; text: string; quote?: string } | null>(null);
+  const [docViewer, setDocViewer] = useState<{ id: string; title: string; text: string; quote?: string } | null>(null);
+  const [editingDocument, setEditingDocument] = useState(false);
+  const [editDocumentText, setEditDocumentText] = useState('');
+  const [savingDocument, setSavingDocument] = useState(false);
   const [comments, setComments] = useState<Comment[]>([]);
   const [isFavorited, setIsFavorited] = useState(false);
   const [newComment, setNewComment] = useState('');
@@ -159,8 +190,16 @@ export default function TelegramMiniApp() {
   const [allRules, setAllRules] = useState<any[]>([]);
   const [allPairs, setAllPairs] = useState<any[]>([]);
   const [allRulesTotal, setAllRulesTotal] = useState(0);
+  const [allRulesNextOffset, setAllRulesNextOffset] = useState<number | null>(null);
   const [allPairsTotal, setAllPairsTotal] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
+  const [rulesQuery, setRulesQuery] = useState('');
+  const [rulesStatusFilter, setRulesStatusFilter] = useState<'ACTIVE' | 'DEPRECATED' | 'SUPERSEDED' | 'all'>('ACTIVE');
+  const [rulesConfidenceFilter, setRulesConfidenceFilter] = useState<'all' | 'high' | 'medium' | 'low'>('all');
+  const [rulesDocumentFilter, setRulesDocumentFilter] = useState('');
+  const [rulesDateFrom, setRulesDateFrom] = useState('');
+  const [rulesDateTo, setRulesDateTo] = useState('');
+  const [rulesSort, setRulesSort] = useState<'code_asc' | 'code_desc' | 'date_desc' | 'date_asc' | 'confidence_desc' | 'confidence_asc' | 'title_asc' | 'title_desc'>('code_asc');
 
   // Document knowledge viewer
   const [viewingDocKnowledge, setViewingDocKnowledge] = useState<any | null>(null);
@@ -298,6 +337,21 @@ export default function TelegramMiniApp() {
     }
   }, [selectedRule]);
 
+  useEffect(() => {
+    if (activeTab !== 'rules') return;
+    const timer = window.setTimeout(() => loadAllRules(0), 250);
+    return () => window.clearTimeout(timer);
+  }, [
+    activeTab,
+    rulesQuery,
+    rulesStatusFilter,
+    rulesConfidenceFilter,
+    rulesDocumentFilter,
+    rulesDateFrom,
+    rulesDateTo,
+    rulesSort,
+  ]);
+
   const loadInitialData = async (dataParam?: string) => {
     const initDataToUse = dataParam || initData || 'dev';
     try {
@@ -369,7 +423,7 @@ export default function TelegramMiniApp() {
   };
 
   const handleSearch = async () => {
-    if (!searchQuery.trim() && !domainFilter && !documentFilter && !dateFrom && !dateTo) return;
+    if (!searchQuery.trim()) return;
 
     setLoading(true);
     setAiAnswer(null);
@@ -382,11 +436,6 @@ export default function TelegramMiniApp() {
         initData: initData || 'dev',
         action: 'search',
         query: searchQuery || ' ',
-        confidenceFilter,
-        domainFilter: domainFilter || undefined,
-        dateFrom: dateFrom || undefined,
-        dateTo: dateTo || undefined,
-        documentFilter: documentFilter || undefined,
       }),
     });
 
@@ -418,6 +467,7 @@ export default function TelegramMiniApp() {
             clarificationQuestion: aiData.clarificationQuestion,
             primarySource: aiData.primarySource,
             supplementarySources: aiData.supplementarySources,
+            sourceMarkers: aiData.sourceMarkers,
             scenarioKey: aiData.scenarioKey,
             scenarioLabel: aiData.scenarioLabel,
           });
@@ -456,6 +506,7 @@ export default function TelegramMiniApp() {
           clarificationQuestion: aiData.clarificationQuestion,
           primarySource: aiData.primarySource,
           supplementarySources: aiData.supplementarySources,
+          sourceMarkers: aiData.sourceMarkers,
           scenarioKey: aiData.scenarioKey,
           scenarioLabel: aiData.scenarioLabel,
         });
@@ -467,18 +518,31 @@ export default function TelegramMiniApp() {
     }
   };
 
-  const loadAllRules = async (cursor?: string) => {
+  const loadAllRules = async (offset = 0) => {
     setLoading(true);
     try {
       const res = await fetch('/api/telegram/mini-app', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ initData: initData || 'dev', action: 'getAllRules', cursor, limit: 50 }),
+        body: JSON.stringify({
+          initData: initData || 'dev',
+          action: 'getAllRules',
+          offset,
+          limit: 50,
+          query: rulesQuery,
+          status: rulesStatusFilter,
+          confidenceFilter: rulesConfidenceFilter,
+          documentFilter: rulesDocumentFilter,
+          dateFrom: rulesDateFrom,
+          dateTo: rulesDateTo,
+          sort: rulesSort,
+        }),
       });
       if (res.ok) {
         const data = await res.json();
-        setAllRules(prev => cursor ? [...prev, ...data.rules] : data.rules);
+        setAllRules(prev => offset ? [...prev, ...data.rules] : data.rules);
         setAllRulesTotal(data.total);
+        setAllRulesNextOffset(data.nextOffset ?? null);
       }
     } catch (e) {
       console.error('loadAllRules failed:', e);
@@ -799,6 +863,7 @@ export default function TelegramMiniApp() {
         setEditingRule(false);
         // Refresh rule
         await handleRuleClick(selectedRule);
+        if (activeTab === 'rules') await loadAllRules(0);
       } else {
         setActionMsg(data.error || 'Ошибка обновления');
       }
@@ -1050,7 +1115,9 @@ export default function TelegramMiniApp() {
           setActionMsg('Текст документа недоступен (документ не был обработан)');
           return;
         }
-        setDocViewer({ title: data.document.title, text: data.document.rawText, quote });
+        setDocViewer({ id: data.document.id, title: data.document.title, text: data.document.rawText, quote });
+        setEditDocumentText(data.document.rawText);
+        setEditingDocument(false);
       } else {
         setActionMsg('Не удалось открыть документ');
       }
@@ -1060,7 +1127,93 @@ export default function TelegramMiniApp() {
     }
   };
 
-  const handleRuleClick = async (rule: Rule) => {
+  const resetRuleFilters = async () => {
+    setRulesQuery('');
+    setRulesStatusFilter('ACTIVE');
+    setRulesConfidenceFilter('all');
+    setRulesDocumentFilter('');
+    setRulesDateFrom('');
+    setRulesDateTo('');
+    setRulesSort('code_asc');
+  };
+
+  const openSourceMarker = (marker: SourceMarker) => {
+    if (!marker.documentId) {
+      setActionMsg(`Источник ${marker.token} не привязан к документу`);
+      return;
+    }
+    void openDocument(marker.documentId, marker.quote);
+  };
+
+  const saveDocumentText = async () => {
+    if (!docViewer) return;
+    setSavingDocument(true);
+    setActionMsg(null);
+    try {
+      const res = await fetch('/api/telegram/mini-app', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          initData: initData || 'dev',
+          action: 'updateDocument',
+          documentId: docViewer.id,
+          rawText: editDocumentText,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setDocViewer({ ...docViewer, text: editDocumentText, quote: undefined });
+        setEditingDocument(false);
+        setActionMsg(data.message || 'Документ обновлён');
+        await loadDocuments();
+      } else {
+        setActionMsg(data.error || 'Ошибка сохранения документа');
+      }
+    } catch (error) {
+      console.error('saveDocumentText failed:', error);
+      setActionMsg('Ошибка сети при сохранении документа');
+    } finally {
+      setSavingDocument(false);
+    }
+  };
+
+  const renderAnswerWithSourceMarkers = (answer: string, markers?: SourceMarker[]) => {
+    const markerByToken = new Map((markers ?? []).map((marker) => [marker.token, marker]));
+    const parts = answer.split(/(\[(?:R-\d+|D\d+|Q\d+)\])/g);
+
+    return parts.map((part, index) => {
+      const token = /^\[(R-\d+|D\d+|Q\d+)\]$/.exec(part)?.[1];
+      if (!token) return <span key={`text-${index}`}>{part}</span>;
+
+      const marker = markerByToken.get(token);
+      if (!marker) {
+        return (
+          <span key={`missing-${index}`} className={isDark ? 'text-amber-300' : 'text-amber-700'} title={`Источник ${token} не найден`}>
+            *
+          </span>
+        );
+      }
+
+      return (
+        <button
+          key={`${token}-${index}`}
+          type="button"
+          onClick={() => openSourceMarker(marker)}
+          title={marker.label}
+          aria-label={`Открыть источник ${token}: ${marker.label}`}
+          className={`inline-flex align-super ml-0.5 px-1 text-[11px] font-bold rounded transition-colors ${
+            isDark
+              ? 'text-blue-300 hover:bg-blue-900/40 focus:bg-blue-900/40'
+              : 'text-blue-600 hover:bg-blue-100 focus:bg-blue-100'
+          }`}
+        >
+          *
+        </button>
+      );
+    });
+  };
+
+  const handleRuleClick = async (rule: Rule, startEditing = false) => {
     // Save current scroll so we can restore it when user goes back
     if (!selectedRule) listScrollRef.current = window.scrollY;
     setLoading(true);
@@ -1080,7 +1233,7 @@ export default function TelegramMiniApp() {
         setSelectedRule(data.rule);
         setEditTitle(data.rule.title);
         setEditBody(data.rule.body || '');
-        setEditingRule(false);
+        setEditingRule(startEditing);
         setIsFavorited(data.isFavorited);
         loadComments(rule.id);
       }
@@ -1638,13 +1791,11 @@ export default function TelegramMiniApp() {
     const { title, text, quote } = docViewer;
     // Split text at the quote to highlight it
     let before = text, highlighted = '', after = '';
-    if (quote) {
-      const idx = text.indexOf(quote);
-      if (idx !== -1) {
-        before = text.slice(0, idx);
-        highlighted = text.slice(idx, idx + quote.length);
-        after = text.slice(idx + quote.length);
-      }
+    const range = findQuoteRange(text, quote);
+    if (range) {
+      before = text.slice(0, range.start);
+      highlighted = text.slice(range.start, range.end);
+      after = text.slice(range.end);
     }
     return (
       <ThemeContext.Provider value={{ theme, isDark, setTheme }}>
@@ -1656,25 +1807,76 @@ export default function TelegramMiniApp() {
               Назад
             </button>
             <span className={`font-semibold truncate flex-1 text-sm ${isDark ? 'text-white' : 'text-gray-800'}`}>{title}</span>
+            {isAdmin && (
+              <button
+                onClick={() => {
+                  setEditingDocument(!editingDocument);
+                  setEditDocumentText(text);
+                  setActionMsg(null);
+                }}
+                className="p-2 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-lg"
+                title={editingDocument ? 'Закрыть редактор' : 'Редактировать документ'}
+              >
+                {editingDocument ? <X className="w-5 h-5" /> : <Edit3 className="w-5 h-5" />}
+              </button>
+            )}
           </div>
           {/* Document text */}
           <div className="flex-1 overflow-auto p-4">
-            <div className={`rounded-xl p-4 text-sm whitespace-pre-wrap leading-relaxed font-mono ${isDark ? 'bg-gray-800 text-gray-200' : 'bg-white text-gray-800'}`}>
-              {highlighted ? (
-                <>
-                  <span>{before}</span>
-                  <span
-                    id="doc-highlight"
-                    className="bg-yellow-300 dark:bg-yellow-600 text-gray-900 dark:text-white px-0.5 rounded"
+            {editingDocument ? (
+              <div className="space-y-3">
+                <textarea
+                  value={editDocumentText}
+                  onChange={(event) => setEditDocumentText(event.target.value)}
+                  className={`w-full min-h-[70vh] rounded-xl p-4 text-sm leading-relaxed font-mono border ${
+                    isDark ? 'bg-gray-800 text-gray-100 border-gray-700' : 'bg-white text-gray-900 border-gray-200'
+                  }`}
+                />
+                {actionMsg && (
+                  <div className={`p-3 rounded-xl text-sm ${
+                    actionMsg.includes('сохран') || actionMsg.includes('Переизвлечено')
+                      ? 'bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400'
+                      : 'bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400'
+                  }`}>
+                    {actionMsg}
+                  </div>
+                )}
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { setEditingDocument(false); setEditDocumentText(text); }}
+                    className={`px-4 py-2 border rounded-lg ${isDark ? 'border-gray-600 text-gray-300' : 'border-gray-300 text-gray-700'}`}
+                    disabled={savingDocument}
                   >
-                    {highlighted}
-                  </span>
-                  <span>{after}</span>
-                </>
-              ) : (
-                <span>{text}</span>
+                    Отмена
+                  </button>
+                  <button
+                    onClick={saveDocumentText}
+                    disabled={savingDocument || editDocumentText.trim().length < 20 || editDocumentText === text}
+                    className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg font-semibold disabled:opacity-50 flex items-center justify-center gap-2"
+                  >
+                    <Save className="w-4 h-4" />
+                    {savingDocument ? 'Сохраняем и переизвлекаем...' : 'Сохранить документ и переизвлечь правила'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className={`rounded-xl p-4 text-sm whitespace-pre-wrap leading-relaxed font-mono ${isDark ? 'bg-gray-800 text-gray-200' : 'bg-white text-gray-800'}`}>
+                {highlighted ? (
+                  <>
+                    <span>{before}</span>
+                    <span
+                      id="doc-highlight"
+                      className="bg-yellow-300 dark:bg-yellow-600 text-gray-900 dark:text-white px-0.5 rounded"
+                    >
+                      {highlighted}
+                    </span>
+                    <span>{after}</span>
+                  </>
+                ) : (
+                  <span>{text}</span>
+                )}
+              </div>
               )}
-            </div>
           </div>
         </div>
       </ThemeContext.Provider>
@@ -2083,16 +2285,6 @@ export default function TelegramMiniApp() {
               {isRecording ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
             </button>
             <button
-              onClick={() => setShowAdvancedSearch(!showAdvancedSearch)}
-              className={`px-4 py-3 rounded-xl font-medium ${
-                showAdvancedSearch 
-                  ? 'bg-blue-600 text-white' 
-                  : isDark ? 'bg-gray-700 text-gray-300' : 'bg-gray-200 text-gray-700'
-              }`}
-            >
-              <Filter className="w-5 h-5" />
-            </button>
-            <button
               onClick={handleSearch}
               disabled={loading || isRecording}
               className="px-4 py-3 bg-blue-600 text-white rounded-xl font-medium disabled:opacity-50"
@@ -2101,96 +2293,6 @@ export default function TelegramMiniApp() {
             </button>
           </div>
 
-          {/* Advanced Search Filters */}
-          {showAdvancedSearch && (
-            <div className={`mt-3 p-3 rounded-xl space-y-3 ${isDark ? 'bg-gray-700' : 'bg-gray-50'}`}>
-              {/* Confidence */}
-              <div>
-                <label className={`text-sm font-medium mb-1 block ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
-                  Уверенность AI
-                </label>
-                <div className="flex gap-2 flex-wrap">
-                  {[
-                    { id: 'all', label: 'Все' },
-                    { id: 'high', label: 'Высокая (90%+)' },
-                    { id: 'medium', label: 'Средняя (70-90%)' },
-                    { id: 'low', label: 'Низкая (<70%)' },
-                  ].map((f) => (
-                    <button
-                      key={f.id}
-                      onClick={() => setConfidenceFilter(f.id as any)}
-                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                        confidenceFilter === f.id
-                          ? 'bg-blue-600 text-white'
-                          : isDark ? 'bg-gray-600 text-gray-300' : 'bg-white border text-gray-700'
-                      }`}
-                    >
-                      {f.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Domain */}
-              <div>
-                <label className={`text-sm font-medium mb-1 block ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
-                  Домен
-                </label>
-                <select
-                  value={domainFilter}
-                  onChange={(e) => setDomainFilter(e.target.value)}
-                  className={`w-full px-3 py-2 rounded-lg ${isDark ? 'bg-gray-600 text-white border-gray-500' : 'bg-white border'}`}
-                >
-                  <option value="">Все домены</option>
-                  {domains.map((d) => (
-                    <option key={d.id} value={d.slug}>{d.title}</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Document */}
-              <div>
-                <label className={`text-sm font-medium mb-1 block ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
-                  <FileSearch className="w-4 h-4 inline mr-1" />
-                  Документ
-                </label>
-                <select
-                  value={documentFilter}
-                  onChange={(e) => setDocumentFilter(e.target.value)}
-                  className={`w-full px-3 py-2 rounded-lg ${isDark ? 'bg-gray-600 text-white border-gray-500' : 'bg-white border'}`}
-                >
-                  <option value="">Все документы</option>
-                  {documents.map((d) => (
-                    <option key={d.id} value={d.title}>{d.title}</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Date Range */}
-              <div>
-                <label className={`text-sm font-medium mb-1 block ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
-                  <Calendar className="w-4 h-4 inline mr-1" />
-                  Период
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="date"
-                    value={dateFrom}
-                    onChange={(e) => setDateFrom(e.target.value)}
-                    className={`flex-1 px-3 py-2 rounded-lg ${isDark ? 'bg-gray-600 text-white border-gray-500' : 'bg-white border'}`}
-                    placeholder="От"
-                  />
-                  <input
-                    type="date"
-                    value={dateTo}
-                    onChange={(e) => setDateTo(e.target.value)}
-                    className={`flex-1 px-3 py-2 rounded-lg ${isDark ? 'bg-gray-600 text-white border-gray-500' : 'bg-white border'}`}
-                    placeholder="До"
-                  />
-                </div>
-              </div>
-            </div>
-          )}
         </div>
 
         {/* Tabs */}
@@ -2308,7 +2410,7 @@ export default function TelegramMiniApp() {
               {/* Main answer text */}
               {aiAnswer?.answer && !aiAnswer.clarificationQuestion && (
                 <div className={`text-sm whitespace-pre-wrap leading-relaxed ${isDark ? 'text-gray-200' : 'text-gray-800'}`}>
-                  {aiAnswer.answer}
+                  {renderAnswerWithSourceMarkers(aiAnswer.answer, aiAnswer.sourceMarkers)}
                 </div>
               )}
               {/* Supplementary sources */}
@@ -2494,9 +2596,93 @@ export default function TelegramMiniApp() {
 
           {/* Rules tab */}
           {activeTab === 'rules' && (
-            <div className="space-y-2">
-              <div className={`text-xs px-1 pb-1 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
-                Всего правил: {allRulesTotal}
+            <div className="space-y-3">
+              <div className={`rounded-xl p-3 shadow-sm space-y-3 ${isDark ? 'bg-gray-800' : 'bg-white'}`}>
+                <div className="grid grid-cols-1 md:grid-cols-[minmax(220px,1.4fr)_150px_150px_160px] gap-2">
+                  <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-700 border-gray-600' : 'bg-gray-50 border-gray-200'}`}>
+                    <Search className={`w-4 h-4 ${isDark ? 'text-gray-400' : 'text-gray-500'}`} />
+                    <input
+                      value={rulesQuery}
+                      onChange={(e) => setRulesQuery(e.target.value)}
+                      placeholder="Номер, ключевые слова, документ"
+                      className={`w-full bg-transparent outline-none text-sm ${isDark ? 'text-white placeholder-gray-400' : 'text-gray-900 placeholder-gray-500'}`}
+                    />
+                    {rulesQuery && (
+                      <button onClick={() => setRulesQuery('')} className={isDark ? 'text-gray-400' : 'text-gray-500'}>
+                        <X className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+
+                  <select
+                    value={rulesStatusFilter}
+                    onChange={(e) => setRulesStatusFilter(e.target.value as typeof rulesStatusFilter)}
+                    className={`px-3 py-2 rounded-lg border text-sm ${isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200'}`}
+                  >
+                    <option value="ACTIVE">Активные</option>
+                    <option value="DEPRECATED">Удаленные</option>
+                    <option value="SUPERSEDED">Замененные</option>
+                    <option value="all">Все статусы</option>
+                  </select>
+
+                  <select
+                    value={rulesConfidenceFilter}
+                    onChange={(e) => setRulesConfidenceFilter(e.target.value as typeof rulesConfidenceFilter)}
+                    className={`px-3 py-2 rounded-lg border text-sm ${isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200'}`}
+                  >
+                    <option value="all">Любой вес</option>
+                    <option value="high">90-100%</option>
+                    <option value="medium">70-89%</option>
+                    <option value="low">до 70%</option>
+                  </select>
+
+                  <select
+                    value={rulesSort}
+                    onChange={(e) => setRulesSort(e.target.value as typeof rulesSort)}
+                    className={`px-3 py-2 rounded-lg border text-sm ${isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200'}`}
+                  >
+                    <option value="code_asc">R-1 → R-999</option>
+                    <option value="code_desc">R-999 → R-1</option>
+                    <option value="date_desc">Новые сначала</option>
+                    <option value="date_asc">Старые сначала</option>
+                    <option value="confidence_desc">Вес выше</option>
+                    <option value="confidence_asc">Вес ниже</option>
+                    <option value="title_asc">А-Я</option>
+                    <option value="title_desc">Я-А</option>
+                  </select>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-[minmax(200px,1fr)_150px_150px_auto] gap-2">
+                  <input
+                    value={rulesDocumentFilter}
+                    onChange={(e) => setRulesDocumentFilter(e.target.value)}
+                    placeholder="Фильтр по документу"
+                    className={`px-3 py-2 rounded-lg border text-sm ${isDark ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-400' : 'bg-white border-gray-200 placeholder-gray-500'}`}
+                  />
+                  <input
+                    type="date"
+                    value={rulesDateFrom}
+                    onChange={(e) => setRulesDateFrom(e.target.value)}
+                    className={`px-3 py-2 rounded-lg border text-sm ${isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200'}`}
+                  />
+                  <input
+                    type="date"
+                    value={rulesDateTo}
+                    onChange={(e) => setRulesDateTo(e.target.value)}
+                    className={`px-3 py-2 rounded-lg border text-sm ${isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200'}`}
+                  />
+                  <button
+                    onClick={resetRuleFilters}
+                    className={`px-3 py-2 rounded-lg border text-sm font-medium ${isDark ? 'border-gray-600 text-gray-300 hover:bg-gray-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}
+                  >
+                    Сбросить
+                  </button>
+                </div>
+              </div>
+
+              <div className={`flex items-center justify-between text-xs px-1 pb-1 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                <span>Найдено правил: {allRulesTotal}</span>
+                {loading && <span>Обновляем...</span>}
               </div>
               {loading && allRules.length === 0 && (
                 <div className="text-center py-12 text-gray-400">Загрузка...</div>
@@ -2525,23 +2711,52 @@ export default function TelegramMiniApp() {
                         }`}>
                           {Math.round((rule.confidence ?? 0) * 100)}%
                         </span>
+                        {rule.status && rule.status !== 'ACTIVE' && (
+                          <span className={`text-xs px-2 py-0.5 rounded-full ${isDark ? 'bg-gray-700 text-gray-300' : 'bg-gray-100 text-gray-500'}`}>
+                            {rule.status}
+                          </span>
+                        )}
                       </div>
                       <p className={`text-sm font-medium leading-snug ${isDark ? 'text-white' : 'text-gray-900'}`}>
                         {rule.title}
                       </p>
+                      {rule.body && (
+                        <p className={`text-xs mt-1 line-clamp-2 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+                          {rule.body}
+                        </p>
+                      )}
                       {rule.document?.title && (
                         <p className={`text-xs mt-1 truncate ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
                           {rule.document.title}
                         </p>
                       )}
+                      {rule.createdAt && (
+                        <p className={`text-[11px] mt-1 ${isDark ? 'text-gray-600' : 'text-gray-400'}`}>
+                          {new Date(rule.createdAt).toLocaleDateString('ru-RU')}
+                        </p>
+                      )}
                     </div>
-                    <ChevronRight className={`w-4 h-4 flex-shrink-0 mt-1 ${isDark ? 'text-gray-600' : 'text-gray-300'}`} />
+                    <div className="flex items-center gap-1 flex-shrink-0">
+                      {isAdmin && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleRuleClick(rule, true);
+                          }}
+                          title="Редактировать"
+                          className={`p-2 rounded-lg ${isDark ? 'text-blue-400 hover:bg-blue-900/20' : 'text-blue-600 hover:bg-blue-50'}`}
+                        >
+                          <Edit3 className="w-4 h-4" />
+                        </button>
+                      )}
+                      <ChevronRight className={`w-4 h-4 ${isDark ? 'text-gray-600' : 'text-gray-300'}`} />
+                    </div>
                   </div>
                 </div>
               ))}
-              {allRules.length > 0 && allRules.length < allRulesTotal && (
+              {allRules.length > 0 && allRulesNextOffset !== null && (
                 <button
-                  onClick={() => loadAllRules(allRules[allRules.length - 1].id)}
+                  onClick={() => loadAllRules(allRulesNextOffset)}
                   disabled={loading}
                   className="w-full py-3 text-sm text-blue-600 font-medium"
                 >

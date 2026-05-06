@@ -66,6 +66,15 @@ export interface EnhancedAnswerResult {
     chunkContent: string;
     relevanceScore: number;
   }>;
+  sourceMarkers?: Array<{
+    token: string;
+    sourceType: 'rule' | 'document' | 'qa';
+    documentId?: string;
+    documentTitle?: string;
+    quote: string;
+    ruleCode?: string;
+    label: string;
+  }>;
   // Scenario decision gate output — present after Пачка A lands.
   // scenarioKey/scenarioLabel set when the gate picked a concrete scenario;
   // scenarioClarification set when the gate needs a user choice (and no
@@ -145,6 +154,12 @@ const ENHANCED_ANSWERING_PROMPT = `Ты — ИИ-библиотекарь зна
 
 - Язык ответа: русский, кратко и по делу.
 - Ссылайся на правила формата [R-123] если они есть в цитатах.
+- Каждое фактическое утверждение, пункт списка или вывод должен заканчиваться ссылочным токеном источника: [R-123] для правила, [D1] для фрагмента документа, [Q1] для Q&A.
+- Используй только токены, которые явно есть в контексте ниже. Не ставь токены у заголовков.
+- Для списков ставь токен в конце КАЖДОГО пункта списка, а не один раз у вводной строки.
+- Неправильно: "Требования: [D1]\n- документ на русском\n- документ не заламинирован".
+- Правильно: "Требования:\n- документ на русском [D1]\n- документ не заламинирован [D1]".
+- Если для утверждения нет подходящего токена-источника — не пиши это утверждение.
 - Если в цитатах есть **адрес/телефон/график/цена** — процитируй их дословно, не пересказывай.
 - Структурируй длинные ответы подзаголовками, но не раздувай пустыми секциями.
 
@@ -240,6 +255,73 @@ function selectContextChunks(
     .slice(0, maxChunks);
 }
 
+function rankByQuestion<T>(
+  items: T[],
+  question: string,
+  getText: (item: T) => string,
+  getBoost: (item: T) => number = () => 0
+): T[] {
+  const terms = extractSearchTerms(question);
+  if (terms.length === 0) return items;
+
+  return items
+    .map((item) => ({ item, score: scoreText(getText(item), terms) + getBoost(item) }))
+    .filter(({ score }) => score > 0)
+    .sort((a, b) => b.score - a.score)
+    .map(({ item }) => item);
+}
+
+function extractSearchTerms(value: string): string[] {
+  const normalized = value
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[^\p{L}\p{N}\s()-]/gu, ' ');
+
+  const words = normalized
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter((word) => word.length >= 3);
+
+  const expanded = words.flatMap((word) => {
+    const variants = [word];
+    if (word.length >= 6) variants.push(word.slice(0, -1));
+    if (word.length >= 8) variants.push(word.slice(0, -2));
+    return variants;
+  });
+
+  return [...new Set(expanded)];
+}
+
+function scoreText(value: string, terms: string[]): number {
+  const text = value.toLowerCase().replace(/ё/g, 'е');
+  let score = 0;
+  for (const term of terms) {
+    if (!text.includes(term)) continue;
+    score += term.length >= 6 ? 3 : 1;
+    if (/тел|запис|адрес|смольн|ленобл|ленинградск|опек|минюст|мю|загс/.test(term)) {
+      score += 2;
+    }
+  }
+  return score;
+}
+
+function sourceMatchesScenario(sourceScenarioKey: string | null | undefined, scenarioAncestors: string[]): boolean {
+  return !sourceScenarioKey || scenarioAncestors.includes(sourceScenarioKey);
+}
+
+function stripInternalNotes(answer: string): string {
+  return answer
+    .replace(/\n\s*---+\s*\n\s*\*\*Примечание(?:\s+к\s+правке)?[:\s\S]*$/i, '')
+    .replace(/\n\s*\*\*Примечание(?:\s+к\s+правке)?[:\s\S]*$/i, '')
+    .trim();
+}
+
+function sourceSpanQuote(sourceSpan: unknown): string | undefined {
+  if (!sourceSpan || typeof sourceSpan !== 'object') return undefined;
+  const quote = (sourceSpan as { quote?: unknown }).quote;
+  return typeof quote === 'string' && quote.trim() ? quote.trim() : undefined;
+}
+
 /**
  * Main enhanced answering function
  */
@@ -273,15 +355,26 @@ export async function answerQuestionEnhanced(
     return buildClarificationResult(question, scenarioDecision);
   }
 
-  // Short-circuit: out of scope → honest "no data" result, no LLM synthesis.
-  if (scenarioDecision.kind === 'out_of_scope') {
-    return buildOutOfScopeResult(question, scenarioDecision);
+  // If the scenario gate cannot map the question into the apostille taxonomy,
+  // do not immediately return "no data". The KB also contains general/offering/
+  // consular/legal docs that intentionally live outside that taxonomy. For
+  // those questions we run open retrieval and only say "no data" when retrieval
+  // actually finds nothing useful.
+  const openRetrieval = scenarioDecision.kind === 'out_of_scope';
+  let scenarioKeyForAnswer: string | undefined;
+  let scenarioLabelForAnswer = 'Общая база знаний';
+  let scenarioAncestors: string[] = [];
+
+  if (scenarioDecision.kind === 'scenario_clear') {
+    scenarioKeyForAnswer = scenarioDecision.scenarioKey;
+    scenarioLabelForAnswer = scenarioDecision.scenarioLabel;
+    scenarioAncestors = ancestorsOf(scenarioDecision.scenarioKey);
   }
 
-  // From here on we have a concrete leaf scenario. Threading its ancestor
-  // chain into retrieval makes cross-scenario contamination impossible.
-  const scenarioAncestors = ancestorsOf(scenarioDecision.scenarioKey);
-  console.log('[enhanced-answering] Scenario-filtered retrieval:', scenarioAncestors.join(' > '));
+  // With a concrete leaf scenario, thread its ancestor chain into retrieval to
+  // prevent cross-scenario contamination. Open retrieval is reserved for
+  // questions outside the scenario taxonomy.
+  console.log('[enhanced-answering] Retrieval scope:', openRetrieval ? 'open' : scenarioAncestors.join(' > '));
 
   // Step 1: Expand query and extract entities in parallel (resilient - each can fail independently)
   console.log('[enhanced-answering] Step 1: Query expansion and intent classification...');
@@ -373,21 +466,39 @@ export async function answerQuestionEnhanced(
   // for logging/debugging purposes, but they no longer gate retrieval.
   console.log('[enhanced-answering] Step 5: Fetching rules and QA pairs...');
   const scenarioWhere = scenarioAncestors.length > 0
-    ? { OR: [{ scenarioKey: null }, { scenarioKey: { in: scenarioAncestors } }] }
+    ? { scenarioKey: { in: scenarioAncestors } }
     : {};
+  const relevanceText = [question, ...allQueries, ...entities.documentTypes, ...entities.services].join(' ');
   let rules;
   try {
-    rules = await prisma.rule.findMany({
+    const ruleCandidates = await prisma.rule.findMany({
       where: {
         status: 'ACTIVE',
         ...scenarioWhere,
       },
       include: {
-        document: { select: { title: true } },
+        document: { select: { title: true, scenarioKey: true } },
       },
-      take: 10,
-      orderBy: { confidence: 'desc' },
+      take: 100,
+      orderBy: { updatedAt: 'desc' },
     });
+    const scopedRuleCandidates = ruleCandidates.filter((rule) =>
+      rule.scenarioKey !== 'apostille' || sourceMatchesScenario(rule.document?.scenarioKey, scenarioAncestors)
+    );
+    rules = rankByQuestion(
+      scopedRuleCandidates,
+      relevanceText,
+      (r) => `${r.ruleCode} ${r.title} ${r.body} ${r.document?.title ?? ''}`,
+      (r) => {
+        const sourceSpan = r.sourceSpan && typeof r.sourceSpan === 'object'
+          ? r.sourceSpan as { editedVia?: unknown; syncedToDocumentAt?: unknown }
+          : {};
+        return (r.confidence >= 1 ? 4 : 0)
+          + (sourceSpan.editedVia ? 6 : 0)
+          + (sourceSpan.syncedToDocumentAt ? 3 : 0);
+      }
+    )
+      .slice(0, 10);
     console.log('[enhanced-answering] Found', rules.length, 'rules');
   } catch (error) {
     console.error('[enhanced-answering] Step 5 (rules fetch) failed:', error);
@@ -397,13 +508,22 @@ export async function answerQuestionEnhanced(
   // Step 6: Get relevant Q&A pairs (scenario-filtered, no domain filter).
   let qaPairs;
   try {
-    qaPairs = await prisma.qAPair.findMany({
+    const qaCandidates = await prisma.qAPair.findMany({
       where: {
         status: 'ACTIVE',
         ...scenarioWhere,
       },
-      take: 5,
+      include: {
+        document: { select: { id: true, title: true, scenarioKey: true } },
+      },
+      take: 100,
+      orderBy: { updatedAt: 'desc' },
     });
+    const scopedQaCandidates = qaCandidates.filter((qa) =>
+      qa.scenarioKey !== 'apostille' || sourceMatchesScenario(qa.document?.scenarioKey, scenarioAncestors)
+    );
+    qaPairs = rankByQuestion(scopedQaCandidates, relevanceText, (qa) => `${qa.question} ${qa.answer}`)
+      .slice(0, 8);
     console.log('[enhanced-answering] Found', qaPairs.length, 'QA pairs');
   } catch (error) {
     console.error('[enhanced-answering] Step 6 (QA pairs fetch) failed:', error);
@@ -443,14 +563,27 @@ export async function answerQuestionEnhanced(
 
   // Step 9: Build context and generate answer
   console.log('[enhanced-answering] Step 9: Generating answer with confidence level:', confidenceLevel);
-  const context = buildEnhancedContext(contextChunks, rules, qaPairs, confidenceLevel);
+  const documentEvidence = contextChunks.map((chunk, index) => ({
+    token: `D${index + 1}`,
+    documentId: chunk.documentId,
+    documentTitle: docTitleMap.get(chunk.documentId) ?? 'Документ',
+    quote: chunk.content,
+  }));
+  const qaEvidence = qaPairs.map((qa, index) => ({
+    token: `Q${index + 1}`,
+    documentId: qa.documentId ?? undefined,
+    documentTitle: qa.document?.title ?? 'Q&A',
+    quote: qa.answer,
+  }));
+  const context = buildEnhancedContext(contextChunks, rules, qaPairs, documentEvidence, qaEvidence);
 
   // Declare the chosen scenario explicitly so the synthesizer knows the
   // frame. This amplifies the evidence-only contract: "all your citations
   // belong to {{scenarioLabel}} — don't mention any other scenario".
-  const scenarioPreamble =
-    `СЦЕНАРИЙ: ${scenarioDecision.scenarioLabel}  (ключ: ${scenarioDecision.scenarioKey})\n` +
-    `Все цитаты ниже относятся к этому сценарию. НЕ упоминай другие процедуры (например другие регионы или учреждения), даже если они существуют вообще.\n`;
+  const scenarioPreamble = openRetrieval
+    ? `СЦЕНАРИЙ: ${scenarioLabelForAnswer}\nВсе цитаты ниже найдены открытым поиском по базе знаний. Отвечай только по приведенным цитатам.\n`
+    : `СЦЕНАРИЙ: ${scenarioLabelForAnswer}  (ключ: ${scenarioKeyForAnswer})\n` +
+      `Все цитаты ниже относятся к этому сценарию. НЕ упоминай другие процедуры (например другие регионы или учреждения), даже если они существуют вообще.\n`;
 
   const systemPrompt = ENHANCED_ANSWERING_PROMPT;
 
@@ -490,7 +623,7 @@ ${confidenceLevel === 'insufficient'
   // to HallucinationLog for post-hoc analysis (which scenarios are worst,
   // does regeneration actually fix them, etc.).
   let consistency: ConsistencyReport | undefined;
-  let initialAnswerForLog = answer;
+  const initialAnswerForLog = answer;
   let regenerated = false;
   if (contextChunks.length > 0 && confidenceLevel !== 'insufficient') {
     try {
@@ -523,7 +656,9 @@ ${answer}
 ═══ ФАКТЫ НЕ ПОДТВЕРЖДЕНЫ ЦИТАТАМИ — УДАЛИ ИЛИ ЗАМЕНИ НА "в источнике не указано" ═══
 ${fixList}
 
-Перепиши ответ, убрав указанные неподтверждённые факты. Остальное сохрани максимально близко к оригиналу.`,
+Перепиши ответ, убрав указанные неподтверждённые факты. Остальное сохрани максимально близко к оригиналу.
+Сохрани ссылочные токены [R-...], [D...] или [Q...] у каждого оставшегося фактического утверждения.
+Верни только пользовательский ответ. Не добавляй служебные примечания, комментарии к правке или самооценку корректности.`,
               },
             ],
             temperature: 0,
@@ -542,7 +677,7 @@ ${fixList}
           data: {
             sessionId: sessionId ?? null,
             question,
-            scenarioKey: scenarioDecision.scenarioKey,
+            scenarioKey: scenarioKeyForAnswer ?? null,
             initialAnswer: initialAnswerForLog,
             regeneratedAnswer: regenerated ? answer : null,
             unsupportedClaims: consistency.unsupported as unknown as object,
@@ -555,6 +690,7 @@ ${fixList}
       console.warn('[enhanced-answering] Consistency gate failed (fail-open):', e);
     }
   }
+  answer = stripInternalNotes(answer);
 
   // Clarification is handled by the scenario decision gate upstream.
   const clarificationQuestion: { question: string; options: string[] } | undefined = undefined;
@@ -592,12 +728,42 @@ ${fixList}
   for (const [docId, docChunks] of chunksByDoc) {
     docScoreByDocId.set(docId, Math.max(...docChunks.map((c) => c.combinedScore)));
   }
-  const citations = rules.slice(0, 5).map((r) => ({
-    ruleCode: r.ruleCode,
-    documentTitle: r.document?.title,
-    quote: r.body.slice(0, 200) + (r.body.length > 200 ? '...' : ''),
-    relevanceScore: r.documentId ? (docScoreByDocId.get(r.documentId) ?? 0) : 0,
-  }));
+  const citations = rules
+    .map((r) => ({
+      ruleCode: r.ruleCode,
+      documentTitle: r.document?.title,
+      quote: sourceSpanQuote(r.sourceSpan) ?? r.body.slice(0, 200) + (r.body.length > 200 ? '...' : ''),
+      relevanceScore: r.documentId ? (docScoreByDocId.get(r.documentId) ?? 0) : 0,
+    }))
+    .filter((citation) => citation.relevanceScore > 0)
+    .slice(0, 5);
+  const sourceMarkers = [
+    ...rules.map((r) => ({
+      token: r.ruleCode,
+      sourceType: 'rule' as const,
+      documentId: r.documentId ?? undefined,
+      documentTitle: r.document?.title,
+      quote: sourceSpanQuote(r.sourceSpan) ?? r.body,
+      ruleCode: r.ruleCode,
+      label: `[${r.ruleCode}] ${r.title}`,
+    })),
+    ...documentEvidence.map((d) => ({
+      token: d.token,
+      sourceType: 'document' as const,
+      documentId: d.documentId,
+      documentTitle: d.documentTitle,
+      quote: d.quote,
+      label: `[${d.token}] ${d.documentTitle}`,
+    })),
+    ...qaEvidence.map((q) => ({
+      token: q.token,
+      sourceType: 'qa' as const,
+      documentId: q.documentId,
+      documentTitle: q.documentTitle,
+      quote: q.quote,
+      label: `[${q.token}] ${q.documentTitle}`,
+    })),
+  ];
 
   const result: EnhancedAnswerResult = {
     answer,
@@ -616,8 +782,9 @@ ${fixList}
     clarificationQuestion,
     primarySource,
     supplementarySources,
-    scenarioKey: scenarioDecision.scenarioKey,
-    scenarioLabel: scenarioDecision.scenarioLabel,
+    sourceMarkers,
+    scenarioKey: scenarioKeyForAnswer,
+    scenarioLabel: scenarioLabelForAnswer,
   };
 
   if (includeDebug) {
@@ -663,24 +830,29 @@ function buildEnhancedContext(
   chunks: HybridSearchResult[],
   rules: { ruleCode: string; title: string; body: string }[],
   qaPairs: { question: string; answer: string }[],
-  confidenceLevel: string
+  documentEvidence: { token: string; documentTitle: string; quote: string }[],
+  qaEvidence: { token: string; documentTitle: string; quote: string }[]
 ): string {
   let context = '';
 
   // Put document chunks FIRST since they're semantically matched to the question
   if (chunks.length > 0) {
     context += '## Фрагменты документов (найдены по вашему вопросу)\n';
-    for (const chunk of chunks) {
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const evidence = documentEvidence[i];
       const confidence = chunk.semanticScore >= 0.6 ? '(высокая релевантность)' :
         chunk.semanticScore >= 0.4 ? '(средняя релевантность)' : '';
-      context += `${chunk.content} ${confidence}\n---\n`;
+      context += `[${evidence.token}] Документ: ${evidence.documentTitle}\n${chunk.content} ${confidence}\n---\n`;
     }
   }
 
   if (qaPairs.length > 0) {
     context += '## Вопросы и ответы\n';
-    for (const qa of qaPairs) {
-      context += `В: ${qa.question}\nО: ${qa.answer}\n\n`;
+    for (let i = 0; i < qaPairs.length; i++) {
+      const qa = qaPairs[i];
+      const evidence = qaEvidence[i];
+      context += `[${evidence.token}] Q&A: ${evidence.documentTitle}\nВ: ${qa.question}\nО: ${qa.answer}\n\n`;
     }
   }
 

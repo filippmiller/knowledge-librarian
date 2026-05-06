@@ -1,8 +1,8 @@
 import prisma from '@/lib/db';
 import { generateEmbeddings } from '@/lib/openai';
 
-const CHUNK_SIZE = 1000; // characters
-const CHUNK_OVERLAP = 200; // characters
+export const CHUNK_SIZE = 850; // characters
+export const CHUNK_OVERLAP = 170; // characters
 
 export interface TextChunk {
   content: string;
@@ -104,6 +104,10 @@ export async function createDocumentChunks(
   text: string,
   domainIds: string[]
 ) {
+  const document = await prisma.document.findUnique({
+    where: { id: documentId },
+    select: { scenarioKey: true },
+  });
   const chunks = splitTextIntoChunks(text);
 
   if (chunks.length === 0) {
@@ -133,6 +137,7 @@ export async function createDocumentChunks(
           content: chunk.content,
           embedding: embedding,
           metadata: chunk.metadata,
+          scenarioKey: document?.scenarioKey ?? null,
         },
       });
 

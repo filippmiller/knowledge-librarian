@@ -20,8 +20,15 @@ export async function parseDocument(
     mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
     lowerFilename.endsWith('.docx')
   ) {
-    const result = await mammoth.extractRawText({ buffer });
-    return result.value;
+    const result = await mammoth.convertToHtml({ buffer });
+    const text = htmlToPlainText(result.value);
+
+    if (text.trim().length > 0) {
+      return text;
+    }
+
+    const rawResult = await mammoth.extractRawText({ buffer });
+    return rawResult.value;
   }
 
   if (mimeType === 'application/msword' || lowerFilename.endsWith('.doc')) {
@@ -53,6 +60,42 @@ export async function parseDocument(
   }
 
   throw new Error(`Unsupported file type: ${mimeType}`);
+}
+
+function htmlToPlainText(html: string): string {
+  const withStructuralBreaks = html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n')
+    .replace(/<p\b[^>]*>/gi, '')
+    .replace(/<ol\b[^>]*>|<ul\b[^>]*>/gi, '\n')
+    .replace(/<\/ol>|<\/ul>/gi, '\n')
+    .replace(/<li\b[^>]*>/gi, '\n- ')
+    .replace(/<\/li>/gi, '\n')
+    .replace(/<\/tr>/gi, '\n')
+    .replace(/<tr\b[^>]*>/gi, '')
+    .replace(/<\/td>/gi, '\n')
+    .replace(/<td\b[^>]*>/gi, '')
+    .replace(/<\/h[1-6]>/gi, '\n')
+    .replace(/<h[1-6]\b[^>]*>/gi, '');
+
+  return decodeHtmlEntities(withStructuralBreaks.replace(/<[^>]+>/g, ''))
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_, code: string) => String.fromCharCode(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code: string) => String.fromCharCode(parseInt(code, 16)));
 }
 
 export function detectMimeType(filename: string): string {

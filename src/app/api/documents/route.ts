@@ -16,6 +16,7 @@ import {
   getExistingRuleCodes,
 } from '@/lib/ai/knowledge-extractor';
 import { createDocumentChunks } from '@/lib/ai/chunker';
+import { classifyDocumentScenario } from '@/lib/knowledge/scenario-assignment';
 
 /**
  * PATCH /api/documents
@@ -194,6 +195,7 @@ export async function POST(request: NextRequest): Promise<Response> {
         rawBytes: buffer,
         rawText, // Include parsed text so SSE can proceed
         parseStatus: 'PENDING', // PENDING until user opens processing terminal
+        scenarioKey: classifyDocumentScenario(filename, title || filename),
       },
     });
 

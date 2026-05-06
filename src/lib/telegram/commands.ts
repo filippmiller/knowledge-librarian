@@ -13,7 +13,10 @@ import {
   getAllActiveTelegramIds,
 } from './access-control';
 import { addKnowledge, correctKnowledge } from './knowledge-manager';
+import { safelyEditTelegramRule } from './safe-rule-edit';
 import { answerQuestionEnhanced, type EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
+import { getCachedAnswer, storeCachedAnswer } from '@/lib/ai/answer-cache';
+import { escalateUnconvincingAIAnswer } from './ai-escalation';
 import { getOrCreateSession, saveChatMessage } from '@/lib/ai/answering-engine';
 import prisma from '@/lib/db';
 
@@ -57,7 +60,8 @@ export async function handleStart(message: TelegramMessage, user: TelegramUserIn
 /**
  * Handle /app command - open Mini App.
  */
-export async function handleApp(message: TelegramMessage, user: TelegramUserInfo): Promise<void> {
+export async function handleApp(message: TelegramMessage, _user: TelegramUserInfo): Promise<void> {
+  void _user;
   const chatId = message.chat.id;
 
   const text = `📱 *База знаний Аврора*\n\n` +
@@ -437,52 +441,18 @@ export async function handleEdit(message: TelegramMessage, user: TelegramUserInf
   }
 
   await sendTypingIndicator(chatId);
-
-  // Supersede old rule, create new version
-  await prisma.rule.update({
-    where: { id: existing.id },
-    data: { status: 'SUPERSEDED' },
+  const result = await safelyEditTelegramRule({
+    ruleCode: code,
+    newBody,
+    editedByTelegramId: user.telegramId,
+    editSource: 'telegram_command',
   });
-
-  // Get next rule code (numeric sort — string sort gives wrong max with R-1..R-492)
-  const allCodes = await prisma.rule.findMany({
-    where: { ruleCode: { startsWith: 'R-' } },
-    select: { ruleCode: true },
-  });
-  const maxNum = allCodes.reduce((max, r) => {
-    const n = parseInt(r.ruleCode.replace(/^R-/i, '')) || 0;
-    return n > max ? n : max;
-  }, 0);
-  const newCode = `R-${maxNum + 1}`;
-
-  const newRule = await prisma.rule.create({
-    data: {
-      ruleCode: newCode,
-      title: existing.title,
-      body: newBody,
-      confidence: 1.0,
-      documentId: existing.documentId,
-      supersedesRuleId: existing.id,
-      sourceSpan: { quote: newBody.slice(0, 200), locationHint: `Отредактировано через Telegram` },
-    },
-  });
-
-  // Copy domain links
-  const domainLinks = await prisma.ruleDomain.findMany({
-    where: { ruleId: existing.id },
-  });
-  for (const link of domainLinks) {
-    await prisma.ruleDomain.create({
-      data: { ruleId: newRule.id, domainId: link.domainId, confidence: link.confidence },
-    });
-  }
 
   await sendMessage(
     chatId,
-    `✅ Правило обновлено.\n\n` +
-    `Старое: ${code} (SUPERSEDED)\n` +
-    `Новое: ${newCode}\n\n` +
-    `${existing.title}\n${newBody}`
+    result.ok
+      ? `✅ ${result.summary}\n\n${existing.title}\n${newBody}`
+      : `❌ ${result.summary}`
   );
 }
 
@@ -554,7 +524,16 @@ export async function handleQuestion(message: TelegramMessage, user: TelegramUse
     const session = await getOrCreateSession('TELEGRAM', user.telegramId);
     const userMsg = await saveChatMessage(session.id, 'USER', question);
 
-    const result = await answerQuestionEnhanced(question, session.id);
+    const cached = getCachedAnswer(question);
+    const result = cached?.result ?? await answerQuestionEnhanced(question, session.id);
+    if (!cached) storeCachedAnswer(question, result);
+    void escalateUnconvincingAIAnswer({
+      question,
+      result,
+      source: 'TELEGRAM',
+      userId: user.telegramId,
+      sessionId: session.id,
+    });
 
     // Persist scenarioClarification + the original question anchor (text +
     // its timestamp) so the callback handler can reconstruct the full

@@ -16,7 +16,7 @@ import {
   getTechnicalPrompt as getKnowledgeTechnicalPrompt,
   type KnowledgeExtractionStreamResult,
 } from '@/lib/ai/knowledge-extractor-stream';
-import { splitTextIntoChunks } from '@/lib/ai/chunker';
+import { CHUNK_OVERLAP, CHUNK_SIZE, splitTextIntoChunks } from '@/lib/ai/chunker';
 
 // In-memory lock to prevent concurrent processing of the same document.
 // On Railway (single process), this is sufficient. For multi-instance deployments,
@@ -634,7 +634,7 @@ export async function GET(
             phase: 'CHUNKING',
             data: {
               humanReadable: `Разбиваю документ "${document.title}" на чанки для поиска.`,
-              technical: `Размер чанка: 1000 символов\nПерекрытие: 200 символов`,
+              technical: `Размер чанка: ${CHUNK_SIZE} символов\nПерекрытие: ${CHUNK_OVERLAP} символов`,
             },
           });
 

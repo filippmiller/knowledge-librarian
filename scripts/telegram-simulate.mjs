@@ -96,10 +96,24 @@ function describeMeta(m) {
   return `scenario_clear → ${meta.scenarioKey ?? '?'} (${meta.confidenceLevel ?? '?'})`;
 }
 
+async function purgeRecentSessions(telegramId) {
+  const p = new PrismaClient();
+  try {
+    // Kill any TELEGRAM session within the rolling window so simulation
+    // starts clean. Deleting the session cascades ChatMessages via schema.
+    const r = await p.chatSession.deleteMany({
+      where: { source: 'TELEGRAM', userId: telegramId },
+    });
+    console.log(`[reset] deleted ${r.count} prior TELEGRAM sessions for ${telegramId}`);
+  } finally { await p.$disconnect(); }
+}
+
 async function main() {
   console.log(`Simulating Telegram flow for user ${TELEGRAM_ID}`);
   console.log(`Prod: ${BASE}`);
   console.log();
+
+  await purgeRecentSessions(TELEGRAM_ID);
 
   // ── Step 1: send "АПОСТИЛЬ"
   console.log('[step 1] USER text "АПОСТИЛЬ"');

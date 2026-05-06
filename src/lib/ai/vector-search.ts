@@ -101,13 +101,13 @@ export async function searchSimilarChunksPgvector(
       `;
     }
 
-    // Scenario filter: accept chunks tagged with the chosen leaf OR any of
-    // its ancestors, OR untagged (universal cross-service). Inputs come only
-    // from ancestorsOf() which emits known strings — safe to interpolate.
+    // Scenario filter: accept only chunks explicitly tagged with the chosen
+    // leaf or one of its ancestors. Untagged data is not treated as universal;
+    // it must be backfilled before it can participate in scenario answers.
     let scenarioFilter = '';
     if (scenarioAncestors.length > 0) {
       const keyList = scenarioAncestors.map(s => `'${s.replace(/'/g, "''")}'`).join(',');
-      scenarioFilter = `AND (c."scenarioKey" IS NULL OR c."scenarioKey" IN (${keyList}))`;
+      scenarioFilter = `AND c."scenarioKey" IN (${keyList})`;
     }
 
     // Use cosine distance operator <=> (returns 1 - similarity)
@@ -178,9 +178,7 @@ async function searchSimilarChunksInMemory(
   if (domainSlugs.length > 0) {
     conditions.push({ domains: { some: { domain: { slug: { in: domainSlugs } } } } });
   }
-  if (scenarioAncestors.length > 0) {
-    conditions.push({ OR: [{ scenarioKey: null }, { scenarioKey: { in: scenarioAncestors } }] });
-  }
+  if (scenarioAncestors.length > 0) conditions.push({ scenarioKey: { in: scenarioAncestors } });
   const whereClause: Prisma.DocChunkWhereInput = conditions.length > 0 ? { AND: conditions } : {};
 
   const chunks = await prisma.docChunk.findMany({
@@ -236,7 +234,7 @@ export async function searchSimilarChunks(
       return await searchSimilarChunksPgvector(queryEmbedding, domainSlugs, limit, 0.3, scenarioAncestors);
     } catch (error) {
       // Fallback to in-memory if pgvector fails unexpectedly
-      console.warn('[vector-search] Falling back to in-memory search due to pgvector error');
+      console.warn('[vector-search] Falling back to in-memory search due to pgvector error', error);
       return searchSimilarChunksInMemory(queryEmbedding, domainSlugs, limit, scenarioAncestors);
     }
   } else {
@@ -280,7 +278,7 @@ export async function searchByKeywords(
   let scenarioFilter = '';
   if (scenarioAncestors.length > 0) {
     const keyList = scenarioAncestors.map(s => `'${s.replace(/'/g, "''")}'`).join(',');
-    scenarioFilter = `AND (c."scenarioKey" IS NULL OR c."scenarioKey" IN (${keyList}))`;
+    scenarioFilter = `AND c."scenarioKey" IN (${keyList})`;
   }
 
   try {
@@ -325,9 +323,7 @@ export async function searchByKeywords(
     if (domainSlugs.length > 0) {
       fallbackConditions.push({ domains: { some: { domain: { slug: { in: domainSlugs } } } } });
     }
-    if (scenarioAncestors.length > 0) {
-      fallbackConditions.push({ OR: [{ scenarioKey: null }, { scenarioKey: { in: scenarioAncestors } }] });
-    }
+    if (scenarioAncestors.length > 0) fallbackConditions.push({ scenarioKey: { in: scenarioAncestors } });
     const whereClause: Prisma.DocChunkWhereInput = { AND: fallbackConditions };
 
     const chunks = await prisma.docChunk.findMany({

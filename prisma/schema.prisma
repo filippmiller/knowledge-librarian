@@ -39,9 +39,29 @@ model Document {
   domainSuggestions  DomainSuggestion[]
   stagedExtractions  StagedExtraction[]
   processingAttempts ProcessingAttempt[]
+  revisions          DocumentRevision[]
 
   @@index([parseStatus])
   @@index([scenarioKey])
+}
+
+model DocumentRevision {
+  id              String   @id @default(cuid())
+  documentId      String
+  document        Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  source          String // RULE_EDIT | DOCUMENT_EDIT
+  ruleId          String?
+  actor           String?
+  previousRawText String?  @db.Text
+  nextRawText     String?  @db.Text
+  previousExcerpt String?  @db.Text
+  nextExcerpt     String?  @db.Text
+  metadata        Json?
+  createdAt       DateTime @default(now())
+
+  @@index([documentId])
+  @@index([ruleId])
+  @@index([createdAt])
 }
 
 enum ParseStatus {

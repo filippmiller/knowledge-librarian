@@ -1,5 +1,6 @@
 import { streamChatCompletionTokens, type ChatMessage } from '@/lib/ai/chat-provider';
 import prisma from '@/lib/db';
+import { buildExtractionBatches, dedupeAndRenumberRules } from '@/lib/ai/extraction-batches';
 
 export interface ExtractedRuleStream {
   ruleCode: string;
@@ -114,12 +115,6 @@ ${documentText.slice(0, 500)}${documentText.length > 500 ? '...' : ''}
 }`;
 }
 
-// Batch processing constants
-// 8000 chars ≈ 4–5 pages of text — enough context for the LLM to understand structure
-// Overlap ensures rules spanning a batch boundary are captured in full
-const BATCH_SIZE = 8000;
-const BATCH_OVERLAP = 600;
-
 export async function* streamKnowledgeExtraction(
   documentText: string,
   existingRuleCodes: string[] = []
@@ -129,24 +124,9 @@ export async function* streamKnowledgeExtraction(
       ? Math.max(...existingRuleCodes.map((c) => parseInt(c.replace('R-', '')))) + 1
       : 1;
 
-  // Split document into batches to avoid memory issues
-  const batches: string[] = [];
-  let offset = 0;
-  
-  while (offset < documentText.length) {
-    const end = Math.min(offset + BATCH_SIZE, documentText.length);
-    batches.push(documentText.slice(offset, end));
-    offset = end - BATCH_OVERLAP; // Overlap to catch rules at boundaries
-    if (offset >= documentText.length - BATCH_OVERLAP) break;
-  }
+  const batches = buildExtractionBatches(documentText);
 
-  // If document is small enough, process as single batch
-  if (documentText.length <= BATCH_SIZE) {
-    batches.length = 0;
-    batches.push(documentText);
-  }
-
-  console.log(`[Knowledge Extraction] Processing in ${batches.length} batch(es) to conserve memory`);
+  console.log(`[Knowledge Extraction] Processing in ${batches.length} structured batch(es)`);
 
   // Accumulated results across all batches
   const allRules: ExtractedRuleStream[] = [];
@@ -161,23 +141,28 @@ export async function* streamKnowledgeExtraction(
     // Report progress
     yield {
       type: 'batch_progress',
-      data: { current: batchIndex + 1, total: batches.length }
+      data: { current: batch.index, total: batch.total }
     };
 
-    console.log(`[Knowledge Extraction] Processing batch ${batchIndex + 1}/${batches.length} (${batch.length} chars)`);
+    console.log(`[Knowledge Extraction] Processing batch ${batch.index}/${batch.total} (lines ${batch.startLine}-${batch.endLine}, ${batch.text.length} chars)`);
 
     const messages: ChatMessage[] = [
       { role: 'system', content: EXTRACTION_SYSTEM_PROMPT_RU },
       {
         role: 'user',
         content: `Извлеки ВСЕ правила из этой части документа. Нумерация начинается с R-${currentRuleCode}.
-${batches.length > 1 ? `Часть ${batchIndex + 1} из ${batches.length}.` : ''}
+${batches.length > 1 ? `Часть ${batch.index} из ${batch.total}. Строки ${batch.startLine}-${batch.endLine}.` : ''}
 
-ТЕКСТ ДОКУМЕНТА:
-${batch}
+ТЕКСТ ДОКУМЕНТА С НОМЕРАМИ СТРОК:
+${batch.numberedText}
 
-ВАЖНО: Пройди текст построчно. Каждая строка с конкретным значением (цена, срок, требование, шаг процедуры) = отдельное правило.
-Не пропускай аббревиатуры — если встречается незнакомая аббревиатура (СОН, ГТД, ДМС и т.д.), создай правило с её расшифровкой и значением.
+ВАЖНО:
+1. Пройди строки сверху вниз. Каждая атомарная строка с ценой, сроком, адресом, телефоном, требованием, исключением, шагом процедуры, вариантом подачи, способом оплаты, ответственным или аббревиатурой = отдельное правило.
+2. Не объединяй несколько разных фактов в одно правило. Лучше 3 коротких правила, чем 1 длинное.
+3. Для списков создай отдельное правило на каждый пункт списка.
+4. Если строка является заголовком раздела, используй её как locationHint для следующих правил.
+5. В sourceSpan.locationHint указывай номер строки или диапазон строк, например "L0012-L0014".
+6. Цель плотности: из 20 содержательных строк обычно должно получиться 12-25 правил. Не экономь правила.
 
 Ответь ТОЛЬКО JSON без пояснений:
 {
@@ -260,22 +245,22 @@ ${batch}
         global.gc();
       }
 
-      console.log(`[Knowledge Extraction] Batch ${batchIndex + 1} complete: ${rules.length} rules, ${qaPairs.length} QAs`);
+      console.log(`[Knowledge Extraction] Batch ${batch.index} complete: ${rules.length} rules, ${qaPairs.length} QAs`);
     } catch (error) {
       console.error(`[Knowledge Extraction] Failed to parse batch ${batchIndex + 1}:`, error);
       throw new Error(`Не удалось распарсить ответ батча ${batchIndex + 1}: ${fullContent.slice(0, 200)}... Ошибка: ${error instanceof Error ? error.message : String(error)}`);
     }
 
-    // Clear batch from memory
-    batches[batchIndex] = '';
   }
+
+  const deduped = dedupeAndRenumberRules(allRules, allQAPairs, startCode);
 
   // Return combined results
   yield {
     type: 'result',
     data: {
-      rules: allRules,
-      qaPairs: allQAPairs,
+      rules: deduped.rules,
+      qaPairs: deduped.qaPairs,
       uncertainties: allUncertainties,
     }
   };
@@ -288,4 +273,3 @@ export async function getExistingRuleCodesForStream(): Promise<string[]> {
   });
   return rules.map((r) => r.ruleCode);
 }
-

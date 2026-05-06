@@ -9,6 +9,133 @@ Each entry tracks: timestamp, agent session, functionality area, files changed, 
 
 ---
 
+## [2026-04-24 01:30] — Full scenario-aware rollout: A + C + B + Finale + Telegram hardening
+
+**Area:** AI Answering Engine / Knowledge Taxonomy / Telegram Bot
+**Type:** architecture + migration + feature + bugfix
+
+### Files Changed
+- `prisma/schema.prisma` — added `scenarioKey String?` + index on Document/Rule/QAPair/DocChunk; new `HallucinationLog` model
+- `src/lib/knowledge/scenarios.ts` — NEW: hierarchical taxonomy + ancestor/descendant/filter helpers
+- `src/lib/knowledge/scenario-classifier.ts` — NEW: LLM decision gate (scenario_clear | needs_clarification | out_of_scope)
+- `src/lib/ai/consistency-gate.ts` — NEW: post-synthesis verifier that flags unsupported factual claims
+- `src/lib/ai/enhanced-answering-engine.ts` — Step 0 scenario gate, short-circuits, scenario-filtered retrieval, evidence-only prompt rewritten, regeneration loop, HallucinationLog writes, dropped domain filter, honest citation scores
+- `src/lib/ai/vector-search.ts` — `scenarioAncestors` param wired through all 5 search functions (pgvector + in-memory + keyword)
+- `src/lib/ai/answering-engine.ts` — `getOrCreateSession` actually get-or-create (30-min rolling window)
+- `src/lib/telegram/telegram-api.ts` — TelegramCallbackQuery type, sendInlineKeyboard, answerCallbackQuery
+- `src/lib/telegram/message-router.ts` — handleCallback dispatcher, admin knowledge lookups route through handleQuestion
+- `src/lib/telegram/scenario-callback.ts` — NEW: deterministic chain reconstruction from ASSISTANT metadata
+- `src/lib/telegram/commands.ts` — saves originalQuestion + originalQuestionAt in metadata, 3-shape formatAnswerResponse
+- `src/app/telegram-app/page.tsx` — clarificationChain state, scenario badge, forwards scenarioKey/scenarioLabel
+- `scripts/backfill-scenarios.ts` — NEW: one-shot migration (idempotent)
+- `scripts/test-scenario-gate.ts`, `ask-battery*.mjs`, `test-multistep.mjs`, `telegram-simulate.mjs`, `check-hallucination-log.ts`, `list-telegram-users.ts`, `verify-*.ts`, `inspect-domains.mjs`, `search-apostille.mjs` — NEW regression harnesses and diagnostics
+
+### Functions/Symbols Modified
+- `SCENARIOS`, `ancestorsOf`, `descendantsOf`, `childrenOf`, `isLeaf`, `getScenario`, `facetsOf`, `scenarioFilterClause`, `assertTaxonomyConsistency` — new
+- `classifyScenario`, `ScenarioDecision` — new
+- `verifyAnswer`, `ConsistencyReport`, `ClaimCheck` — new
+- `answerQuestionEnhanced` — modified (Step 0 gate, scenarioPreamble, regen loop, telemetry write, scenarioKey in result)
+- `multiQuerySearch`, `hybridSearch`, `searchSimilarChunks`, `searchByKeywords`, `searchSimilarChunksPgvector`, `searchSimilarChunksInMemory` — modified (scenarioAncestors parameter)
+- `ENHANCED_ANSWERING_PROMPT` — completely rewritten as evidence-only contract
+- `buildClarificationResult`, `buildOutOfScopeResult` — new short-circuit builders
+- `getOrCreateSession` — modified (actual get-or-create, 30-min window)
+- `handleCallback`, `handleScenarioCallback`, `sendClarificationOrAnswer`, `sendInlineKeyboard`, `answerCallbackQuery` — new
+- `handleQuestion`, `formatAnswerResponse`, `routeTextMessage` — modified (scenario metadata threading, 3-shape formatter, admin routing)
+
+### Database Tables
+- `Document` — +scenarioKey column + index (all 3 rows backfilled)
+- `Rule` — +scenarioKey column + index (163 rows backfilled, 22 at cross-cutting apostille root)
+- `QAPair` — +scenarioKey column + index (51 rows backfilled)
+- `DocChunk` — +scenarioKey column + index (19 rows backfilled)
+- `HallucinationLog` — new table for consistency-gate telemetry (1 row written during testing)
+- `ChatSession` — semantic change: Telegram sessions now persist 30 min across messages/callbacks instead of spawning fresh per call
+
+### Summary
+Full rollout of the scenario-aware answering architecture. Three numbered packs (A: gate + retrieval filter, C: evidence-only + verifier, B: UX) plus a Finale pack (Telegram callback + telemetry + drop broken domains), plus three reliability fixes uncovered by simulation (deterministic chain, session reuse, admin routing). All deployed to prod via `railway up --detach` (GitHub auto-deploy unreliable). Verified end-to-end by `telegram-simulate.mjs`: both USER and SUPER_ADMIN complete the 3-step apostille → zags → spb button chain and land on `apostille.zags.spb` with a complete answer. Cross-scenario contamination physically impossible (SQL filter). Intra-scenario hallucinations caught by consistency gate + regenerated, with telemetry in HallucinationLog. Telegram is primary channel; it works end-to-end.
+
+### Session Notes
+→ `.claude/sessions/2026-04-24-013000.md`
+
+---
+
+## [2026-04-23 18:36] — Scenario-aware retrieval + decision gate (Пачка A)
+
+**Area:** AI Answering Engine / Knowledge Taxonomy / Retrieval
+**Type:** architecture + migration + feature
+
+### Files Changed
+- `prisma/schema.prisma` — added `scenarioKey: String?` + index to Document, Rule, QAPair, DocChunk
+- `src/lib/knowledge/scenarios.ts` — NEW: hierarchical taxonomy (apostille, apostille.min_justice, apostille.zags, apostille.zags.spb, apostille.zags.lo) + helpers (ancestorsOf, descendantsOf, childrenOf, isLeaf, getScenario, facetsOf, scenarioFilterClause, assertTaxonomyConsistency)
+- `src/lib/knowledge/scenario-classifier.ts` — NEW: LLM-based decision gate returning `scenario_clear | needs_clarification | out_of_scope`
+- `src/lib/ai/enhanced-answering-engine.ts` — Step 0 runs gate; short-circuits on clarification/out-of-scope; threads scenarioAncestors into retrieval + rule/qa fetches; added `scenarioKey/scenarioLabel/scenarioClarification` to result
+- `src/lib/ai/vector-search.ts` — `hybridSearch`, `searchSimilarChunks`, `searchByKeywords`, `searchSimilarChunksPgvector`, `searchSimilarChunksInMemory` all accept `scenarioAncestors: string[]` and add `WHERE scenarioKey IS NULL OR scenarioKey IN (...)` filter
+- `scripts/backfill-scenarios.ts` — NEW: applies scenarioKey to existing data; promotes cross-cutting rules to parent node
+- `scripts/test-scenario-gate.ts` — NEW: regression test (8 queries, all pass locally)
+- `scripts/ask-battery.mjs` / `ask-battery-v2.mjs` — NEW: E2E test harness against /api/ask
+
+### Functions/Symbols Added
+- `SCENARIOS` const, `ScenarioKey`, `ScenarioNode`, `Disambiguation` types
+- `ancestorsOf(key)`, `descendantsOf(key)`, `childrenOf(key)`, `isLeaf(key)`, `facetsOf(key)`, `scenarioFilterClause(key)`, `assertTaxonomyConsistency()`
+- `classifyScenario(question) → ScenarioDecision`
+- `buildClarificationResult()`, `buildOutOfScopeResult()` in engine
+
+### Database Impact
+- Schema: `scenarioKey` column + index on 4 tables (applied via `prisma db push`)
+- Data: 3 Documents tagged (apostille.min_justice, apostille.zags.spb, apostille.zags.lo); 19 chunks inherit; 163 rules classified with 22 promoted to `apostille` root as cross-cutting; 51 QAPairs inherit from parent
+
+### Key Design Decisions
+- Hierarchy uses dot-notation keys; retrieval filter includes ancestor path + NULL (no isCrossCutting boolean needed)
+- Taxonomy lives as code (`scenarios.ts`), not in DB — scenarios are rarely-changing business constants
+- Gate runs BEFORE retrieval; prevents cross-scenario LLM synthesis hallucinations
+- Classifier is LLM-based (temperature 0, ~1.5s per call) — deterministic enough, ~$0.0001 per gate call
+
+### Test Results (local)
+All 8 diagnostic questions (T1-T8) matched expected gate decisions. Before commit: T1 pre-Пачка-A was merging chunks from all 3 apostille docs (hallucinating "оба учреждения принимают СПб+ЛО"). After: T1 returns needs_clarification at apostille root with 3 options.
+
+### Summary
+Built scenario-aware layer that sits on top of existing Domain-based retrieval. Root cause of all T1-T8 failures from the 2026-04-23 audit was cross-scenario blending — chunks from 3 mutually-exclusive procedures (МЮ / КЗАГС СПб / ЗАГС ЛО) merged at synthesis time with ~0.0002 score spread. Solution: scenarioKey schema field + LLM decision gate + SQL retrieval filter. Gate either picks one leaf scenario (retrieval physically scoped to that subtree + cross-cutting rules) or asks user a structured clarification question with declarative options from the taxonomy node's disambiguation config.
+
+### Next (Пачка B — UX polish)
+- Mini-app: accumulate multi-step clarifications (zags → spb/lo needs 2 clicks)
+- Telegram bot: inline keyboard for clarification options
+
+### Next (Пачка C — anti-hallucination)
+- Evidence-only synthesis prompt
+- Consistency gate (Haiku post-check)
+- Fix fake citation scores (engine:458 `Math.max(0.9 - i*0.1, 0.5)` → real `combinedScore`)
+
+---
+
+## [2026-03-05 12:00] — AI Answer Block in Search + Clickable Documents + Full DB Purge
+
+**Area:** UI/MiniApp + Database/Purge
+**Type:** feature + migration
+
+### Files Changed
+- `src/app/telegram-app/page.tsx` — AI answer state + parallel fetch + AI block UI + clickable docs + openDocument error handling + rule source fallback
+- `scripts/purge-all.sql` — SQL DELETE statements in FK-safe order for full purge
+- `scripts/purge-all.mjs` — Attempted Node.js purge script (superseded by SQL approach)
+
+### Functions/Symbols Modified
+- `handleSearch()` — modified: added parallel `/api/ask` fetch via `Promise.allSettled`
+- `openDocument()` — modified: added error feedback for missing rawText and failed fetch
+- `aiAnswer` / `aiLoading` — new state variables for AI answer block
+- AI Answer UI block — new JSX above search results showing "✦ Ответ на основе базы знаний"
+- Document card `onClick` — new: `openDocument(doc.id)` on document list items in Documents tab
+- Rule source fallback — modified: gray "документ не привязан" block when `document.id` is null
+
+### Database Tables
+- `Document`, `Rule`, `QAPair`, `DocChunk` — ALL rows deleted (full purge, re-upload tomorrow)
+- `RuleDomain`, `QADomain`, `ChunkDomain`, `DocumentDomain`, `StagedExtraction`, `KnowledgeChange`, `ProcessingAttempt`, `RuleComment`, `UserFavorite`, `UserNotification` — ALL rows deleted
+
+### Summary
+Added AI-powered answer block to mini-app search: when user searches, `/api/ask` runs in parallel with the regular search and displays a synthesized prose answer above the rule cards. Fixed two document viewing issues: documents tab items were not clickable (no onClick handler), and rule detail had no fallback when `document.id` was null. Finished session with full DB purge of all documents, rules, and Q&A pairs via `npx prisma db execute` SQL file — database is now empty pending re-upload.
+
+### Session Notes
+→ `.claude/sessions/2026-03-05-120000.md`
+
+---
+
 ## [2026-02-28 22:30] — Fix JSON parsing pipeline + process error-logging document + verify Q&A
 
 **Area:** Document Processing / Knowledge Extraction / Q&A Engine

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifyTelegramWebAppData } from '@/lib/telegram/mini-app-auth';
 import { createProcessingToken } from '@/lib/crypto';
+import { classifyDocumentScenario, classifyRuleScenario } from '@/lib/knowledge/scenario-assignment';
 import prisma from '@/lib/db';
 
 /**
@@ -192,7 +193,7 @@ export async function POST(request: NextRequest) {
   }
 
   // Define public actions that don't require auth
-  const publicActions = ['search', 'getRule', 'getStats', 'voiceSearch', 'getDocument'];
+  const publicActions = ['search', 'getRule', 'getStats', 'voiceSearch', 'getDocument', 'getAllRules', 'getAllPairs'];
   
   if (!publicActions.includes(action) && !telegramId) {
     return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
@@ -424,6 +425,49 @@ export async function POST(request: NextRequest) {
         });
         if (!doc) return NextResponse.json({ error: 'Document not found' }, { status: 404 });
         return NextResponse.json({ document: doc });
+      }
+
+      case 'updateDocument': {
+        if (!isAdmin) return NextResponse.json({ error: 'Admin required' }, { status: 403 });
+
+        const { documentId, rawText } = body;
+        if (!documentId || typeof rawText !== 'string' || rawText.trim().length < 20) {
+          return NextResponse.json({ error: 'Нужен documentId и текст документа не короче 20 символов' }, { status: 400 });
+        }
+
+        const { rewriteDocumentAndKnowledge } = await import('@/lib/knowledge/document-sync');
+        const result = await rewriteDocumentAndKnowledge({
+          documentId,
+          rawText,
+          editedBy: telegramId,
+        });
+
+        return NextResponse.json({
+          success: true,
+          result,
+          message: `Документ сохранён. Переизвлечено: ${result.rulesCreated} правил, ${result.qaPairsCreated} Q&A, ${result.chunksCreated} чанков.`,
+        });
+      }
+
+      case 'rollbackDocumentRevision': {
+        if (!isAdmin) return NextResponse.json({ error: 'Admin required' }, { status: 403 });
+
+        const { revisionId } = body;
+        if (!revisionId || typeof revisionId !== 'string') {
+          return NextResponse.json({ error: 'Missing revisionId' }, { status: 400 });
+        }
+
+        const { rollbackDocumentToRevision } = await import('@/lib/knowledge/document-sync');
+        const result = await rollbackDocumentToRevision({
+          revisionId,
+          editedBy: telegramId,
+        });
+
+        return NextResponse.json({
+          success: true,
+          result,
+          message: `Документ откатан к ревизии ${revisionId}. Пересобрано чанков: ${result.chunksCreated}.`,
+        });
       }
 
       case 'voiceSearch': {
@@ -712,6 +756,7 @@ export async function POST(request: NextRequest) {
         });
 
         if (!existingRule) return NextResponse.json({ error: 'Rule not found' }, { status: 404 });
+        const { syncRuleEditToDocument } = await import('@/lib/knowledge/document-sync');
 
         if (confirmEdit) {
           await prisma.rule.update({
@@ -737,11 +782,25 @@ export async function POST(request: NextRequest) {
               confidence: 1.0,
               documentId: existingRule.documentId,
               supersedesRuleId: existingRule.id,
+              scenarioKey: existingRule.scenarioKey,
               sourceSpan: { 
                 quote: ruleBody.slice(0, 200), 
-                locationHint: `Отредактировано через Mini App (${telegramId})` 
+                locationHint: `Отредактировано через Mini App (${telegramId})`,
+                editedVia: 'Mini App',
+                editedBy: telegramId,
+                editedAt: new Date().toISOString(),
               },
             },
+          });
+          await prisma.qAPair.updateMany({
+            where: { ruleId: existingRule.id, status: 'ACTIVE' },
+            data: { status: 'SUPERSEDED' },
+          });
+          const syncResult = await syncRuleEditToDocument({
+            ruleId: existingRule.id,
+            newBody: ruleBody,
+            previousBody: existingRule.body,
+            editedBy: telegramId,
           });
 
           const domainLinks = await prisma.ruleDomain.findMany({
@@ -769,7 +828,14 @@ export async function POST(request: NextRequest) {
             });
           }
 
-          return NextResponse.json({ success: true, rule: newRule, message: `Обновлено: ${existingRule.ruleCode} → ${newCode}` });
+          return NextResponse.json({
+            success: true,
+            rule: newRule,
+            syncResult,
+            message: syncResult.updated
+              ? `Обновлено: ${existingRule.ruleCode} → ${newCode}; документ и чанки пересобраны`
+              : `Обновлено: ${existingRule.ruleCode} → ${newCode}; документ не синхронизирован (${syncResult.reason || 'нет привязки'})`,
+          });
         } else {
           const updated = await prisma.rule.update({
             where: { id: existingRule.id },
@@ -787,8 +853,25 @@ export async function POST(request: NextRequest) {
               },
             },
           });
+          await prisma.qAPair.updateMany({
+            where: { ruleId: existingRule.id, status: 'ACTIVE' },
+            data: { answer: ruleBody },
+          });
+          const syncResult = await syncRuleEditToDocument({
+            ruleId: existingRule.id,
+            newBody: ruleBody,
+            previousBody: existingRule.body,
+            editedBy: telegramId,
+          });
 
-          return NextResponse.json({ success: true, rule: updated, message: `Правило ${existingRule.ruleCode} обновлено` });
+          return NextResponse.json({
+            success: true,
+            rule: updated,
+            syncResult,
+            message: syncResult.updated
+              ? `Правило ${existingRule.ruleCode} обновлено; документ и чанки пересобраны`
+              : `Правило ${existingRule.ruleCode} обновлено; документ не синхронизирован (${syncResult.reason || 'нет привязки'})`,
+          });
         }
       }
 
@@ -883,6 +966,7 @@ export async function POST(request: NextRequest) {
           confidenceLevel: result.confidenceLevel,
           citations: result.citations,
           domainsUsed: result.domainsUsed,
+          sourceMarkers: result.sourceMarkers,
           sessionId: session.id,
         });
       }
@@ -931,6 +1015,7 @@ export async function POST(request: NextRequest) {
             rawBytes: buffer,
             rawText,
             parseStatus: 'PENDING',
+            scenarioKey: classifyDocumentScenario(filename, title || filename),
           },
         });
 
@@ -1042,6 +1127,19 @@ export async function POST(request: NextRequest) {
           return n > max ? n : max;
         }, 0);
         const newCode = `R-${maxNum + 1}`;
+        const sourceText = `${ruleTitle}\n\n${ruleBody}`;
+        const scenarioKey = classifyRuleScenario(ruleTitle, ruleBody, `Добавлено вручную через Mini App (${telegramId})`);
+
+        const document = await prisma.document.create({
+          data: {
+            title: `Ручное правило ${newCode}: ${ruleTitle}`,
+            filename: `manual-rule-${newCode}.txt`,
+            mimeType: 'text/plain',
+            rawText: sourceText,
+            parseStatus: 'COMPLETED',
+            scenarioKey,
+          },
+        });
 
         const newRule = await prisma.rule.create({
           data: {
@@ -1049,12 +1147,21 @@ export async function POST(request: NextRequest) {
             title: ruleTitle,
             body: ruleBody,
             confidence: 1.0,
+            documentId: document.id,
+            scenarioKey,
             sourceSpan: {
-              quote: ruleBody.slice(0, 200),
+              quote: ruleBody.slice(0, 500),
               locationHint: `Добавлено вручную через Mini App (${telegramId})`,
             },
           },
         });
+
+        const domainIds = Array.isArray(ruleDomainIds) ? ruleDomainIds : [];
+        for (const domainId of domainIds) {
+          await prisma.documentDomain.create({
+            data: { documentId: document.id, domainId, isPrimary: true, confidence: 1.0 },
+          }).catch(() => undefined);
+        }
 
         if (Array.isArray(ruleDomainIds) && ruleDomainIds.length > 0) {
           for (const domainId of ruleDomainIds) {
@@ -1064,7 +1171,105 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        return NextResponse.json({ success: true, rule: newRule, message: `Правило ${newCode} создано` });
+        const { createDocumentChunks } = await import('@/lib/ai/chunker');
+        const chunkIds = await createDocumentChunks(document.id, sourceText, domainIds);
+
+        return NextResponse.json({
+          success: true,
+          rule: newRule,
+          document,
+          chunksCreated: chunkIds.length,
+          message: `Правило ${newCode} создано и привязано к source-документу`,
+        });
+      }
+
+      case 'repairRuleSource': {
+        if (!isAdmin) return NextResponse.json({ error: 'Admin required' }, { status: 403 });
+
+        const { ruleId, ruleCode } = body;
+        if (!ruleId && !ruleCode) {
+          return NextResponse.json({ error: 'Нужен ruleId или ruleCode' }, { status: 400 });
+        }
+
+        const rule = await prisma.rule.findFirst({
+          where: {
+            status: 'ACTIVE',
+            ...(ruleId ? { id: ruleId } : { ruleCode: String(ruleCode).toUpperCase() }),
+          },
+          include: {
+            document: { select: { id: true, title: true, rawText: true, scenarioKey: true } },
+            domains: { select: { domainId: true } },
+          },
+        });
+        if (!rule) return NextResponse.json({ error: 'Rule not found' }, { status: 404 });
+
+        const locationHint = typeof rule.sourceSpan === 'object' && rule.sourceSpan !== null
+          ? String((rule.sourceSpan as { locationHint?: unknown }).locationHint ?? '')
+          : '';
+        const scenarioKey = classifyRuleScenario(rule.title, rule.body, locationHint);
+        const sourceText = `${rule.title}\n\n${rule.body}`;
+        const domainIds = rule.domains.map((d) => d.domainId);
+
+        let document = rule.document;
+        if (!document) {
+          document = await prisma.document.create({
+            data: {
+              title: `Ручное правило ${rule.ruleCode}: ${rule.title}`,
+              filename: `manual-rule-${rule.ruleCode}.txt`,
+              mimeType: 'text/plain',
+              rawText: sourceText,
+              parseStatus: 'COMPLETED',
+              scenarioKey,
+            },
+            select: { id: true, title: true, rawText: true, scenarioKey: true },
+          });
+        } else {
+          document = await prisma.document.update({
+            where: { id: document.id },
+            data: { rawText: sourceText, parseStatus: 'COMPLETED', parseError: null, scenarioKey },
+            select: { id: true, title: true, rawText: true, scenarioKey: true },
+          });
+        }
+
+        for (const domainId of domainIds) {
+          await prisma.documentDomain.create({
+            data: { documentId: document.id, domainId, isPrimary: true, confidence: 1.0 },
+          }).catch(() => undefined);
+        }
+
+        await prisma.docChunk.deleteMany({ where: { documentId: document.id } });
+        const { createDocumentChunks } = await import('@/lib/ai/chunker');
+        const chunkIds = await createDocumentChunks(document.id, sourceText, domainIds);
+
+        const updatedRule = await prisma.rule.update({
+          where: { id: rule.id },
+          data: {
+            documentId: document.id,
+            scenarioKey,
+            confidence: 1.0,
+            sourceSpan: {
+              ...(typeof rule.sourceSpan === 'object' && rule.sourceSpan !== null ? rule.sourceSpan : {}),
+              quote: rule.body.slice(0, 500),
+              repairedVia: 'Mini App',
+              repairedBy: telegramId,
+              repairedAt: new Date().toISOString(),
+              repairedReason: 'Rule source document/scenario/chunks were missing',
+            },
+          },
+        });
+
+        await prisma.qAPair.updateMany({
+          where: { ruleId: rule.id, status: 'ACTIVE' },
+          data: { documentId: document.id, scenarioKey },
+        });
+
+        return NextResponse.json({
+          success: true,
+          rule: updatedRule,
+          document,
+          chunksCreated: chunkIds.length,
+          message: `Правило ${rule.ruleCode} привязано к документу, сценарий: ${scenarioKey ?? 'не определен'}, чанков: ${chunkIds.length}`,
+        });
       }
 
       case 'getDocuments': {
@@ -1199,24 +1404,199 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      case 'getAllRules': {
-        const { cursor, limit: lim = 50 } = body;
-        const rules = await prisma.rule.findMany({
-          where: { status: 'ACTIVE' },
-          orderBy: { ruleCode: 'asc' },
-          take: lim,
-          ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
-          select: {
-            id: true,
-            ruleCode: true,
-            title: true,
-            confidence: true,
-            document: { select: { title: true, id: true } },
-            _count: { select: { comments: true, favorites: true } },
+      case 'exportKnowledgeArchive': {
+        if (!isAdmin) return NextResponse.json({ error: 'Admin required' }, { status: 403 });
+
+        const [
+          documents,
+          rules,
+          qaPairs,
+          docChunks,
+          domains,
+          documentDomains,
+          ruleDomains,
+          qaDomains,
+          chunkDomains,
+          stagedExtractions,
+          documentRevisions,
+          knowledgeChanges,
+        ] = await Promise.all([
+          prisma.document.findMany({
+            select: {
+              id: true,
+              title: true,
+              filename: true,
+              mimeType: true,
+              rawText: true,
+              uploadedAt: true,
+              parseStatus: true,
+              parseError: true,
+              retryCount: true,
+              scenarioKey: true,
+            },
+            orderBy: { uploadedAt: 'asc' },
+          }),
+          prisma.rule.findMany({ orderBy: [{ ruleCode: 'asc' }, { createdAt: 'asc' }] }),
+          prisma.qAPair.findMany({ orderBy: { createdAt: 'asc' } }),
+          prisma.docChunk.findMany({
+            select: {
+              id: true,
+              documentId: true,
+              chunkIndex: true,
+              content: true,
+              metadata: true,
+              createdAt: true,
+              scenarioKey: true,
+            },
+            orderBy: [{ documentId: 'asc' }, { chunkIndex: 'asc' }],
+          }),
+          prisma.domain.findMany({ orderBy: { slug: 'asc' } }),
+          prisma.documentDomain.findMany(),
+          prisma.ruleDomain.findMany(),
+          prisma.qADomain.findMany(),
+          prisma.chunkDomain.findMany(),
+          prisma.stagedExtraction.findMany({ orderBy: { createdAt: 'asc' } }),
+          prisma.documentRevision.findMany({ orderBy: { createdAt: 'asc' } }),
+          prisma.knowledgeChange.findMany({ orderBy: { createdAt: 'asc' } }),
+        ]);
+
+        return NextResponse.json({
+          manifest: {
+            createdAt: new Date().toISOString(),
+            description: 'Knowledge archive before controlled full re-extraction',
+            excludes: ['Document.rawBytes', 'DocChunk.embedding'],
+            counts: {
+              documents: documents.length,
+              rules: rules.length,
+              activeRules: rules.filter((rule) => rule.status === 'ACTIVE').length,
+              qaPairs: qaPairs.length,
+              activeQaPairs: qaPairs.filter((qa) => qa.status === 'ACTIVE').length,
+              docChunks: docChunks.length,
+              domains: domains.length,
+              stagedExtractions: stagedExtractions.length,
+              documentRevisions: documentRevisions.length,
+              knowledgeChanges: knowledgeChanges.length,
+            },
           },
+          documents,
+          rules,
+          qaPairs,
+          docChunks,
+          domains,
+          documentDomains,
+          ruleDomains,
+          qaDomains,
+          chunkDomains,
+          stagedExtractions,
+          documentRevisions,
+          knowledgeChanges,
         });
-        const total = await prisma.rule.count({ where: { status: 'ACTIVE' } });
-        return NextResponse.json({ rules, total, nextCursor: rules.length === lim ? rules[rules.length - 1].id : null });
+      }
+
+      case 'getAllRules': {
+        const {
+          offset = 0,
+          limit: lim = 50,
+          query,
+          status = 'ACTIVE',
+          confidenceFilter: ruleConfidenceFilter,
+          dateFrom: ruleDateFrom,
+          dateTo: ruleDateTo,
+          documentFilter: ruleDocumentFilter,
+          sort = 'code_asc',
+        } = body;
+
+        const ruleWhere: any = {};
+        if (status !== 'all') ruleWhere.status = status;
+
+        if (ruleConfidenceFilter === 'high') ruleWhere.confidence = { gte: 0.9 };
+        else if (ruleConfidenceFilter === 'medium') ruleWhere.confidence = { gte: 0.7, lt: 0.9 };
+        else if (ruleConfidenceFilter === 'low') ruleWhere.confidence = { lt: 0.7 };
+
+        if (ruleDateFrom || ruleDateTo) {
+          ruleWhere.createdAt = {
+            ...(ruleDateFrom && { gte: new Date(ruleDateFrom) }),
+            ...(ruleDateTo && { lte: new Date(`${ruleDateTo}T23:59:59.999Z`) }),
+          };
+        }
+
+        if (ruleDocumentFilter?.trim()) {
+          ruleWhere.document = { title: { contains: ruleDocumentFilter.trim(), mode: 'insensitive' } };
+        }
+
+        const trimmedQuery = typeof query === 'string' ? query.trim() : '';
+        if (trimmedQuery) {
+          const digits = trimmedQuery.match(/\d+/)?.[0];
+          const normalizedCode = digits ? `R-${digits}` : trimmedQuery;
+          ruleWhere.OR = [
+            { ruleCode: { contains: trimmedQuery, mode: 'insensitive' } },
+            ...(digits ? [{ ruleCode: { equals: normalizedCode, mode: 'insensitive' } }] : []),
+            { title: { contains: trimmedQuery, mode: 'insensitive' } },
+            { body: { contains: trimmedQuery, mode: 'insensitive' } },
+            { document: { title: { contains: trimmedQuery, mode: 'insensitive' } } },
+          ];
+        }
+
+        const orderBy =
+          sort === 'date_desc' ? { createdAt: 'desc' as const }
+          : sort === 'date_asc' ? { createdAt: 'asc' as const }
+          : sort === 'confidence_desc' ? { confidence: 'desc' as const }
+          : sort === 'confidence_asc' ? { confidence: 'asc' as const }
+          : sort === 'title_asc' ? { title: 'asc' as const }
+          : sort === 'title_desc' ? { title: 'desc' as const }
+          : { ruleCode: sort === 'code_desc' ? 'desc' as const : 'asc' as const };
+
+        const ruleSelect = {
+          id: true,
+          ruleCode: true,
+          title: true,
+          body: true,
+          confidence: true,
+          status: true,
+          createdAt: true,
+          updatedAt: true,
+          document: { select: { title: true, id: true } },
+          domains: { include: { domain: { select: { slug: true, title: true } } } },
+          _count: { select: { comments: true, favorites: true } },
+        };
+
+        const numericOffset = Number(offset) || 0;
+        const numericLimit = Number(lim) || 50;
+        let rules: any[] = [];
+        let total = 0;
+
+        if (sort === 'code_asc' || sort === 'code_desc') {
+          const allMatchingRules = await prisma.rule.findMany({
+            where: ruleWhere,
+            select: ruleSelect,
+          });
+          const sorted = allMatchingRules.sort((a, b) => {
+            const left = parseInt(a.ruleCode.replace(/\D/g, ''), 10) || 0;
+            const right = parseInt(b.ruleCode.replace(/\D/g, ''), 10) || 0;
+            return sort === 'code_desc' ? right - left : left - right;
+          });
+          total = sorted.length;
+          rules = sorted.slice(numericOffset, numericOffset + numericLimit);
+        } else {
+          const [pageRules, count] = await Promise.all([
+            prisma.rule.findMany({
+              where: ruleWhere,
+              orderBy,
+              skip: numericOffset,
+              take: numericLimit,
+              select: ruleSelect,
+            }),
+            prisma.rule.count({ where: ruleWhere }),
+          ]);
+          rules = pageRules;
+          total = count;
+        }
+
+        return NextResponse.json({
+          rules,
+          total,
+          nextOffset: numericOffset + rules.length < total ? numericOffset + rules.length : null,
+        });
       }
 
       case 'getAllPairs': {

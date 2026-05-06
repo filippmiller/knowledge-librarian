@@ -1,5 +1,6 @@
 import { createChatCompletion } from '@/lib/ai/chat-provider';
 import { generateEmbeddings } from '@/lib/openai';
+import { safelyEditTelegramRule } from './safe-rule-edit';
 import prisma from '@/lib/db';
 
 interface ParsedKnowledge {
@@ -176,7 +177,7 @@ export async function correctKnowledge(
   // Fetch existing rules with their full body for AI matching
   const existingRules = await prisma.rule.findMany({
     where: { status: 'ACTIVE' },
-    select: { id: true, ruleCode: true, title: true, body: true, documentId: true },
+    select: { id: true, ruleCode: true, title: true, body: true },
     take: 100,
     orderBy: { createdAt: 'desc' },
   });
@@ -210,6 +211,7 @@ export async function correctKnowledge(
 
   let updated = 0;
   const updatedCodes: string[] = [];
+  const skippedCodes: string[] = [];
 
   for (const update of (parsed.updates || [])) {
     if (!update.existingRuleCode) continue;
@@ -219,36 +221,18 @@ export async function correctKnowledge(
     );
     if (!existing) continue;
 
-    // 1. Update rule body IN-PLACE (keep same ruleCode!) + confidence=1.0 (human-verified)
-    await prisma.rule.update({
-      where: { id: existing.id },
-      data: {
-        title: update.newTitle || existing.title,
-        body: update.newBody,
-        confidence: 1.0,
-        sourceSpan: {
-          quote: text.slice(0, 200),
-          locationHint: `Изменено через Telegram (${correctedByTelegramId})`,
-        },
-        updatedAt: new Date(),
-      },
+    const result = await safelyEditTelegramRule({
+      ruleCode: existing.ruleCode,
+      newTitle: update.newTitle || existing.title,
+      newBody: update.newBody,
+      editedByTelegramId: correctedByTelegramId,
+      editSource: 'telegram_corrector',
     });
 
-    // 2. Update linked QA pairs to reflect new info
-    const linkedQAs = await prisma.qAPair.findMany({
-      where: { ruleId: existing.id, status: 'ACTIVE' },
-    });
-    for (const qa of linkedQAs) {
-      // Delete old QA and let new ones be created below
-      await prisma.qAPair.update({
-        where: { id: qa.id },
-        data: { status: 'DEPRECATED' },
-      });
-    }
-
-    // 3. Delete old chunks from the rule's document that may contain conflicting info
-    if (existing.documentId) {
-      await deleteConflictingChunks(existing.documentId, existing.body);
+    if (!result.ok) {
+      console.warn(`[knowledge-manager] Safe correction skipped for ${existing.ruleCode}: ${result.reason}`);
+      skippedCodes.push(existing.ruleCode);
+      continue;
     }
 
     updated++;
@@ -260,11 +244,20 @@ export async function correctKnowledge(
   const domainIds = await classifyDomainForText(text);
 
   for (const qa of (parsed.updatedQaPairs || [])) {
+    if (updatedCodes.length === 0) break;
+
+    const linkedRule = await prisma.rule.findFirst({
+      where: { ruleCode: { in: updatedCodes }, status: 'ACTIVE' },
+      select: { id: true, documentId: true, scenarioKey: true },
+    });
+
     const newQa = await prisma.qAPair.create({
       data: {
+        ruleId: linkedRule?.id || null,
+        documentId: linkedRule?.documentId || null,
+        scenarioKey: linkedRule?.scenarioKey || null,
         question: qa.question,
         answer: qa.answer,
-        ruleId: existingRules.find((r) => updatedCodes.includes(r.ruleCode))?.id || null,
       },
     });
     for (const domainId of domainIds) {
@@ -275,65 +268,18 @@ export async function correctKnowledge(
     qaPairsCreated++;
   }
 
-  // 5. Create a fresh chunk with the corrected information for search
-  if (updated > 0) {
-    // Build the corrected content for embedding
-    const correctedRules = (parsed.updates || [])
-      .filter((u) => u.existingRuleCode)
-      .map((u) => `${u.existingRuleCode}: ${u.newTitle}\n${u.newBody}`)
-      .join('\n\n');
-    await createKnowledgeChunk(correctedRules || text, domainIds);
-  }
-
   const parts: string[] = [];
   if (updated > 0) parts.push(`${updated} правил изменено (${updatedCodes.join(', ')})`);
   if (qaPairsCreated > 0) parts.push(`${qaPairsCreated} QA пар обновлено`);
+  if (skippedCodes.length > 0) {
+    parts.push(`пропущено без правки: ${skippedCodes.join(', ')} (нет безопасной синхронизации с документом)`);
+  }
 
   return {
     updated,
     created: 0,
     summary: parts.length > 0 ? parts.join(', ') : 'Подходящих правил не найдено',
   };
-}
-
-/**
- * Delete chunks from a document that contain text semantically similar to oldContent.
- * This prevents old conflicting information from appearing in search results.
- */
-async function deleteConflictingChunks(documentId: string, oldContent: string): Promise<number> {
-  // Find chunks from this document
-  const chunks = await prisma.docChunk.findMany({
-    where: { documentId },
-    select: { id: true, content: true },
-  });
-
-  // Extract key terms from old content for matching
-  const oldLower = oldContent.toLowerCase();
-  let deleted = 0;
-
-  for (const chunk of chunks) {
-    const chunkLower = chunk.content.toLowerCase();
-
-    // Delete chunk if it contains significant overlap with the old rule text
-    // (more than 30% of the old content's key phrases appear in the chunk)
-    const oldWords = oldLower.split(/\s+/).filter((w) => w.length > 3);
-    const matchCount = oldWords.filter((w) => chunkLower.includes(w)).length;
-    const matchRatio = oldWords.length > 0 ? matchCount / oldWords.length : 0;
-
-    if (matchRatio > 0.3) {
-      // Delete chunk domain links first
-      await prisma.chunkDomain.deleteMany({ where: { chunkId: chunk.id } });
-      // Delete the chunk
-      await prisma.docChunk.delete({ where: { id: chunk.id } });
-      deleted++;
-    }
-  }
-
-  if (deleted > 0) {
-    console.log(`[knowledge-manager] Deleted ${deleted} conflicting chunks from document ${documentId}`);
-  }
-
-  return deleted;
 }
 
 async function getNextRuleCode(): Promise<number> {

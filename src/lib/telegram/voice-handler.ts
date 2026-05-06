@@ -4,6 +4,7 @@ import type { TelegramMessage } from './telegram-api';
 import type { TelegramUserInfo } from './access-control';
 import { isAdmin, isSuperAdmin } from './access-control';
 import { addKnowledge, correctKnowledge } from './knowledge-manager';
+import { safelyEditTelegramRule } from './safe-rule-edit';
 import { answerQuestionEnhanced } from '@/lib/ai/enhanced-answering-engine';
 import { getOrCreateSession, saveChatMessage } from '@/lib/ai/answering-engine';
 import { formatAnswerResponse } from './commands';
@@ -66,41 +67,18 @@ export async function handleVoiceMessage(
         }
 
         await sendTypingIndicator(chatId);
-
-        await prisma.rule.update({ where: { id: existing.id }, data: { status: 'SUPERSEDED' } });
-
-        const allCodes = await prisma.rule.findMany({
-          where: { ruleCode: { startsWith: 'R-' } },
-          select: { ruleCode: true },
+        const result = await safelyEditTelegramRule({
+          ruleCode: code,
+          newBody,
+          editedByTelegramId: user.telegramId,
+          editSource: 'telegram_voice',
         });
-        const maxNum = allCodes.reduce((max, r) => {
-          const n = parseInt(r.ruleCode.replace(/^R-/i, '')) || 0;
-          return n > max ? n : max;
-        }, 0);
-        const newCode = `R-${maxNum + 1}`;
-
-        const newRule = await prisma.rule.create({
-          data: {
-            ruleCode: newCode,
-            title: existing.title,
-            body: newBody,
-            confidence: 1.0,
-            documentId: existing.documentId,
-            supersedesRuleId: existing.id,
-            sourceSpan: { quote: newBody.slice(0, 200), locationHint: 'Отредактировано голосом' },
-          },
-        });
-
-        const domainLinks = await prisma.ruleDomain.findMany({ where: { ruleId: existing.id } });
-        for (const link of domainLinks) {
-          await prisma.ruleDomain.create({
-            data: { ruleId: newRule.id, domainId: link.domainId, confidence: link.confidence },
-          });
-        }
 
         await sendMessage(
           chatId,
-          `✅ Правило обновлено голосом.\n\nСтарое: ${code} (SUPERSEDED)\nНовое: ${newCode}\n\n${existing.title}\n${newBody}`
+          result.ok
+            ? `✅ Правило обновлено голосом.\n\n${result.summary}\n\n${existing.title}\n${newBody}`
+            : `❌ ${result.summary}`
         );
         return;
       }

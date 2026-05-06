@@ -59,6 +59,22 @@ export async function commitDocumentKnowledge(documentId: string): Promise<Commi
   const domainIds: string[] = [];
 
   console.log(`[COMMIT] Processing ${verifiedItems.length} verified items`);
+  const rules = verifiedItems.filter((i) => i.itemType === 'RULE');
+  const qaPairs = verifiedItems.filter((i) => i.itemType === 'QA_PAIR');
+  const chunks = verifiedItems.filter((i) => i.itemType === 'CHUNK');
+
+  const activeExistingRules = rules.length > 0
+    ? await prisma.rule.findMany({
+        where: { documentId, status: 'ACTIVE' },
+        select: { id: true, ruleCode: true, title: true },
+      })
+    : [];
+  const activeExistingQaPairs = qaPairs.length > 0
+    ? await prisma.qAPair.findMany({
+        where: { documentId, status: 'ACTIVE' },
+        select: { id: true },
+      })
+    : [];
 
   // Process domain assignments
   const domainAssignments = verifiedItems.filter((i) => i.itemType === 'DOMAIN_ASSIGNMENT');
@@ -121,9 +137,30 @@ export async function commitDocumentKnowledge(documentId: string): Promise<Commi
 
   const uniqueDomainIds = [...new Set(domainIds)];
   const ruleCodeToId = new Map<string, string>();
+  const stagedCodeToFinalCode = new Map<string, string>();
+  const scenarioKey = document.scenarioKey;
+
+  if (activeExistingRules.length > 0) {
+    await prisma.rule.updateMany({
+      where: { documentId, status: 'ACTIVE' },
+      data: { status: 'SUPERSEDED' },
+    });
+  }
+
+  if (activeExistingQaPairs.length > 0) {
+    await prisma.qAPair.updateMany({
+      where: { documentId, status: 'ACTIVE' },
+      data: { status: 'SUPERSEDED' },
+    });
+  }
+
+  if (chunks.length > 0) {
+    await prisma.docChunk.deleteMany({ where: { documentId } });
+  }
+
+  let nextRuleNumber = await getNextRuleNumber();
 
   // Process rules
-  const rules = verifiedItems.filter((i) => i.itemType === 'RULE');
   for (const item of rules) {
     const data = item.data as {
       ruleCode: string;
@@ -132,19 +169,27 @@ export async function commitDocumentKnowledge(documentId: string): Promise<Commi
       confidence: number;
       sourceSpan: { quote: string; locationHint: string };
     };
+    const finalRuleCode = `R-${nextRuleNumber++}`;
+    stagedCodeToFinalCode.set(data.ruleCode, finalRuleCode);
 
     const created = await prisma.rule.create({
       data: {
         documentId,
-        ruleCode: data.ruleCode,
+        ruleCode: finalRuleCode,
         title: data.title,
         body: data.body,
         confidence: data.confidence,
-        sourceSpan: data.sourceSpan,
+        sourceSpan: {
+          ...data.sourceSpan,
+          stagedRuleCode: data.ruleCode,
+          committedFromStagedAt: new Date().toISOString(),
+          supersededRuleCodes: activeExistingRules.map((rule) => rule.ruleCode),
+        },
+        scenarioKey,
       },
     });
 
-    ruleCodeToId.set(data.ruleCode, created.id);
+    ruleCodeToId.set(finalRuleCode, created.id);
 
     for (const domainId of uniqueDomainIds) {
       await prisma.ruleDomain.upsert({
@@ -158,7 +203,6 @@ export async function commitDocumentKnowledge(documentId: string): Promise<Commi
   }
 
   // Process QA pairs
-  const qaPairs = verifiedItems.filter((i) => i.itemType === 'QA_PAIR');
   for (const item of qaPairs) {
     const data = item.data as {
       question: string;
@@ -166,7 +210,8 @@ export async function commitDocumentKnowledge(documentId: string): Promise<Commi
       linkedRuleCode: string | null;
     };
 
-    const ruleId = data.linkedRuleCode ? ruleCodeToId.get(data.linkedRuleCode) : null;
+    const finalLinkedRuleCode = data.linkedRuleCode ? stagedCodeToFinalCode.get(data.linkedRuleCode) ?? data.linkedRuleCode : null;
+    const ruleId = finalLinkedRuleCode ? ruleCodeToId.get(finalLinkedRuleCode) : null;
 
     const created = await prisma.qAPair.create({
       data: {
@@ -174,6 +219,7 @@ export async function commitDocumentKnowledge(documentId: string): Promise<Commi
         ruleId: ruleId || null,
         question: data.question,
         answer: data.answer,
+        scenarioKey,
       },
     });
 
@@ -207,7 +253,6 @@ export async function commitDocumentKnowledge(documentId: string): Promise<Commi
   }
 
   // Process chunks in batches
-  const chunks = verifiedItems.filter((i) => i.itemType === 'CHUNK');
   const CHUNK_BATCH_SIZE = 5;
 
   for (let batchStart = 0; batchStart < chunks.length; batchStart += CHUNK_BATCH_SIZE) {
@@ -230,6 +275,7 @@ export async function commitDocumentKnowledge(documentId: string): Promise<Commi
           content: data.content,
           embedding: batchEmbeddings[i],
           metadata: data.metadata,
+          scenarioKey,
         },
       });
 
@@ -259,4 +305,16 @@ export async function commitDocumentKnowledge(documentId: string): Promise<Commi
     message: 'Данные успешно сохранены',
     results,
   };
+}
+
+async function getNextRuleNumber(): Promise<number> {
+  const rules = await prisma.rule.findMany({
+    where: { ruleCode: { startsWith: 'R-' } },
+    select: { ruleCode: true },
+  });
+
+  return rules.reduce((max, rule) => {
+    const number = parseInt(rule.ruleCode.replace(/^R-/i, ''), 10);
+    return Number.isFinite(number) && number > max ? number : max;
+  }, 0) + 1;
 }
