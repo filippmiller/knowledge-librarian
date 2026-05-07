@@ -48,6 +48,27 @@ async function main() {
     'catalog-style ZAGS questions must be handled by the deterministic catalog bypass, not by classifier fail-open'
   );
 
+  const consularLegalization = await classifyScenario('для каких стран требуется консульская легализация?');
+  assert.equal(
+    consularLegalization.kind,
+    'knowledge_lookup',
+    'consular legalization materials are general knowledge docs, not apostille scenario leaves'
+  );
+
+  const leadChecklist = await classifyScenario('как заполнить лид сделку и бланк заказа?');
+  assert.equal(
+    leadChecklist.kind,
+    'knowledge_lookup',
+    'operational CRM checklist questions must use open knowledge lookup'
+  );
+
+  const apostilleReference = await classifyScenario('какие образовательные документы можно апостилировать?');
+  assert.equal(
+    apostilleReference.kind,
+    'knowledge_lookup',
+    'reference-style apostille questions should not ask for a filing authority first'
+  );
+
   console.log('verify-ai-behavior: ok');
 }
 

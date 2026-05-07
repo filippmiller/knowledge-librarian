@@ -168,12 +168,34 @@ function classifyScenarioDeterministically(question: string): ScenarioDecision |
   const text = question.toLowerCase().replace(/ё/g, 'е');
   const mentionsApostille = /апостил/.test(text);
   const mentionsZags = /загс/.test(text);
+  const mentionsConsularLegalization =
+    /консульск[а-яa-z]*\s+легализац|легализац[а-яa-z]*\s+.*консульск|(?:^|[^а-я])кл(?:[^а-я]|$)/.test(text);
+  const mentionsOperationalChecklist =
+    /(?:^|[^а-я])лид(?:а|е|ом|ы|ов)?(?:[^а-я]|$)|сделк|бланк|битрикс|bitrix|карточк[а-яa-z]*\s+(?:лид|сделк)/.test(text);
   const asksCatalog =
     /(?:какие|какой|назов|перечисл|список|виды|типы|можешь\s+.*назвать|что\s+есть)/.test(text)
     && /документ|свидетельств|справк/.test(text);
+  const asksReference =
+    /(?:что\s+нужно\s+знать|как\s+заполн|как\s+делать|что\s+делать|процедур|порядок|инструкц|чек\s*-?\s*лист|можно\s+апостилир|нельзя\s+апостилир|для\s+каких\s+стран|какие\s+страны|нужна\s+ли)/.test(text);
   const mentionsMinJustice = /мин\s*юст|минюст|(?:^|[^а-я])мю(?:[^а-я]|$)|министерств\w*\s+юстиц/.test(text);
   const asksCountryRequirement = /нуж\w*|требу\w*|став\w*|простав\w*|не\s+нуж/.test(text);
   const mentionsTreatyCountry = /(азербайджан|албани|армени|белорус|болгари|босни|венгри|грузи|казахстан|киргиз|куб|латви|литв|молдов|монголи|польш|румын|серби|словени|таджикистан|узбекистан|украин|хорвати|черногори|чехи|эстони)/.test(text);
+
+  if (mentionsConsularLegalization) {
+    return {
+      kind: 'knowledge_lookup',
+      label: 'Справочный поиск по консульской легализации',
+      reasoning: 'Вопрос про консульскую легализацию относится к общим материалам базы знаний, а не к сценарному дереву апостиля.',
+    };
+  }
+
+  if (mentionsOperationalChecklist) {
+    return {
+      kind: 'knowledge_lookup',
+      label: 'Справочный поиск по операционным чек-листам',
+      reasoning: 'Вопрос про лид, сделку или бланк должен идти в открытый поиск по базе знаний.',
+    };
+  }
 
   if (mentionsZags && asksCatalog && !mentionsApostille) {
     return {
@@ -185,8 +207,17 @@ function classifyScenarioDeterministically(question: string): ScenarioDecision |
 
   if (mentionsApostille && asksCountryRequirement && mentionsTreatyCountry) {
     return {
-      kind: 'out_of_scope',
+      kind: 'knowledge_lookup',
+      label: 'Справочный поиск по требованиям к апостилю',
       reasoning: 'Вопрос про необходимость апостиля для страны; нужен открытый поиск по базе, а не сценарий подачи в конкретное ведомство.',
+    };
+  }
+
+  if (mentionsApostille && asksReference && !mentionsMinJustice) {
+    return {
+      kind: 'knowledge_lookup',
+      label: 'Справочный поиск по апостилю',
+      reasoning: 'Справочный вопрос по апостилю должен использовать общие материалы базы знаний, если пользователь не выбирает конкретное ведомство подачи.',
     };
   }
 

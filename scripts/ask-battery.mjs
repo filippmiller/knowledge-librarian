@@ -1,7 +1,14 @@
 import fs from 'node:fs/promises';
 
 const BASE = 'https://avrora-library-production.up.railway.app';
-const AUTH = 'Basic ' + Buffer.from('filipp:Airbus380+').toString('base64');
+const ADMIN_USER = process.env.ADMIN_USER || 'filipp';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+
+if (!ADMIN_PASSWORD) {
+  throw new Error('ADMIN_PASSWORD environment variable is required');
+}
+
+const AUTH = 'Basic ' + Buffer.from(`${ADMIN_USER}:${ADMIN_PASSWORD}`).toString('base64');
 
 const TESTS = [
   { id: 'T1-single-word',     q: 'АПОСТИЛЬ',
