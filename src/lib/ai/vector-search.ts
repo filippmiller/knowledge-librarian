@@ -304,49 +304,77 @@ export async function searchByKeywords(
       LIMIT ${limit}
     `;
 
-    return results.map(r => ({
-      id: r.id,
-      content: r.content,
-      documentId: r.documentId,
-      similarity: Math.min(Number(r.rank) / 0.5, 1), // Normalize rank to 0-1
-    }));
+    if (results.length > 0) {
+      return results.map(r => ({
+        id: r.id,
+        content: r.content,
+        documentId: r.documentId,
+        similarity: Math.min(Number(r.rank) / 0.5, 1), // Normalize rank to 0-1
+      }));
+    }
   } catch {
-    // Fallback to simple ILIKE search if full-text fails
-    const searchTerms = query.split(/\s+/).filter(t => t.length > 2);
-    if (searchTerms.length === 0) return [];
-
-    const fallbackConditions: Prisma.DocChunkWhereInput[] = [
-      {
-        OR: searchTerms.map(term => ({
-          content: { contains: term, mode: 'insensitive' as const },
-        })),
-      },
-    ];
-    if (domainSlugs.length > 0) {
-      fallbackConditions.push({ domains: { some: { domain: { slug: { in: domainSlugs } } } } });
-    }
-    if (scenarioAncestors.length > 0) {
-      fallbackConditions.push({ OR: [{ scenarioKey: null }, { scenarioKey: { in: scenarioAncestors } }] });
-    }
-    const whereClause: Prisma.DocChunkWhereInput = { AND: fallbackConditions };
-
-    const chunks = await prisma.docChunk.findMany({
-      where: whereClause,
-      take: limit,
-      select: {
-        id: true,
-        content: true,
-        documentId: true,
-      },
-    });
-
-    return chunks.map((c, i) => ({
-      id: c.id,
-      content: c.content,
-      documentId: c.documentId,
-      similarity: 0.5 - (i * 0.05), // Decreasing scores
-    }));
+    return searchByKeywordTerms(query, domainSlugs, limit, scenarioAncestors);
   }
+
+  // PostgreSQL full-text search is strict about all lexemes in the query.
+  // If a user asks "для каких стран требуется КЛ", a chunk titled "страны,
+  // для которых нужна КЛ" can miss because "требуется" != "нужна". Fall back
+  // to OR-style term matching for recall.
+  return searchByKeywordTerms(query, domainSlugs, limit, scenarioAncestors);
+}
+
+async function searchByKeywordTerms(
+  query: string,
+  domainSlugs: string[] = [],
+  limit: number = 10,
+  scenarioAncestors: string[] = []
+): Promise<SearchResult[]> {
+  const searchTerms = query
+    .toLowerCase()
+    .replace(/[^\wа-яё\s]/gi, ' ')
+    .split(/\s+/)
+    .filter(t => t.length > 2);
+  if (searchTerms.length === 0) return [];
+
+  const fallbackConditions: Prisma.DocChunkWhereInput[] = [
+    {
+      OR: searchTerms.map(term => ({
+        content: { contains: term, mode: 'insensitive' as const },
+      })),
+    },
+  ];
+  if (domainSlugs.length > 0) {
+    fallbackConditions.push({ domains: { some: { domain: { slug: { in: domainSlugs } } } } });
+  }
+  if (scenarioAncestors.length > 0) {
+    fallbackConditions.push({ OR: [{ scenarioKey: null }, { scenarioKey: { in: scenarioAncestors } }] });
+  }
+  const whereClause: Prisma.DocChunkWhereInput = { AND: fallbackConditions };
+
+  const chunks = await prisma.docChunk.findMany({
+    where: whereClause,
+    take: Math.max(limit * 10, 50),
+    select: {
+      id: true,
+      content: true,
+      documentId: true,
+    },
+  });
+
+  const terms = [...new Set(searchTerms)];
+  return chunks
+    .map((chunk) => {
+      const text = chunk.content.toLowerCase().replace(/ё/g, 'е');
+      const hits = terms.filter((term) => text.includes(term.replace(/ё/g, 'е'))).length;
+      return {
+        id: chunk.id,
+        content: chunk.content,
+        documentId: chunk.documentId,
+        similarity: Math.min(0.15 + hits / Math.max(terms.length, 1), 1),
+      };
+    })
+    .sort((a, b) => b.similarity - a.similarity)
+    .slice(0, limit);
 }
 
 /**

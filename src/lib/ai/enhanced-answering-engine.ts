@@ -368,7 +368,11 @@ export async function answerQuestionEnhanced(
   const relevanceText = [question, ...expandedQueries.variants, ...entities.documentTypes, ...entities.services].join(' ');
 
   // Step 2: Build query list for multi-query retrieval
-  const allQueries = [question, ...expandedQueries.variants];
+  const allQueries = [
+    question,
+    ...expandedQueries.variants,
+    ...getDeterministicQueryVariants(question),
+  ];
   console.log('[enhanced-answering] Step 2: Built', allQueries.length, 'query variants');
 
   // Step 3: Run hybrid multi-query search (scenario-filtered, no domain
@@ -712,6 +716,22 @@ ${fixList}
   }
 
   return result;
+}
+
+function getDeterministicQueryVariants(question: string): string[] {
+  const text = question.toLowerCase().replace(/ё/g, 'е');
+  const variants: string[] = [];
+
+  if (
+    /консульск[а-яa-z]*\s+легализац|легализац[а-яa-z]*\s+.*консульск|(?:^|[^а-я])кл(?:[^а-я]|$)/.test(text) &&
+    /для\s+каких\s+стран|какие\s+страны|список\s+стран/.test(text)
+  ) {
+    variants.push(
+      'СПИСОК СТРАН, ДЛЯ КОТОРЫХ НУЖНА КОНСУЛЬСКАЯ ЛЕГАЛИЗАЦИЯ ДОКУМЕНТОВ'
+    );
+  }
+
+  return variants;
 }
 
 function generateClarificationQuestion(
