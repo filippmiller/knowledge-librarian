@@ -39,7 +39,7 @@ async function main() {
   const zagsCatalog = await classifyScenario('какие документы ЗАГС ты можешь мне назвать');
   assert.equal(
     zagsCatalog.kind,
-    'out_of_scope',
+    'knowledge_lookup',
     'catalog-style ZAGS questions must use open retrieval instead of the apostille region clarification'
   );
   assert.match(

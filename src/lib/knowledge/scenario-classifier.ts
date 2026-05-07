@@ -24,6 +24,7 @@ import {
 export type ScenarioDecision =
   | { kind: 'scenario_clear'; scenarioKey: ScenarioKey; scenarioLabel: string; confidence: number; reasoning?: string }
   | { kind: 'needs_clarification'; atNodeKey: ScenarioKey; disambiguation: Disambiguation; reasoning?: string }
+  | { kind: 'knowledge_lookup'; label: string; reasoning: string }
   | { kind: 'out_of_scope'; reasoning: string };
 
 /** Compact representation of the taxonomy for the LLM — just keys, labels,
@@ -176,7 +177,8 @@ function classifyScenarioDeterministically(question: string): ScenarioDecision |
 
   if (mentionsZags && asksCatalog && !mentionsApostille) {
     return {
-      kind: 'out_of_scope',
+      kind: 'knowledge_lookup',
+      label: 'Справочный поиск по базе знаний',
       reasoning: 'Справочный список документов ЗАГС должен идти в открытый поиск по базе, а не в региональную развилку апостиля.',
     };
   }

@@ -240,6 +240,56 @@ function selectContextChunks(
     .slice(0, maxChunks);
 }
 
+function extractSearchTerms(value: string): string[] {
+  const normalized = value
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[^\p{L}\p{N}\s()-]/gu, ' ');
+
+  const words = normalized
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter((word) => word.length >= 3);
+
+  const expanded = words.flatMap((word) => {
+    const variants = [word];
+    if (word.length >= 6) variants.push(word.slice(0, -1));
+    if (word.length >= 8) variants.push(word.slice(0, -2));
+    return variants;
+  });
+
+  return [...new Set(expanded)];
+}
+
+function scoreText(value: string, terms: string[]): number {
+  const text = value.toLowerCase().replace(/ё/g, 'е');
+  let score = 0;
+  for (const term of terms) {
+    if (!text.includes(term)) continue;
+    score += term.length >= 6 ? 3 : 1;
+    if (/загс|свидетельств|справк|документ|брак|рожд|смерт/.test(term)) {
+      score += 2;
+    }
+  }
+  return score;
+}
+
+function rankByQuestion<T>(
+  items: T[],
+  question: string,
+  getText: (item: T) => string,
+  getBoost: (item: T) => number = () => 0
+): T[] {
+  const terms = extractSearchTerms(question);
+  if (terms.length === 0) return items;
+
+  return items
+    .map((item) => ({ item, score: scoreText(getText(item), terms) + getBoost(item) }))
+    .filter(({ score }) => score > 0)
+    .sort((a, b) => b.score - a.score)
+    .map(({ item }) => item);
+}
+
 /**
  * Main enhanced answering function
  */
@@ -278,10 +328,20 @@ export async function answerQuestionEnhanced(
     return buildOutOfScopeResult(question, scenarioDecision);
   }
 
-  // From here on we have a concrete leaf scenario. Threading its ancestor
-  // chain into retrieval makes cross-scenario contamination impossible.
-  const scenarioAncestors = ancestorsOf(scenarioDecision.scenarioKey);
-  console.log('[enhanced-answering] Scenario-filtered retrieval:', scenarioAncestors.join(' > '));
+  const openKnowledgeLookup = scenarioDecision.kind === 'knowledge_lookup';
+  const scenarioAncestors = scenarioDecision.kind === 'scenario_clear'
+    ? ancestorsOf(scenarioDecision.scenarioKey)
+    : [];
+  const scenarioLabelForAnswer = scenarioDecision.kind === 'scenario_clear'
+    ? scenarioDecision.scenarioLabel
+    : scenarioDecision.label;
+  const scenarioKeyForAnswer = scenarioDecision.kind === 'scenario_clear'
+    ? scenarioDecision.scenarioKey
+    : undefined;
+  console.log(
+    '[enhanced-answering] Retrieval scope:',
+    openKnowledgeLookup ? 'open knowledge lookup' : scenarioAncestors.join(' > ')
+  );
 
   // Step 1: Expand query and extract entities in parallel (resilient - each can fail independently)
   console.log('[enhanced-answering] Step 1: Query expansion and intent classification...');
@@ -305,6 +365,7 @@ export async function answerQuestionEnhanced(
   if (entitiesResult.status === 'rejected') console.warn('[enhanced-answering] Entity extraction failed, using empty entities');
   if (intentSettled.status === 'rejected') console.warn('[enhanced-answering] Intent classification failed, using defaults');
   console.log('[enhanced-answering] Step 1 completed. Intent:', intentResult.intent, 'Domains:', intentResult.domains);
+  const relevanceText = [question, ...expandedQueries.variants, ...entities.documentTypes, ...entities.services].join(' ');
 
   // Step 2: Build query list for multi-query retrieval
   const allQueries = [question, ...expandedQueries.variants];
@@ -377,7 +438,7 @@ export async function answerQuestionEnhanced(
     : {};
   let rules;
   try {
-    rules = await prisma.rule.findMany({
+    const ruleCandidates = await prisma.rule.findMany({
       where: {
         status: 'ACTIVE',
         ...scenarioWhere,
@@ -385,9 +446,15 @@ export async function answerQuestionEnhanced(
       include: {
         document: { select: { title: true } },
       },
-      take: 10,
+      take: 100,
       orderBy: { confidence: 'desc' },
     });
+    rules = rankByQuestion(
+      ruleCandidates,
+      relevanceText,
+      (rule) => `${rule.ruleCode} ${rule.title} ${rule.body} ${rule.document?.title ?? ''}`,
+      (rule) => rule.confidence >= 1 ? 2 : 0
+    ).slice(0, 10);
     console.log('[enhanced-answering] Found', rules.length, 'rules');
   } catch (error) {
     console.error('[enhanced-answering] Step 5 (rules fetch) failed:', error);
@@ -397,13 +464,15 @@ export async function answerQuestionEnhanced(
   // Step 6: Get relevant Q&A pairs (scenario-filtered, no domain filter).
   let qaPairs;
   try {
-    qaPairs = await prisma.qAPair.findMany({
+    const qaCandidates = await prisma.qAPair.findMany({
       where: {
         status: 'ACTIVE',
         ...scenarioWhere,
       },
-      take: 5,
+      take: 100,
     });
+    qaPairs = rankByQuestion(qaCandidates, relevanceText, (qa) => `${qa.question} ${qa.answer}`)
+      .slice(0, 5);
     console.log('[enhanced-answering] Found', qaPairs.length, 'QA pairs');
   } catch (error) {
     console.error('[enhanced-answering] Step 6 (QA pairs fetch) failed:', error);
@@ -443,14 +512,15 @@ export async function answerQuestionEnhanced(
 
   // Step 9: Build context and generate answer
   console.log('[enhanced-answering] Step 9: Generating answer with confidence level:', confidenceLevel);
-  const context = buildEnhancedContext(contextChunks, rules, qaPairs, confidenceLevel);
+  const context = buildEnhancedContext(contextChunks, rules, qaPairs);
 
   // Declare the chosen scenario explicitly so the synthesizer knows the
   // frame. This amplifies the evidence-only contract: "all your citations
   // belong to {{scenarioLabel}} — don't mention any other scenario".
-  const scenarioPreamble =
-    `СЦЕНАРИЙ: ${scenarioDecision.scenarioLabel}  (ключ: ${scenarioDecision.scenarioKey})\n` +
-    `Все цитаты ниже относятся к этому сценарию. НЕ упоминай другие процедуры (например другие регионы или учреждения), даже если они существуют вообще.\n`;
+  const scenarioPreamble = openKnowledgeLookup
+    ? `СЦЕНАРИЙ: ${scenarioLabelForAnswer}\nВсе цитаты ниже найдены открытым поиском по базе знаний. Отвечай только по приведенным цитатам.\n`
+    : `СЦЕНАРИЙ: ${scenarioLabelForAnswer}  (ключ: ${scenarioKeyForAnswer})\n` +
+      `Все цитаты ниже относятся к этому сценарию. НЕ упоминай другие процедуры (например другие регионы или учреждения), даже если они существуют вообще.\n`;
 
   const systemPrompt = ENHANCED_ANSWERING_PROMPT;
 
@@ -490,7 +560,7 @@ ${confidenceLevel === 'insufficient'
   // to HallucinationLog for post-hoc analysis (which scenarios are worst,
   // does regeneration actually fix them, etc.).
   let consistency: ConsistencyReport | undefined;
-  let initialAnswerForLog = answer;
+  const initialAnswerForLog = answer;
   let regenerated = false;
   if (contextChunks.length > 0 && confidenceLevel !== 'insufficient') {
     try {
@@ -542,7 +612,7 @@ ${fixList}
           data: {
             sessionId: sessionId ?? null,
             question,
-            scenarioKey: scenarioDecision.scenarioKey,
+            scenarioKey: scenarioKeyForAnswer ?? null,
             initialAnswer: initialAnswerForLog,
             regeneratedAnswer: regenerated ? answer : null,
             unsupportedClaims: consistency.unsupported as unknown as object,
@@ -616,8 +686,8 @@ ${fixList}
     clarificationQuestion,
     primarySource,
     supplementarySources,
-    scenarioKey: scenarioDecision.scenarioKey,
-    scenarioLabel: scenarioDecision.scenarioLabel,
+    scenarioKey: scenarioKeyForAnswer,
+    scenarioLabel: scenarioLabelForAnswer,
   };
 
   if (includeDebug) {
@@ -662,8 +732,7 @@ function generateClarificationQuestion(
 function buildEnhancedContext(
   chunks: HybridSearchResult[],
   rules: { ruleCode: string; title: string; body: string }[],
-  qaPairs: { question: string; answer: string }[],
-  confidenceLevel: string
+  qaPairs: { question: string; answer: string }[]
 ): string {
   let context = '';
 
