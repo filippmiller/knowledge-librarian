@@ -58,3 +58,7 @@ service-account*.json
 sessions/
 logs/
 *.log
+
+# local agent/tool state and upload diagnostics
+.serena/
+tmp-upload/
