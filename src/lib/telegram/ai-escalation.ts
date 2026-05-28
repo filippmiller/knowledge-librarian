@@ -35,6 +35,8 @@ export async function escalateUnconvincingAIAnswer(params: {
           confidence: params.result.confidence,
           confidenceLevel: params.result.confidenceLevel,
           needsClarification: params.result.needsClarification,
+          answerSource: params.result.answerSource,
+          requiresHumanReview: params.result.requiresHumanReview,
           citations: params.result.citations,
           scenarioKey: params.result.scenarioKey,
           scenarioLabel: params.result.scenarioLabel,
@@ -65,6 +67,12 @@ function getEscalationReasons(result: EnhancedAnswerResult): string[] {
   }
   if (result.needsClarification || result.clarificationQuestion || result.scenarioClarification) {
     reasons.push('ИИ запросил уточнение');
+  }
+  if (result.answerSource === 'general_ai') {
+    reasons.push('ответ из общего знания ИИ');
+  }
+  if (result.requiresHumanReview) {
+    reasons.push('нужна ручная проверка');
   }
   const hasSource =
     result.citations.length > 0 ||
@@ -111,6 +119,7 @@ function buildSuperAdminMessage(params: {
     '',
     `Ответ: ${params.result.answer.slice(0, 1200)}`,
     '',
+    params.result.answerSource ? `Источник ответа: ${params.result.answerSource}` : undefined,
     `Уверенность: ${Math.round(params.result.confidence * 100)}% (${params.result.confidenceLevel})`,
   ].filter(Boolean).join('\n');
 }

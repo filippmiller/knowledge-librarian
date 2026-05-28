@@ -77,6 +77,8 @@ export interface EnhancedAnswerResult {
     prompt: string;
     options: Array<{ id: string; label: string; targetScenarioKey: string }>;
   };
+  answerSource?: 'knowledge_base' | 'general_ai' | 'deterministic_guardrail';
+  requiresHumanReview?: boolean;
 }
 
 interface IntentClassification {
@@ -153,6 +155,26 @@ const ENHANCED_ANSWERING_PROMPT = `Ты — ИИ-библиотекарь зна
 Все три типа источника (правила, Q&A, фрагменты документов) — равнозначные цитаты из базы знаний. Фрагменты документов — наиболее полный и точный источник; правила — извлечённые ключевые факты; Q&A — уже сформулированные готовые ответы.
 
 Если по конкретному аспекту вопроса НЕТ ни одной цитаты — скажи это прямо ("в базе знаний не указано, уточните у …"), НЕ ВЫДУМЫВАЙ.`;
+
+const GENERAL_KNOWLEDGE_FALLBACK_PROMPT = `Ты — экспертный помощник бюро переводов.
+
+База знаний не дала прямого уверенного ответа. Используй ОБЩЕЕ профессиональное знание только для вопросов по услугам бюро: апостиль, легализация, нотариальные документы, ЗАГС, МВД, переводы.
+
+Правила:
+- Не выдумывай адреса, телефоны, цены, сроки и графики.
+- Если вопрос юридически или операционно зависит от типа документа, прямо назови условие.
+- Если уверенности нет, скажи, что нужен ручной разбор.
+- Отвечай кратко и практически.
+- Не представляй ответ как факт из базы знаний.
+
+Ответ СТРОГО JSON:
+{
+  "canAnswer": true | false,
+  "answer": "краткий ответ пользователю",
+  "confidence": 0.0,
+  "requiresHumanReview": true | false,
+  "reasoning": "коротко почему"
+}`;
 
 async function classifyIntent(question: string): Promise<IntentClassification> {
   const { createChatCompletion, normalizeJsonResponse } = await import('@/lib/ai/chat-provider');
@@ -320,11 +342,20 @@ export async function answerQuestionEnhanced(
   // and return a structured clarification response. The mini-app renders this
   // as buttons (Пачка B); legacy clients see the prompt text in `answer`.
   if (scenarioDecision.kind === 'needs_clarification') {
+    const guardrail = buildDeterministicGuardrailResult(question);
+    if (guardrail) return guardrail;
     return buildClarificationResult(question, scenarioDecision);
   }
 
   // Short-circuit: out of scope → honest "no data" result, no LLM synthesis.
   if (scenarioDecision.kind === 'out_of_scope') {
+    const guardrail = buildDeterministicGuardrailResult(question);
+    if (guardrail) return guardrail;
+
+    if (shouldUseGeneralKnowledgeFallback(question)) {
+      return answerFromGeneralKnowledgeFallback(question, scenarioDecision.reasoning);
+    }
+
     return buildOutOfScopeResult(question, scenarioDecision);
   }
 
@@ -518,6 +549,16 @@ export async function answerQuestionEnhanced(
   console.log('[enhanced-answering] Step 9: Generating answer with confidence level:', confidenceLevel);
   const context = buildEnhancedContext(contextChunks, rules, qaPairs);
 
+  if (confidenceLevel === 'insufficient' && shouldUseGeneralKnowledgeFallback(question)) {
+    const guardrail = buildDeterministicGuardrailResult(question);
+    if (guardrail) return guardrail;
+
+    return answerFromGeneralKnowledgeFallback(
+      question,
+      `retrieval insufficient; scenario=${scenarioLabelForAnswer}; chunks=${contextChunks.length}; rules=${rules.length}; qa=${qaPairs.length}`
+    );
+  }
+
   // Declare the chosen scenario explicitly so the synthesizer knows the
   // frame. This amplifies the evidence-only contract: "all your citations
   // belong to {{scenarioLabel}} — don't mention any other scenario".
@@ -692,6 +733,7 @@ ${fixList}
     supplementarySources,
     scenarioKey: scenarioKeyForAnswer,
     scenarioLabel: scenarioLabelForAnswer,
+    answerSource: 'knowledge_base',
   };
 
   if (includeDebug) {
@@ -716,6 +758,153 @@ ${fixList}
   }
 
   return result;
+}
+
+function buildDeterministicGuardrailResult(question: string): EnhancedAnswerResult | null {
+  const text = normalizeRussianText(question);
+  const mentionsApostille = /апостил/.test(text);
+  const mentionsSpb = /санкт\s*петербург|петербург|(?:^|[^а-я])спб(?:[^а-я]|$)/.test(text);
+  const mentionsMoscow = /москв/.test(text);
+  const asksHowOrCan =
+    /как|можн|нельзя|получится|сдела|постав|простав|подат|оформ/.test(text);
+  const mentionsEducation =
+    /образован|диплом|аттестат|вуз|университет|колледж|школ/.test(text);
+
+  if (!mentionsApostille || !mentionsSpb || !mentionsMoscow || !asksHowOrCan || mentionsEducation) {
+    return null;
+  }
+
+  return {
+    answer: [
+      'Никак: если документ выдан в Москве, апостиль на оригинал в Санкт-Петербурге поставить нельзя.',
+      '',
+      'Ориентир такой: обычные документы ЗАГС, МВД и документы для Минюста подаются по месту выдачи/составления документа. Московский документ нужно апостилировать в Москве.',
+      '',
+      'В Санкт-Петербурге можно разбирать только отдельный альтернативный вариант, если принимающая сторона согласна на апостиль не на оригинал, а на нотариальную копию/нотариальный документ. Это уже не “апостиль московского оригинала в СПб”, а другая процедура, её нужно проверять по требованиям страны/органа.',
+    ].join('\n'),
+    confidence: 0.9,
+    confidenceLevel: 'medium',
+    needsClarification: false,
+    citations: [
+      {
+        documentTitle: 'Операционный guardrail',
+        quote: 'Документы апостилируются по месту выдачи/составления; московский оригинал нельзя апостилировать в Санкт-Петербурге.',
+        relevanceScore: 0.9,
+      },
+    ],
+    domainsUsed: ['legal_compliance'],
+    queryAnalysis: {
+      originalQuery: question,
+      expandedQueries: [],
+      extractedEntities: {
+        dates: [],
+        prices: [],
+        documentTypes: ['документ'],
+        services: ['апостиль'],
+      },
+      isAmbiguous: false,
+    },
+    answerSource: 'deterministic_guardrail',
+    requiresHumanReview: false,
+  };
+}
+
+function shouldUseGeneralKnowledgeFallback(question: string): boolean {
+  const text = normalizeRussianText(question);
+  const mentionsKnownService =
+    /апостил|легализац|нотари|загс|мвд|минюст|перевод|доверенност|свидетельств|справк|документ/.test(text);
+  const asksPracticalQuestion =
+    /как|где|можн|нужн|нельзя|надо|что\s+делать|подат|оформ|постав|простав|апостилир|легализ/.test(text);
+
+  return mentionsKnownService && asksPracticalQuestion;
+}
+
+async function answerFromGeneralKnowledgeFallback(
+  question: string,
+  reason: string
+): Promise<EnhancedAnswerResult> {
+  let parsed: {
+    canAnswer?: unknown;
+    answer?: unknown;
+    confidence?: unknown;
+    requiresHumanReview?: unknown;
+    reasoning?: unknown;
+  } = {};
+
+  try {
+    const raw = await createChatCompletion({
+      messages: [
+        { role: 'system', content: GENERAL_KNOWLEDGE_FALLBACK_PROMPT },
+        {
+          role: 'user',
+          content: `Вопрос пользователя: ${question}\n\nПочему база знаний не ответила уверенно: ${reason}`,
+        },
+      ],
+      responseFormat: 'json_object',
+      temperature: 0,
+      maxTokens: 900,
+    });
+    if (raw) {
+      const { normalizeJsonResponse } = await import('@/lib/ai/chat-provider');
+      parsed = JSON.parse(normalizeJsonResponse(raw));
+    }
+  } catch (error) {
+    console.warn('[enhanced-answering] General knowledge fallback failed:', error);
+  }
+
+  const canAnswer = parsed.canAnswer === true;
+  const answer = typeof parsed.answer === 'string' ? parsed.answer.trim() : '';
+  const confidence = typeof parsed.confidence === 'number'
+    ? Math.max(0, Math.min(parsed.confidence, 0.65))
+    : 0.35;
+  const requiresHumanReview = parsed.requiresHumanReview !== false;
+
+  if (!canAnswer || answer.length < 10) {
+    return {
+      answer:
+        'В базе знаний нет прямого ответа, а общего знания ИИ недостаточно для уверенной консультации. Передайте вопрос на ручную проверку.',
+      confidence: 0.2,
+      confidenceLevel: 'low',
+      needsClarification: true,
+      suggestedClarification: 'Нужна ручная проверка специалистом.',
+      citations: [],
+      domainsUsed: ['legal_compliance'],
+      queryAnalysis: {
+        originalQuery: question,
+        expandedQueries: [],
+        extractedEntities: { dates: [], prices: [], documentTypes: [], services: [] },
+        isAmbiguous: false,
+      },
+      answerSource: 'general_ai',
+      requiresHumanReview: true,
+    };
+  }
+
+  return {
+    answer: [
+      answer,
+      '',
+      'Источник: общее знание ИИ, не подтверждено прямой цитатой из базы знаний. Рекомендуется проверить и добавить правило в базу.',
+    ].join('\n'),
+    confidence,
+    confidenceLevel: confidence >= 0.5 ? 'medium' : 'low',
+    needsClarification: requiresHumanReview,
+    suggestedClarification: requiresHumanReview ? 'Проверьте ответ и добавьте подтверждённое правило в базу знаний.' : undefined,
+    citations: [],
+    domainsUsed: ['legal_compliance'],
+    queryAnalysis: {
+      originalQuery: question,
+      expandedQueries: [],
+      extractedEntities: { dates: [], prices: [], documentTypes: [], services: [] },
+      isAmbiguous: false,
+    },
+    answerSource: 'general_ai',
+    requiresHumanReview,
+  };
+}
+
+function normalizeRussianText(value: string): string {
+  return value.toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim();
 }
 
 function getDeterministicQueryVariants(question: string): string[] {

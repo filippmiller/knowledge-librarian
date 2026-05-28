@@ -88,6 +88,7 @@ export function clearAnswerCache(): void {
 }
 
 function isCacheableAnswer(result: EnhancedAnswerResult): boolean {
+  if (result.answerSource === 'general_ai' || result.requiresHumanReview) return false;
   if (result.needsClarification || result.clarificationQuestion || result.scenarioClarification) return false;
   if (result.confidenceLevel === 'low' || result.confidenceLevel === 'insufficient') return false;
   return result.confidence >= 0.5;

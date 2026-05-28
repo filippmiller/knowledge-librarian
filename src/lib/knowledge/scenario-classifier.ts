@@ -178,8 +178,18 @@ function classifyScenarioDeterministically(question: string): ScenarioDecision |
   const asksReference =
     /(?:что\s+нужно\s+знать|как\s+заполн|как\s+делать|что\s+делать|процедур|порядок|инструкц|чек\s*-?\s*лист|можно\s+апостилир|нельзя\s+апостилир|для\s+каких\s+стран|какие\s+страны|нужна\s+ли)/.test(text);
   const mentionsMinJustice = /мин\s*юст|минюст|(?:^|[^а-я])мю(?:[^а-я]|$)|министерств\w*\s+юстиц/.test(text);
+  const mentionsSpb = /санкт\s*петербург|петербург|(?:^|[^а-я])спб(?:[^а-я]|$)/.test(text);
+  const mentionsMoscow = /москв/.test(text);
+  const mentionsEducation = /образован|диплом|аттестат|вуз|университет|колледж|школ/.test(text);
   const asksCountryRequirement = /нуж\w*|требу\w*|став\w*|простав\w*|не\s+нуж/.test(text);
   const mentionsTreatyCountry = /(азербайджан|албани|армени|белорус|болгари|босни|венгри|грузи|казахстан|киргиз|куб|латви|литв|молдов|монголи|польш|румын|серби|словени|таджикистан|узбекистан|украин|хорвати|черногори|чехи|эстони)/.test(text);
+
+  if (mentionsApostille && mentionsSpb && mentionsMoscow && !mentionsEducation) {
+    return {
+      kind: 'out_of_scope',
+      reasoning: 'Документ выдан в Москве, а СПб-сценарии покрывают только местные/ЛО документы; нужен guardrail по региону выдачи.',
+    };
+  }
 
   if (mentionsConsularLegalization) {
     return {

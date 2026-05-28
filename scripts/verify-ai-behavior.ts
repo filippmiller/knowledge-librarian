@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import type { EnhancedAnswerResult } from '../src/lib/ai/enhanced-answering-engine';
+import { answerQuestionEnhanced } from '../src/lib/ai/enhanced-answering-engine';
 import {
   clearAnswerCache,
   getCachedAnswer,
@@ -67,6 +68,27 @@ async function main() {
     apostilleReference.kind,
     'knowledge_lookup',
     'reference-style apostille questions should not ask for a filing authority first'
+  );
+
+  const moscowToSpbClassifier = await classifyScenario('Если документ выдан в Москве как его апостилировать в Санкт Петербурге?');
+  assert.equal(
+    moscowToSpbClassifier.kind,
+    'out_of_scope',
+    'Moscow-issued non-education documents must not be routed into СПб apostille scenarios'
+  );
+
+  const moscowToSpbAnswer = await answerQuestionEnhanced(
+    'Если документ выдан в Москве как его апостилировать в Санкт Петербурге?'
+  );
+  assert.equal(
+    moscowToSpbAnswer.answerSource,
+    'deterministic_guardrail',
+    'Moscow-issued document in СПб should be answered by the deterministic region guardrail'
+  );
+  assert.match(
+    moscowToSpbAnswer.answer,
+    /Никак|нельзя|Москв/i,
+    'guardrail answer must clearly say that a Moscow-issued original cannot be apostilled in Санкт-Петербурге'
   );
 
   console.log('verify-ai-behavior: ok');
