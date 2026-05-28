@@ -64,6 +64,11 @@ body (полное описание):
   - Если есть условия — перечисли все
   - Если это процедура — пронумеруй шаги
   - Если есть исключения — укажи явно
+  - НЕ создавай отдельное правило для числа/примера, если это число уже включено в более широкое правило
+  - НЕ превращай пример в самостоятельное обязательное правило, если в тексте он явно дан как пример
+  - Если фраза неоднозначна — добавь uncertainty, но НЕ формулируй её как жёсткое требование
+  - НЕ добавляй цели, причины и преимущества ("повышает вероятность", "предотвращает", "обязывает"), если они не сказаны прямо в тексте
+  - Если в источнике есть только действие, пиши только действие; объяснение добавляй только при прямой цитате цели/логики
 
 confidence:
   0.95–1.0 — конкретная цифра прямо в тексте
@@ -78,6 +83,15 @@ sourceSpan.locationHint: раздел или заголовок, где встр
 На каждое важное правило создай 1–2 QA пары.
 Вопрос — как спросил бы реальный сотрудник или клиент.
 Ответ — конкретный, без воды.
+Не создавай QA для каждого микрофакта, если один вопрос естественно покрывает группу связанных правил.
+
+═══ ДЕДУПЛИКАЦИЯ ═══
+
+Перед финальным JSON проверь себя:
+- если два правила отвечают на один и тот же вопрос сотрудника — объедини их
+- если одно правило является подчастью соседнего правила — оставь более полное
+- если правило начинается с "пример..." и только повторяет пример из соседнего правила — удали его
+- если источник не позволяет утверждать правило уверенно — перенеси это в uncertainties
 
 ═══ НЕЯСНОСТИ ═══
 
@@ -238,8 +252,14 @@ ${batch}
       }
 
       // Default optional fields the AI sometimes omits
-      const rules = batchResult.rules;
-      const qaPairs = Array.isArray(batchResult.qaPairs) ? batchResult.qaPairs : [];
+      const rules = pruneExtractedRules(batchResult.rules);
+      const removedRuleCodes = new Set(
+        batchResult.rules
+          .filter((rule) => !rules.some((kept) => kept.ruleCode === rule.ruleCode))
+          .map((rule) => rule.ruleCode)
+      );
+      const qaPairs = (Array.isArray(batchResult.qaPairs) ? batchResult.qaPairs : [])
+        .filter((qa) => !qa.linkedRuleCode || !removedRuleCodes.has(qa.linkedRuleCode));
       const uncertainties = Array.isArray(batchResult.uncertainties) ? batchResult.uncertainties : [];
 
       // Accumulate results
@@ -279,6 +299,58 @@ ${batch}
       uncertainties: allUncertainties,
     }
   };
+}
+
+function pruneExtractedRules(rules: ExtractedRuleStream[]): ExtractedRuleStream[] {
+  const kept: ExtractedRuleStream[] = [];
+  const seenQuotes = new Set<string>();
+  const seenBodies = new Set<string>();
+
+  for (const rule of rules) {
+    const quoteKey = normalizeForRuleCompare(rule.sourceSpan?.quote ?? '');
+    const bodyKey = normalizeForRuleCompare(`${rule.title} ${rule.body}`).slice(0, 320);
+
+    if (!rule.ruleCode || !rule.title?.trim() || !rule.body?.trim()) continue;
+    if (quoteKey && seenQuotes.has(quoteKey)) continue;
+    if (bodyKey && seenBodies.has(bodyKey)) continue;
+
+    if (isExampleOnlyDuplicate(rule, kept)) {
+      continue;
+    }
+
+    if (quoteKey) seenQuotes.add(quoteKey);
+    if (bodyKey) seenBodies.add(bodyKey);
+    kept.push(rule);
+  }
+
+  return kept;
+}
+
+function isExampleOnlyDuplicate(
+  rule: ExtractedRuleStream,
+  kept: ExtractedRuleStream[]
+): boolean {
+  const text = normalizeForRuleCompare(`${rule.title} ${rule.body}`);
+  if (!/(^| )пример( |:)|например/.test(text)) return false;
+
+  const quote = normalizeForRuleCompare(rule.sourceSpan?.quote ?? '');
+  if (quote.length === 0 || quote.length > 80) return false;
+
+  return kept.some((existing) => {
+    const existingText = normalizeForRuleCompare(
+      `${existing.title} ${existing.body} ${existing.sourceSpan?.quote ?? ''}`
+    );
+    return existingText.includes(quote);
+  });
+}
+
+function normalizeForRuleCompare(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[«»"“”]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 export async function getExistingRuleCodesForStream(): Promise<string[]> {

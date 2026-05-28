@@ -99,6 +99,34 @@ function hasDuplicateText(value: string, seen: Set<string>) {
   return false;
 }
 
+function normalizeForEvidence(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[«»"“”]/g, '')
+    .replace(/[.,;:!?()[\]]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function hasSourceEvidence(rawText: string, quote: string) {
+  const normalizedQuote = normalizeForEvidence(quote);
+  if (normalizedQuote.length < 20) return true;
+  const normalizedSource = normalizeForEvidence(rawText);
+  if (normalizedSource.includes(normalizedQuote)) return true;
+
+  const quoteParts = normalizedQuote
+    .split(/\.\.\.|…/u)
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 12);
+
+  if (quoteParts.length > 0) {
+    return quoteParts.every((part) => normalizedSource.includes(part));
+  }
+
+  return false;
+}
+
 async function resetDocumentKnowledge(documentId: string) {
   const qaPairs = await prisma.qAPair.findMany({
     where: { documentId },
@@ -301,6 +329,10 @@ async function reviewAndVerify(documentId: string, rawText: string) {
       if (!normalizeText(data.ruleCode) || title.length < 8 || body.length < 20 || quote.length < 5) {
         valid = false;
         issues.push({ severity: 'warning', message: `Rejected weak rule: ${normalizeText(data.ruleCode) || title}` });
+      }
+      if (quote && !hasSourceEvidence(rawText, quote)) {
+        valid = false;
+        issues.push({ severity: 'warning', message: `Rejected rule with unsupported quote: ${normalizeText(data.ruleCode) || title}` });
       }
       if (hasDuplicateText(`${title}\n${body}`, seenRules)) {
         valid = false;
