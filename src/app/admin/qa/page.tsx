@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
@@ -28,7 +28,7 @@ export default function QAPage() {
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('ACTIVE');
 
-  async function fetchQAPairs() {
+  const fetchQAPairs = useCallback(async () => {
     try {
       const response = await fetch(`/api/qa?status=${statusFilter}`);
       const data = await response.json();
@@ -38,12 +38,12 @@ export default function QAPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [statusFilter]);
 
   useEffect(() => {
     setLoading(true);
     fetchQAPairs();
-  }, [statusFilter]);
+  }, [fetchQAPairs]);
 
   if (loading) {
     return <div className="text-center py-8">Загрузка...</div>;

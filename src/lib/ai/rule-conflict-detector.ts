@@ -306,7 +306,7 @@ function parseRussianDate(dateStr: string): Date | null {
   // Try numeric formats
   const numericMatch = dateStr.match(/(\d{1,4})[\.\/\-](\d{1,2})[\.\/\-](\d{2,4})/);
   if (numericMatch) {
-    let [, first, second, third] = numericMatch;
+    const [, first, second, third] = numericMatch;
     let year: number, month: number, day: number;
 
     if (first.length === 4) {

@@ -2,7 +2,7 @@ import { downloadFile, sendMessage, sendTypingIndicator, sendUploadingIndicator 
 import type { TelegramMessage } from './telegram-api';
 import type { TelegramUserInfo } from './access-control';
 import { parseDocument, detectMimeType } from '@/lib/document-parser';
-import { createChatCompletion, normalizeJsonResponse } from '@/lib/ai/chat-provider';
+import { createChatCompletion } from '@/lib/ai/chat-provider';
 import { generateEmbeddings } from '@/lib/openai';
 import prisma from '@/lib/db';
 
@@ -35,7 +35,7 @@ interface KnowledgeExtractResult {
  */
 export async function handleDocumentUpload(
   message: TelegramMessage,
-  user: TelegramUserInfo
+  _user: TelegramUserInfo
 ): Promise<void> {
   const chatId = message.chat.id;
 
@@ -100,7 +100,7 @@ export async function handleDocumentUpload(
     // Phase 2: Knowledge extraction (non-streaming)
     await sendTypingIndicator(chatId);
     await sendMessage(chatId, 'Фаза 2/3: Извлечение знаний...');
-    const { rulesCreated, qaPairsCreated, ruleCodeToId, rulesList, qaPairsList } = await extractKnowledge(rawText, document.id, domainIds);
+    const { rulesCreated, qaPairsCreated, rulesList, qaPairsList } = await extractKnowledge(rawText, document.id, domainIds);
 
     // Phase 3: Chunking + embeddings
     await sendTypingIndicator(chatId);

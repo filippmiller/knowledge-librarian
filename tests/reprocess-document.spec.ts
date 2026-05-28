@@ -1,4 +1,9 @@
-import { test, expect } from '@playwright/test';
+import { test } from '@playwright/test';
+
+test.skip(
+  !process.env.RUN_PRODUCTION_MUTATION_TESTS,
+  'Production mutation test: reprocesses existing documents. Set RUN_PRODUCTION_MUTATION_TESTS=1 to run.'
+);
 
 test.describe('Reprocess Document', () => {
   test('should reprocess document using streaming interface', async ({ page }) => {

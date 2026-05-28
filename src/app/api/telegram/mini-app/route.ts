@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import type { Prisma } from '@prisma/client';
 import { verifyTelegramWebAppData } from '@/lib/telegram/mini-app-auth';
 import { createProcessingToken } from '@/lib/crypto';
 import prisma from '@/lib/db';
@@ -75,11 +76,11 @@ export async function GET(request: NextRequest) {
 
     // Get user-specific data only if authenticated
     let preferences = null;
-    let favorites: any[] = [];
-    let notifications: any[] = [];
+    let favorites: unknown[] = [];
+    let notifications: unknown[] = [];
     let unreadCount = 0;
-    let subscriptions: any[] = [];
-    let history: any[] = [];
+    let subscriptions: unknown[] = [];
+    let history: unknown[] = [];
 
     if (telegramId) {
       // Get user preferences
@@ -205,17 +206,17 @@ export async function POST(request: NextRequest) {
         const { query, confidenceFilter, domainFilter, dateFrom, dateTo, documentFilter } = body;
         if (!query && !domainFilter && !documentFilter) return NextResponse.json({ rules: [], qaPairs: [], total: 0 });
 
-        let confidenceWhere: any = {};
+        let confidenceWhere: Prisma.RuleWhereInput = {};
         if (confidenceFilter === 'high') confidenceWhere = { confidence: { gte: 0.9 } };
         else if (confidenceFilter === 'medium') confidenceWhere = { confidence: { gte: 0.7, lt: 0.9 } };
         else if (confidenceFilter === 'low') confidenceWhere = { confidence: { lt: 0.7 } };
 
-        let domainWhere: any = {};
+        let domainWhere: Prisma.RuleWhereInput = {};
         if (domainFilter) {
           domainWhere = { domains: { some: { domain: { slug: domainFilter } } } };
         }
 
-        let dateWhere: any = {};
+        let dateWhere: Prisma.RuleWhereInput = {};
         if (dateFrom || dateTo) {
           dateWhere = {
             createdAt: {
@@ -225,7 +226,7 @@ export async function POST(request: NextRequest) {
           };
         }
 
-        let documentWhere: any = {};
+        let documentWhere: Prisma.RuleWhereInput = {};
         if (documentFilter) {
           documentWhere = { document: { title: { contains: documentFilter, mode: 'insensitive' } } };
         }
@@ -243,7 +244,7 @@ export async function POST(request: NextRequest) {
           _count: { select: { comments: true, favorites: true } },
         };
 
-        const baseWhere = {
+        const baseWhere: Prisma.RuleWhereInput = {
           status: 'ACTIVE' as const,
           ...confidenceWhere,
           ...domainWhere,
@@ -251,7 +252,7 @@ export async function POST(request: NextRequest) {
           ...documentWhere,
         };
 
-        let rules: any[] = [];
+        let rules: Array<{ id: string }> = [];
 
         if (query?.trim()) {
           // Split query into meaningful words (>2 chars) for fallback strategies
@@ -317,7 +318,6 @@ export async function POST(request: NextRequest) {
           ]);
 
           // Merge: FTS results first (by confidence), then add any ILIKE-only hits
-          const ilikeById = new Map(ilikeRules.map(r => [r.id, r]));
           if (ftsIds.length > 0) {
             const ftsRules = await prisma.rule.findMany({
               where: { id: { in: ftsIds }, ...baseWhere },
@@ -343,7 +343,7 @@ export async function POST(request: NextRequest) {
         }
 
         // QA pairs — same FTS strategy
-        let qaPairs: any[] = [];
+        let qaPairs: Array<{ id: string }> = [];
         if (query?.trim()) {
           const queryWords = query.split(/\s+/).filter((w: string) => w.length > 2);
           let qaMatchedIds: string[] = [];

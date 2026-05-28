@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { createChatCompletion } from '@/lib/ai/chat-provider';
 import { generateEmbedding } from '@/lib/openai';
 
@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic';
  * Health check endpoint for AI providers
  * Tests both Anthropic (chat) and OpenAI (embeddings)
  */
-export async function GET(request: NextRequest) {
+export async function GET() {
   const results: {
     anthropic?: { status: string; error?: string; model?: string };
     openai?: { status: string; error?: string; model?: string };

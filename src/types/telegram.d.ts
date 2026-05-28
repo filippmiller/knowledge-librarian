@@ -21,8 +21,8 @@ export interface TelegramWebApp {
       language_code?: string;
       is_premium?: boolean;
     };
-    receiver?: any;
-    chat?: any;
+    receiver?: unknown;
+    chat?: unknown;
     start_param?: string;
     can_send_after?: number;
     auth_date: number;
@@ -71,8 +71,8 @@ export interface TelegramWebApp {
   setBackgroundColor(color: string): void;
   enableVerticalSwipes(): void;
   disableVerticalSwipes(): void;
-  onEvent(event: TelegramEventType, callback: (...args: any[]) => void): void;
-  offEvent(event: TelegramEventType, callback: (...args: any[]) => void): void;
+  onEvent(event: TelegramEventType, callback: (...args: unknown[]) => void): void;
+  offEvent(event: TelegramEventType, callback: (...args: unknown[]) => void): void;
 }
 
 export type TelegramEventType =

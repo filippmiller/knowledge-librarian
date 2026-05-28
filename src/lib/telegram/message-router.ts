@@ -1,4 +1,4 @@
-import { sendMessage, sendTypingIndicator, sendWebAppButton, answerCallbackQuery } from './telegram-api';
+import { sendMessage, sendTypingIndicator, answerCallbackQuery } from './telegram-api';
 import type { TelegramUpdate, TelegramMessage, TelegramCallbackQuery } from './telegram-api';
 import { handleScenarioCallback } from './scenario-callback';
 import { checkAccess, isAdmin, isSuperAdmin } from './access-control';

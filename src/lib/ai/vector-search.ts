@@ -234,7 +234,7 @@ export async function searchSimilarChunks(
   if (usePgvector) {
     try {
       return await searchSimilarChunksPgvector(queryEmbedding, domainSlugs, limit, 0.3, scenarioAncestors);
-    } catch (error) {
+    } catch {
       // Fallback to in-memory if pgvector fails unexpectedly
       console.warn('[vector-search] Falling back to in-memory search due to pgvector error');
       return searchSimilarChunksInMemory(queryEmbedding, domainSlugs, limit, scenarioAncestors);

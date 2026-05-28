@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/db';
 import { requireAdminAuth } from '@/lib/auth';
 import { encrypt, decrypt, maskApiKey } from '@/lib/crypto';
-import OpenAI from 'openai';
 
 // GET - получить текущие настройки (без полного ключа)
 export async function GET(request: NextRequest): Promise<Response> {

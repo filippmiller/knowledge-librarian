@@ -212,7 +212,7 @@ export async function POST(request: NextRequest): Promise<Response> {
   }
 }
 
-async function processDocument(
+async function _processDocument(
   documentId: string,
   buffer: Buffer,
   mimeType: string,

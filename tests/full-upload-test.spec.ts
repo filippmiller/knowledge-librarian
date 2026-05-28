@@ -1,13 +1,25 @@
 import { test, expect } from '@playwright/test';
 import path from 'path';
 
+const adminUser = process.env.ADMIN_USER || 'filipp';
+const adminPassword = process.env.ADMIN_PASSWORD;
+
+test.skip(
+  !process.env.RUN_PRODUCTION_MUTATION_TESTS,
+  'Production mutation test: uploads/processes documents. Set RUN_PRODUCTION_MUTATION_TESTS=1 to run.'
+);
+test.skip(
+  process.env.RUN_PRODUCTION_MUTATION_TESTS === '1' && !adminPassword,
+  'ADMIN_PASSWORD is required for production mutation tests.'
+);
+
 // Full document upload and processing test with quality verification
 test.describe('Full Document Processing Test', () => {
   test.use({
     baseURL: 'https://avrora-library-production.up.railway.app',
     httpCredentials: {
-      username: 'filipp',
-      password: 'Airbus380+',
+      username: adminUser,
+      password: adminPassword ?? '',
     },
   });
 
@@ -130,7 +142,7 @@ test.describe('Full Document Processing Test', () => {
       await page.waitForSelector('text=COMPLETED', { timeout: 300000 }); // 5 min
       console.log('✓ Processing completed successfully!');
       processingCompleted = true;
-    } catch (error) {
+    } catch {
       console.log('⚠️ Completion status not found within timeout');
       
       // Check for error messages in the UI

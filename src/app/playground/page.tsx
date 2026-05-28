@@ -13,7 +13,6 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 
@@ -283,7 +282,7 @@ export default function PlaygroundPage() {
                             </span>
                           )}
                         </div>
-                        <p className="mt-2 italic text-slate-600">"{citation.quote}"</p>
+                        <p className="mt-2 italic text-slate-600">&quot;{citation.quote}&quot;</p>
                       </div>
                     ))}
                   </CardContent>

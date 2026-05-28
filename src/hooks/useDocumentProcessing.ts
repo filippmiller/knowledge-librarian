@@ -268,6 +268,7 @@ export function useDocumentProcessing(documentId: string) {
 
   // Store token for reconnections
   const tokenRef = useRef<string | null>(null);
+  const connectEventSourceRef = useRef<((isReconnection?: boolean) => Promise<void>) | null>(null);
 
   const fetchProcessingToken = useCallback(async (): Promise<string | null> => {
     try {
@@ -531,7 +532,7 @@ export function useDocumentProcessing(documentId: string) {
           // Double-check before reconnecting
           if (!isCompleteRef.current && !hasErrorRef.current && !isStoppedRef.current) {
             addLog('INFO', 'Переподключение (продолжение с сохранённого прогресса)...');
-            await connectEventSource(true); // isReconnection = true to use resume mode
+            await connectEventSourceRef.current?.(true); // isReconnection = true to use resume mode
           } else {
             addLog('INFO', 'Переподключение отменено - статус изменился');
           }
@@ -550,7 +551,11 @@ export function useDocumentProcessing(documentId: string) {
 
       eventSource.close();
     };
-  }, [documentId, addLog]);
+  }, [documentId, addLog, fetchProcessingToken]);
+
+  useEffect(() => {
+    connectEventSourceRef.current = connectEventSource;
+  }, [connectEventSource]);
 
   // Guard against React Strict Mode double-firing and concurrent starts
   const isStartingRef = useRef(false);

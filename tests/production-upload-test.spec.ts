@@ -1,14 +1,25 @@
 import { test, expect } from '@playwright/test';
 import path from 'path';
 
+const adminUser = process.env.ADMIN_USER || 'filipp';
+const adminPassword = process.env.ADMIN_PASSWORD;
+
+test.skip(
+  !process.env.RUN_PRODUCTION_MUTATION_TESTS,
+  'Production mutation test: uploads/processes documents. Set RUN_PRODUCTION_MUTATION_TESTS=1 to run.'
+);
+test.skip(
+  process.env.RUN_PRODUCTION_MUTATION_TESTS === '1' && !adminPassword,
+  'ADMIN_PASSWORD is required for production mutation tests.'
+);
+
 // Production test for document upload and processing
 test.describe('Production Document Upload Test', () => {
   test.use({
     baseURL: 'https://avrora-library-production.up.railway.app',
-    // Set up HTTP Basic Auth (usernames from prisma/seed.ts)
     httpCredentials: {
-      username: 'filipp',
-      password: 'Airbus380+',
+      username: adminUser,
+      password: adminPassword ?? '',
     },
   });
 

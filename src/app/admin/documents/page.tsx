@@ -82,7 +82,7 @@ export default function DocumentsPage() {
     setToast({ message, type });
   }, []);
 
-  async function fetchDocuments() {
+  const fetchDocuments = useCallback(async () => {
     try {
       const response = await fetch('/api/documents');
       const data = await response.json();
@@ -93,14 +93,14 @@ export default function DocumentsPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [showToast]);
 
   useEffect(() => {
     fetchDocuments();
     // Refresh every 30 seconds to update statuses
     const interval = setInterval(fetchDocuments, 30000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchDocuments]);
 
   async function handleUpload(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -181,7 +181,7 @@ export default function DocumentsPage() {
           throw new Error('Failed to perform action');
         }
       }
-    } catch (error) {
+    } catch {
       showToast('Ошибка выполнения действия', 'error');
     }
   }
@@ -202,7 +202,7 @@ export default function DocumentsPage() {
       } else {
         throw new Error('Failed to perform bulk action');
       }
-    } catch (error) {
+    } catch {
       showToast('Ошибка выполнения действия', 'error');
     }
   }

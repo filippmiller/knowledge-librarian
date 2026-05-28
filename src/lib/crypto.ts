@@ -109,7 +109,7 @@ export function verifyProcessingToken(token: string, expectedDocumentId: string)
     }
     
     return { valid: true };
-  } catch (error) {
+  } catch {
     return { valid: false, error: 'Invalid token' };
   }
 }

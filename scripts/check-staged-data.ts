@@ -1,6 +1,10 @@
 // Script to check staged extraction data structure
 import prisma from '../src/lib/db';
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
 async function checkStagedData() {
   try {
     // Get the most recent document
@@ -37,7 +41,7 @@ async function checkStagedData() {
 
       // Check for missing or wrong fields
       if (item.itemType === 'QA_PAIR') {
-        const data = item.data as any;
+        const data = isRecord(item.data) ? item.data : {};
         console.log('\nQA_PAIR field check:');
         console.log('  has question:', 'question' in data);
         console.log('  has answer:', 'answer' in data);
@@ -45,12 +49,12 @@ async function checkStagedData() {
       }
 
       if (item.itemType === 'CHUNK') {
-        const data = item.data as any;
+        const data = isRecord(item.data) ? item.data : {};
         console.log('\nCHUNK field check:');
         console.log('  has index:', 'index' in data);
         console.log('  has content:', 'content' in data);
         console.log('  has metadata:', 'metadata' in data);
-        if (data.metadata) {
+        if (isRecord(data.metadata)) {
           console.log('  metadata has startChar:', 'startChar' in data.metadata);
           console.log('  metadata has endChar:', 'endChar' in data.metadata);
         }

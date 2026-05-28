@@ -31,7 +31,8 @@ async function main() {
   for (const c of checks) {
     const ok = c.needles.every((n) => text.includes(n.toLowerCase()));
     console.log(`  ${ok ? '✓' : '✗'} ${c.label}${ok ? '' : '   (missing: ' + c.needles.filter(n => !text.includes(n.toLowerCase())).join(', ') + ')'}`);
-    ok ? passed++ : failed++;
+    if (ok) passed++;
+    else failed++;
   }
   console.log(`\n${passed}/${passed + failed} facts verified`);
 }

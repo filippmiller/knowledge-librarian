@@ -55,14 +55,6 @@ function buildAnthropicPayload(options: ChatCompletionOptions) {
   };
 }
 
-function chunkText(text: string, size: number) {
-  const chunks: string[] = [];
-  for (let i = 0; i < text.length; i += size) {
-    chunks.push(text.slice(i, i + size));
-  }
-  return chunks;
-}
-
 /**
  * Robustly normalize and parse JSON from AI responses, even if truncated or wrapped in markdown.
  */
@@ -361,7 +353,7 @@ export async function createChatCompletion(
 
 export async function* streamChatCompletionTokens(
   options: ChatCompletionOptions,
-  chunkSize = 120
+  _chunkSize = 120
 ): AsyncGenerator<string> {
   const provider = getProvider();
   const temperature = options.temperature ?? DEFAULT_TEMPERATURE;
@@ -420,7 +412,7 @@ export async function* streamChatCompletionTokens(
             if (data.type === 'content_block_delta' && data.delta?.text) {
               yield data.delta.text;
             }
-          } catch (e) {
+          } catch {
             // Ignore parse errors for non-json lines
           }
         }

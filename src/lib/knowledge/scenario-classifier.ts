@@ -172,6 +172,8 @@ function classifyScenarioDeterministically(question: string): ScenarioDecision |
     /консульск[а-яa-z]*\s+легализац|легализац[а-яa-z]*\s+.*консульск|(?:^|[^а-я])кл(?:[^а-я]|$)/.test(text);
   const mentionsOperationalChecklist =
     /(?:^|[^а-я])лид(?:а|е|ом|ы|ов)?(?:[^а-я]|$)|сделк|бланк|битрикс|bitrix|карточк[а-яa-z]*\s+(?:лид|сделк)/.test(text);
+  const mentionsInternalOperations =
+    /почт[а-яa-z]*\s+росси|отправк[а-яa-z]*\s+почт|наливайк|шушар|хранен|выдач[а-яa-z]*\s+заказ|готов[а-яa-z]*\s+заказ|машинн[а-яa-z]*\s+перевод|молдавск|молдавск[а-яa-z]*\s+язык|исходник|скан|маршрутн[а-яa-z]*\s+лист|упд|эдо|фиксац[а-яa-z]*\s+ошиб/.test(text);
   const asksCatalog =
     /(?:какие|какой|назов|перечисл|список|виды|типы|можешь\s+.*назвать|что\s+есть)/.test(text)
     && /документ|свидетельств|справк/.test(text);
@@ -204,6 +206,14 @@ function classifyScenarioDeterministically(question: string): ScenarioDecision |
       kind: 'knowledge_lookup',
       label: 'Справочный поиск по операционным чек-листам',
       reasoning: 'Вопрос про лид, сделку или бланк должен идти в открытый поиск по базе знаний.',
+    };
+  }
+
+  if (mentionsInternalOperations) {
+    return {
+      kind: 'knowledge_lookup',
+      label: 'Справочный поиск по внутренним инструкциям',
+      reasoning: 'Вопрос относится к внутренним операционным инструкциям и должен идти в открытый поиск по базе знаний.',
     };
   }
 

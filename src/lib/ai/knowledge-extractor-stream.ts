@@ -1,4 +1,4 @@
-import { streamChatCompletionTokens, type ChatMessage } from '@/lib/ai/chat-provider';
+import { createChatCompletion, normalizeJsonResponse, streamChatCompletionTokens, type ChatMessage } from '@/lib/ai/chat-provider';
 import prisma from '@/lib/db';
 
 export interface ExtractedRuleStream {
@@ -129,10 +129,41 @@ ${documentText.slice(0, 500)}${documentText.length > 500 ? '...' : ''}
 }
 
 // Batch processing constants
-// 8000 chars ≈ 4–5 pages of text — enough context for the LLM to understand structure
-// Overlap ensures rules spanning a batch boundary are captured in full
-const BATCH_SIZE = 8000;
+// Keep batches small enough that "extract every concrete rule" responses do not
+// hit provider output limits and produce truncated JSON.
+const BATCH_SIZE = 4500;
 const BATCH_OVERLAP = 600;
+
+function parseKnowledgeExtractionJson(raw: string): KnowledgeExtractionStreamResult {
+  const cleaned = normalizeJsonResponse(raw);
+  const parsed = JSON.parse(cleaned) as Partial<KnowledgeExtractionStreamResult>;
+  if (!parsed || !Array.isArray(parsed.rules)) {
+    throw new Error('Knowledge Extractor returned invalid JSON');
+  }
+  return {
+    rules: parsed.rules,
+    qaPairs: Array.isArray(parsed.qaPairs) ? parsed.qaPairs : [],
+    uncertainties: Array.isArray(parsed.uncertainties) ? parsed.uncertainties : [],
+  };
+}
+
+async function retryBatchExtraction(messages: ChatMessage[]) {
+  const retryContent = await createChatCompletion({
+    messages: [
+      ...messages,
+      {
+        role: 'user',
+        content:
+          'Предыдущий ответ не удалось распарсить как JSON. Повтори извлечение, но верни КОМПАКТНЫЙ валидный JSON без markdown. Если правил много, сократи формулировки body, но сохрани конкретные цены, сроки, требования и шаги.',
+      },
+    ],
+    temperature: 0,
+    responseFormat: 'json_object',
+    maxTokens: 16000,
+  });
+
+  return parseKnowledgeExtractionJson(retryContent);
+}
 
 export async function* streamKnowledgeExtraction(
   documentText: string,
@@ -243,12 +274,15 @@ ${batch}
 
     // Parse batch result
     try {
-      const { normalizeJsonResponse } = await import('@/lib/ai/chat-provider');
-      const cleaned = normalizeJsonResponse(fullContent);
-      const batchResult = JSON.parse(cleaned) as Partial<KnowledgeExtractionStreamResult>;
-
-      if (!batchResult || !Array.isArray(batchResult.rules)) {
-        throw new Error('Knowledge Extractor returned invalid JSON');
+      let batchResult: KnowledgeExtractionStreamResult;
+      try {
+        batchResult = parseKnowledgeExtractionJson(fullContent);
+      } catch (parseError) {
+        console.warn(
+          `[Knowledge Extraction] Batch ${batchIndex + 1} returned invalid streamed JSON, retrying compact non-stream parse:`,
+          parseError
+        );
+        batchResult = await retryBatchExtraction(messages);
       }
 
       // Default optional fields the AI sometimes omits
@@ -258,9 +292,8 @@ ${batch}
           .filter((rule) => !rules.some((kept) => kept.ruleCode === rule.ruleCode))
           .map((rule) => rule.ruleCode)
       );
-      const qaPairs = (Array.isArray(batchResult.qaPairs) ? batchResult.qaPairs : [])
-        .filter((qa) => !qa.linkedRuleCode || !removedRuleCodes.has(qa.linkedRuleCode));
-      const uncertainties = Array.isArray(batchResult.uncertainties) ? batchResult.uncertainties : [];
+      const qaPairs = batchResult.qaPairs.filter((qa) => !qa.linkedRuleCode || !removedRuleCodes.has(qa.linkedRuleCode));
+      const uncertainties = batchResult.uncertainties;
 
       // Accumulate results
       allRules.push(...rules);

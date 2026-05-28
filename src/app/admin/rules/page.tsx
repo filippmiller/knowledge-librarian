@@ -1,8 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
 import {
   Table,
   TableBody,
@@ -40,7 +39,7 @@ export default function RulesPage() {
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('ACTIVE');
 
-  async function fetchRules() {
+  const fetchRules = useCallback(async () => {
     try {
       const response = await fetch(`/api/rules?status=${statusFilter}`);
       const data = await response.json();
@@ -50,12 +49,12 @@ export default function RulesPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [statusFilter]);
 
   useEffect(() => {
     setLoading(true);
     fetchRules();
-  }, [statusFilter]);
+  }, [fetchRules]);
 
   function getStatusBadge(status: string) {
     const variants: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {

@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import Script from 'next/script';
 
 export const metadata: Metadata = {
   title: 'Avrora Translation',
@@ -13,7 +14,7 @@ export default function TelegramAppLayout({
   return (
     <>
       {/* Required by Telegram Mini App platform — must load before app JS */}
-      <script src="https://telegram.org/js/telegram-web-app.js" />
+      <Script src="https://telegram.org/js/telegram-web-app.js" strategy="beforeInteractive" />
       {children}
     </>
   );

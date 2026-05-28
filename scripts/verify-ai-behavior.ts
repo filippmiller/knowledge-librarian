@@ -63,6 +63,21 @@ async function main() {
     'operational CRM checklist questions must use open knowledge lookup'
   );
 
+  for (const question of [
+    'Как менеджеру оформить отправку заказа Почтой России?',
+    'Как взаимодействовать с Наливайко и офисом в Шушарах?',
+    'Как хранить и выдавать готовые заказы клиентам?',
+    'Как рассчитать машинный перевод?',
+    'Что делать при приеме личных документов с молдавского языка?',
+  ]) {
+    const decision = await classifyScenario(question);
+    assert.equal(
+      decision.kind,
+      'knowledge_lookup',
+      `${question}: internal operational instructions must use open knowledge lookup`
+    );
+  }
+
   const apostilleReference = await classifyScenario('какие образовательные документы можно апостилировать?');
   assert.equal(
     apostilleReference.kind,
