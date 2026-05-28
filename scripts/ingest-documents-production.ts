@@ -27,6 +27,25 @@ type ReviewIssue = {
   message: string;
 };
 
+type ExtractionQualityReport = {
+  rawTextChars: number;
+  stagedItems: number;
+  verifiedItems: number;
+  rejectedItems: number;
+  rules: { extracted: number; verified: number; rejected: number };
+  qaPairs: { extracted: number; verified: number; rejected: number };
+  chunks: { extracted: number; verified: number; rejected: number };
+  domainAssignments: { extracted: number; verified: number; rejected: number };
+  domainSuggestions: number;
+  unsupportedRuleQuotes: number;
+  duplicateRulesRejected: number;
+  duplicateQaRejected: number;
+  weakItemsRejected: number;
+  coverageLevel: 'good' | 'thin' | 'needs_review';
+  recommendedAction: 'commit' | 'manual_review' | 'rerun_extraction';
+  notes: string[];
+};
+
 type DocumentReport = {
   file: string;
   documentId: string;
@@ -36,6 +55,7 @@ type DocumentReport = {
   stagedCounts: Counts;
   verifiedCounts: Counts;
   rejectedCounts: Counts;
+  qualityReport: ExtractionQualityReport | null;
   reviewIssues: ReviewIssue[];
   commitResult: Awaited<ReturnType<typeof commitDocumentKnowledge>> | null;
   finalStats: Counts;
@@ -125,6 +145,39 @@ function hasSourceEvidence(rawText: string, quote: string) {
   }
 
   return false;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientDbError(error: unknown) {
+  const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  return /server has closed the connection|can't reach database server|connection terminated|connection refused|connection reset|socket|timeout|timed out|ECONNRESET|ETIMEDOUT|P1001|P1017|UND_ERR_SOCKET/i.test(
+    message
+  );
+}
+
+async function withDbRetry<T>(label: string, fn: () => Promise<T>, attempts = 3): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts || !isTransientDbError(error)) {
+        throw error;
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[retry] ${label} failed (${attempt}/${attempts}), reconnecting: ${message}`);
+      await prisma.$disconnect().catch(() => undefined);
+      await sleep(1000 * attempt * attempt);
+    }
+  }
+
+  throw lastError;
 }
 
 async function resetDocumentKnowledge(documentId: string) {
@@ -281,6 +334,90 @@ async function processDocument(documentId: string, rawText: string, title: strin
   await prisma.document.update({ where: { id: documentId }, data: { parseStatus: 'EXTRACTED' } });
 }
 
+function countIssues(issues: ReviewIssue[], pattern: RegExp) {
+  return issues.filter((issue) => pattern.test(issue.message)).length;
+}
+
+function getCount(counts: Counts, key: string) {
+  return counts[key] || 0;
+}
+
+function buildExtractionQualityReport(
+  rawText: string,
+  staged: Awaited<ReturnType<typeof prisma.stagedExtraction.findMany>>,
+  verifyIds: string[],
+  rejectIds: string[],
+  issues: ReviewIssue[]
+): ExtractionQualityReport {
+  const stagedCounts = countBy(staged, (item) => item.itemType);
+  const verifiedSet = new Set(verifyIds);
+  const rejectedSet = new Set(rejectIds);
+  const verifiedCounts = countBy(
+    staged.filter((item) => verifiedSet.has(item.id)),
+    (item) => item.itemType
+  );
+  const rejectedCounts = countBy(
+    staged.filter((item) => rejectedSet.has(item.id)),
+    (item) => item.itemType
+  );
+  const errorCount = issues.filter((issue) => issue.severity === 'error').length;
+  const warningCount = issues.filter((issue) => issue.severity === 'warning').length;
+  const notes: string[] = [];
+
+  if (rawText.trim().length < 100) notes.push('Parsed text is too short to trust extraction.');
+  if (!getCount(stagedCounts, 'DOMAIN_ASSIGNMENT')) notes.push('No domain assignment was extracted.');
+  if (!getCount(stagedCounts, 'RULE') && !getCount(stagedCounts, 'QA_PAIR')) {
+    notes.push('No direct rules or QA pairs were extracted.');
+  }
+  if (!getCount(stagedCounts, 'CHUNK')) notes.push('No retrieval chunks were created.');
+  if (warningCount > 0) notes.push(`${warningCount} warning(s) require review before bulk trust.`);
+
+  let coverageLevel: ExtractionQualityReport['coverageLevel'] = 'good';
+  let recommendedAction: ExtractionQualityReport['recommendedAction'] = 'commit';
+  if (errorCount > 0 || !getCount(verifiedCounts, 'CHUNK')) {
+    coverageLevel = 'needs_review';
+    recommendedAction = 'rerun_extraction';
+  } else if (!getCount(verifiedCounts, 'RULE') || warningCount >= 5) {
+    coverageLevel = 'thin';
+    recommendedAction = 'manual_review';
+  }
+
+  return {
+    rawTextChars: rawText.length,
+    stagedItems: staged.length,
+    verifiedItems: verifyIds.length,
+    rejectedItems: rejectIds.length,
+    rules: {
+      extracted: getCount(stagedCounts, 'RULE'),
+      verified: getCount(verifiedCounts, 'RULE'),
+      rejected: getCount(rejectedCounts, 'RULE'),
+    },
+    qaPairs: {
+      extracted: getCount(stagedCounts, 'QA_PAIR'),
+      verified: getCount(verifiedCounts, 'QA_PAIR'),
+      rejected: getCount(rejectedCounts, 'QA_PAIR'),
+    },
+    chunks: {
+      extracted: getCount(stagedCounts, 'CHUNK'),
+      verified: getCount(verifiedCounts, 'CHUNK'),
+      rejected: getCount(rejectedCounts, 'CHUNK'),
+    },
+    domainAssignments: {
+      extracted: getCount(stagedCounts, 'DOMAIN_ASSIGNMENT'),
+      verified: getCount(verifiedCounts, 'DOMAIN_ASSIGNMENT'),
+      rejected: getCount(rejectedCounts, 'DOMAIN_ASSIGNMENT'),
+    },
+    domainSuggestions: getCount(stagedCounts, 'DOMAIN_SUGGESTION'),
+    unsupportedRuleQuotes: countIssues(issues, /unsupported quote/i),
+    duplicateRulesRejected: countIssues(issues, /duplicate rule/i),
+    duplicateQaRejected: countIssues(issues, /duplicate QA pair/i),
+    weakItemsRejected: countIssues(issues, /Rejected weak/i),
+    coverageLevel,
+    recommendedAction,
+    notes,
+  };
+}
+
 async function reviewAndVerify(documentId: string, rawText: string) {
   const staged = await prisma.stagedExtraction.findMany({
     where: { documentId },
@@ -376,6 +513,8 @@ async function reviewAndVerify(documentId: string, rawText: string) {
     });
   }
 
+  const qualityReport = buildExtractionQualityReport(rawText, staged, verifyIds, rejectIds, issues);
+
   return {
     issues,
     stagedCounts: counts,
@@ -387,6 +526,7 @@ async function reviewAndVerify(documentId: string, rawText: string) {
       staged.filter((item) => rejectIds.includes(item.id)),
       (item) => item.itemType
     ),
+    qualityReport,
   };
 }
 
@@ -444,6 +584,7 @@ async function ingestFile(filePath: string, refreshCompleted: boolean): Promise<
     stagedCounts: {} as Counts,
     verifiedCounts: {} as Counts,
     rejectedCounts: {} as Counts,
+    qualityReport: null as ExtractionQualityReport | null,
   };
 
   if (action !== 'already_completed') {
@@ -460,11 +601,13 @@ async function ingestFile(filePath: string, refreshCompleted: boolean): Promise<
     // Railway-run scripts can keep a DB connection idle during long LLM calls.
     // Reconnect before the write-heavy commit stage to avoid stale sockets.
     await prisma.$disconnect();
-    commitResult = await commitDocumentKnowledge(document.id);
+    commitResult = await withDbRetry('commitDocumentKnowledge', () =>
+      commitDocumentKnowledge(document.id, { replaceExisting: true })
+    );
   }
 
-  const stats = await finalStats(document.id);
-  const samples = await sampleKnowledge(document.id);
+  const stats = await withDbRetry('finalStats', () => finalStats(document.id));
+  const samples = await withDbRetry('sampleKnowledge', () => sampleKnowledge(document.id));
 
   return {
     file: resolved,
@@ -475,6 +618,7 @@ async function ingestFile(filePath: string, refreshCompleted: boolean): Promise<
     stagedCounts: review.stagedCounts,
     verifiedCounts: review.verifiedCounts,
     rejectedCounts: review.rejectedCounts,
+    qualityReport: review.qualityReport,
     reviewIssues: review.issues,
     commitResult,
     finalStats: stats,
@@ -494,7 +638,10 @@ async function main() {
   await fs.writeFile(reportPath, JSON.stringify({ generatedAt: new Date().toISOString(), reports }, null, 2), 'utf8');
 
   for (const report of reports) {
-    console.log(`[report] ${report.title}: ${JSON.stringify(report.finalStats)} (${report.action})`);
+    const quality = report.qualityReport
+      ? `quality=${report.qualityReport.coverageLevel}/${report.qualityReport.recommendedAction}`
+      : 'quality=existing';
+    console.log(`[report] ${report.title}: ${JSON.stringify(report.finalStats)} (${report.action}, ${quality})`);
   }
   console.log(`[report] ${pathToFileURL(path.resolve(reportPath)).href}`);
 }

@@ -14,11 +14,45 @@ export interface CommitResult {
   };
 }
 
+export interface CommitOptions {
+  replaceExisting?: boolean;
+}
+
+async function resetCommittedDocumentKnowledge(documentId: string) {
+  const qaPairs = await prisma.qAPair.findMany({
+    where: { documentId },
+    select: { id: true },
+  });
+  const qaPairIds = qaPairs.map((qa) => qa.id);
+  if (qaPairIds.length > 0) {
+    await prisma.knowledgeChange.deleteMany({
+      where: { targetType: 'QA_PAIR', targetId: { in: qaPairIds } },
+    });
+  }
+  await prisma.qAPair.deleteMany({ where: { documentId } });
+
+  const rules = await prisma.rule.findMany({
+    where: { documentId },
+    select: { id: true },
+  });
+  const ruleIds = rules.map((rule) => rule.id);
+  if (ruleIds.length > 0) {
+    await prisma.knowledgeChange.deleteMany({
+      where: { targetType: 'RULE', targetId: { in: ruleIds } },
+    });
+  }
+  await prisma.rule.deleteMany({ where: { documentId } });
+
+  await prisma.docChunk.deleteMany({ where: { documentId } });
+  await prisma.documentDomain.deleteMany({ where: { documentId } });
+  await prisma.domainSuggestion.deleteMany({ where: { createdFromDocumentId: documentId } });
+}
+
 /**
  * Commits all verified staged extractions for a document to the knowledge base.
  * Shared by both the admin panel commit endpoint and the Telegram mini-app.
  */
-export async function commitDocumentKnowledge(documentId: string): Promise<CommitResult> {
+export async function commitDocumentKnowledge(documentId: string, options: CommitOptions = {}): Promise<CommitResult> {
   const document = await prisma.document.findUnique({
     where: { id: documentId },
   });
@@ -59,6 +93,9 @@ export async function commitDocumentKnowledge(documentId: string): Promise<Commi
   const domainIds: string[] = [];
 
   console.log(`[COMMIT] Processing ${verifiedItems.length} verified items`);
+  if (options.replaceExisting) {
+    await resetCommittedDocumentKnowledge(documentId);
+  }
 
   // Process domain assignments
   const domainAssignments = verifiedItems.filter((i) => i.itemType === 'DOMAIN_ASSIGNMENT');
