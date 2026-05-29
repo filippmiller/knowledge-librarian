@@ -702,13 +702,41 @@ export function formatAnswerResponse(result: EnhancedAnswerResult): string {
   }
 
   const lines: string[] = [];
+
+  // Prominent source badge — the single most important signal for the user:
+  // is the answer grounded in our knowledge base, a hard-coded bureau rule, or
+  // the model's general knowledge (unverified)? Policy (2026-05-29): general_ai
+  // must be loudly flagged + escalated, never blend into a KB-looking answer.
+  const sourceBadge =
+    result.answerSource === 'general_ai'
+      ? '🔴 Источник: общее знание ИИ — НЕ подтверждено базой, нужна проверка'
+      : result.answerSource === 'deterministic_guardrail'
+        ? '🟡 Источник: правило бюро (по региону выдачи документа)'
+        : '🟢 Источник: база знаний бюро';
+  lines.push(sourceBadge);
+
   if (result.scenarioLabel) {
     lines.push(`✦ Ответ для: ${result.scenarioLabel}`);
-    lines.push('');
   }
+  lines.push('');
   lines.push(result.answer);
 
-  if (result.citations.length > 0) {
+  // Attribution = the actual DOCUMENT(s) the answer drew from. These map to the
+  // retrieved chunks, so they truthfully show where the facts came from —
+  // unlike the old rule-code list, which was ranked separately and routinely
+  // surfaced off-topic rules (e.g. education rules under a postal answer).
+  const docTitles: string[] = [];
+  if (result.primarySource?.documentTitle) docTitles.push(result.primarySource.documentTitle);
+  for (const s of result.supplementarySources ?? []) {
+    if (s.documentTitle && !docTitles.includes(s.documentTitle)) docTitles.push(s.documentTitle);
+  }
+  if (docTitles.length > 0) {
+    lines.push('');
+    lines.push('📄 Документы-источники:');
+    for (const t of docTitles.slice(0, 3)) lines.push(`  • ${t}`);
+  } else if (result.citations.some((c) => c.ruleCode)) {
+    // Rule-only answers (e.g. deterministic guardrail) have no retrieved
+    // document — fall back to rule codes so there's still an attribution.
     lines.push('');
     lines.push('📚 Источники:');
     for (const citation of result.citations.slice(0, 3)) {
@@ -719,12 +747,15 @@ export function formatAnswerResponse(result: EnhancedAnswerResult): string {
     }
   }
 
+  // Qualitative confidence only. The numeric % is intentionally omitted: its
+  // formula (intent-confidence × semantic-similarity) does not track answer
+  // correctness, so a precise-looking "71%" would be false precision.
   const confLabel = result.confidenceLevel === 'high' ? 'Высокая'
     : result.confidenceLevel === 'medium' ? 'Средняя'
     : result.confidenceLevel === 'low' ? 'Низкая'
     : 'Недостаточная';
   lines.push('');
-  lines.push(`⭐ Уверенность: ${confLabel} (${(result.confidence * 100).toFixed(0)}%)`);
+  lines.push(`⭐ Уверенность: ${confLabel}`);
 
   return lines.join('\n');
 }
