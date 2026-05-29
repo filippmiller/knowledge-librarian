@@ -260,7 +260,9 @@ function classifyScenarioDeterministically(question: string): ScenarioDecision |
   if (mentionsApostille && !mentionsEducation) {
     const notaryDoc = /доверенност|нотариальн|нотариус|(?:^|[^а-я])копи|перевод|согласие|довер/.test(text);
     const opekaDoc = /опек/.test(text);
-    const zagsDoc = /загс|свидетельств|(?:^|[^а-я])сор(?:[^а-я]|$)|рожден|брак|растор|смерт|перемен.{0,4}имен|отцовств/.test(text);
+    // СО[РБС] = abbreviations the bureau uses for ЗАГС certificates:
+    // СОР (о рождении), СОБ (о браке), СОС (о смерти).
+    const zagsDoc = /загс|свидетельств|(?:^|[^а-я])со[рбс](?:[^а-я]|$)|рожден|брак|растор|смерт|перемен.{0,4}имен|отцовств/.test(text);
     const mentionsLO = /ленинградск|лен\.?\s*обл/.test(text);
 
     // ЗАГС document (but NOT a notarized copy/translation of one — that goes to
