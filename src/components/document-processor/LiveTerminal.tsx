@@ -404,7 +404,7 @@ export function LiveTerminal({
           <div className="flex flex-col items-center justify-center h-full text-gray-500 font-mono">
             <div className="text-4xl mb-2 opacity-20">◈</div>
             <div className="text-sm">Ожидание данных...</div>
-            <div className="text-xs mt-1">Нажмите "Запустить" для начала обработки</div>
+            <div className="text-xs mt-1">Нажмите &quot;Запустить&quot; для начала обработки</div>
           </div>
         ) : (
           <div className="py-1">

@@ -218,11 +218,38 @@ export async function saveChatMessage(
   });
 }
 
-export async function getOrCreateSession(source: 'WEB' | 'TELEGRAM' | 'API' = 'WEB', userId?: string) {
+// 30-minute rolling window: any new message from the same user/source within
+// this window continues the existing session. Longer gap → fresh session.
+// Telegram bot needs this so a clarification-callback click lands on the
+// SAME session as the original question; otherwise buttons would orphan
+// into isolated sessions and callback context would be lost.
+const SESSION_IDLE_MS = 30 * 60 * 1000;
+
+export async function getOrCreateSession(
+  source: 'WEB' | 'TELEGRAM' | 'API' = 'WEB',
+  userId?: string
+) {
+  // Without a userId (anonymous web traffic) we still create fresh per call —
+  // there's no stable key to bind on, and web sessions live per-tab anyway.
+  if (userId) {
+    const cutoff = new Date(Date.now() - SESSION_IDLE_MS);
+    const existing = await prisma.chatSession.findFirst({
+      where: {
+        source,
+        userId,
+        updatedAt: { gt: cutoff },
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+    if (existing) {
+      // Touch updatedAt so the window slides forward on each interaction.
+      return prisma.chatSession.update({
+        where: { id: existing.id },
+        data: { updatedAt: new Date() },
+      });
+    }
+  }
   return prisma.chatSession.create({
-    data: {
-      source,
-      userId,
-    },
+    data: { source, userId },
   });
 }

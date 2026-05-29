@@ -32,22 +32,27 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 export function splitTextIntoChunks(text: string): TextChunk[] {
+  console.log(`[Chunker] splitTextIntoChunks called with ${text.length} chars`);
   const chunks: TextChunk[] = [];
   let startChar = 0;
   let index = 0;
 
+  console.log(`[Chunker] Starting while loop...`);
+  // Process text in streaming fashion to reduce memory pressure
   while (startChar < text.length) {
     let endChar = startChar + CHUNK_SIZE;
 
     // Try to break at a sentence or paragraph boundary
     if (endChar < text.length) {
-      const searchWindow = text.slice(endChar - 100, endChar + 100);
+      const searchStart = Math.max(0, endChar - 100);
+      const searchEnd = Math.min(text.length, endChar + 100);
+      const searchWindow = text.slice(searchStart, searchEnd);
       const breakPoints = ['\n\n', '.\n', '. ', '\n'];
 
       for (const breakPoint of breakPoints) {
         const breakIndex = searchWindow.lastIndexOf(breakPoint);
         if (breakIndex !== -1) {
-          endChar = endChar - 100 + breakIndex + breakPoint.length;
+          endChar = searchStart + breakIndex + breakPoint.length;
           break;
         }
       }
@@ -69,15 +74,30 @@ export function splitTextIntoChunks(text: string): TextChunk[] {
       index++;
     }
 
+    // If we reached the end of text, break to avoid infinite loop
+    if (endChar >= text.length) {
+      console.log(`[Chunker] Reached end of text, breaking loop`);
+      break;
+    }
+    
     startChar = endChar - CHUNK_OVERLAP;
     if (startChar >= text.length - 50) break;
+    
+    // Yield to event loop periodically to prevent blocking
+    // (helps in serverless environments like Railway)
+    if (index % 10 === 0 && global.gc) {
+      global.gc();
+    }
   }
 
+  console.log(`[Chunker] While loop complete. Created ${chunks.length} chunks from ${text.length} characters`);
+  console.log(`[Chunker] Returning chunks array...`);
   return chunks;
 }
 
 // Process embeddings in small batches to avoid memory issues
-const EMBEDDING_BATCH_SIZE = 5;
+// EXTREME: Process 1 at a time for Railway free tier
+const EMBEDDING_BATCH_SIZE = 1;
 
 export async function createDocumentChunks(
   documentId: string,

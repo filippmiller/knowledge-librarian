@@ -28,107 +28,114 @@ export interface KnowledgeExtractionResult {
   }[];
 }
 
-const EXTRACTION_SYSTEM_PROMPT = `Ты - Экстрактор знаний для бюро переводов.
+const EXTRACTION_SYSTEM_PROMPT = `Ты - Экстрактор знаний для бюро переводов "Аврора".
 
-ВАЖНО: ВСЕ извлечённые данные должны быть на РУССКОМ языке!
+ВСЕ ТЕКСТЫ ТОЛЬКО НА РУССКОМ ЯЗЫКЕ.
 
-Твоя задача - извлечь структурированные знания из документов:
+ГЛАВНАЯ ЗАДАЧА: извлечь МАКСИМАЛЬНОЕ количество конкретных правил из текста.
+Лучше извлечь 30 правил, чем пропустить 20 из-за неуверенности.
 
-1. БИЗНЕС-ПРАВИЛА: Явные утверждения о порядке работы
-   - Цены, тарифы, сроки
-   - Процедуры и рабочие процессы
-   - Требования и условия
+═══ ЧТО СЧИТАЕТСЯ ПРАВИЛОМ ═══
 
-2. ВОПРОСЫ И ОТВЕТЫ: Пары вопрос-ответ для помощи сотрудникам
-   - На основе извлечённых правил
-   - Типичные вопросы по теме
+Каждое из следующего = ОТДЕЛЬНОЕ правило:
+• Любая цена, тариф, стоимость (за страницу, за слово, за услугу, за язык)
+• Любой срок выполнения или действия документа
+• Любое требование к документу (формат, заверение, апостиль, нотариус)
+• Любая процедура или последовательность шагов
+• Любое контактное лицо или ответственный
+• Любая скидка, наценка, коэффициент, надбавка
+• Любое ограничение, условие или исключение
+• Любой тип услуги с описанием
+• Любая аббревиатура или специальный термин с расшифровкой
 
-3. НЕЯСНОСТИ: Отметь всё, что:
-   - Неоднозначно ("примерно", "обычно", "около")
-   - Возможно устарело
-   - Противоречит общим знаниям
-   - Требует уточнения
+═══ КАК ПИСАТЬ ПРАВИЛА ═══
 
-КРИТИЧЕСКИ ВАЖНО:
-- Извлекай ТОЛЬКО явно указанное
-- НЕ делай выводов и предположений
-- Если указана цена - извлекай точно
-- Если описана процедура - извлекай шаги
-- Всегда цитируй источник с точной цитатой
-- ВСЕ тексты (title, body, question, answer, description) на РУССКОМ языке
+title (5–12 слов): конкретный и содержательный
+body: конкретные числа, суммы, шаги — без сокращений
+confidence: 0.95 если явная цифра в тексте, 0.8 если вывод из контекста
+sourceSpan.quote: дословная цитата (макс. 150 символов)
 
-Коды правил должны быть последовательными: R-1, R-2, R-3...`;
+Коды правил: R-1, R-2, R-3 ... (строго последовательно)`;
+
+const BATCH_SIZE = 8000;
+const BATCH_OVERLAP = 600;
 
 export async function extractKnowledge(
   documentText: string,
   existingRuleCodes: string[] = []
 ): Promise<KnowledgeExtractionResult> {
-  const startCode = existingRuleCodes.length > 0
+  let currentRuleCode = existingRuleCodes.length > 0
     ? Math.max(...existingRuleCodes.map(c => parseInt(c.replace('R-', '')))) + 1
     : 1;
 
-  const content = await createChatCompletion({
-    messages: [
-      { role: 'system', content: EXTRACTION_SYSTEM_PROMPT },
-      {
-        role: 'user',
-        content: `Извлеки знания из этого документа.
-Начни нумерацию правил с R-${startCode}.
+  // Split document into batches so the full text is processed, not just the first 12k chars
+  const batches: string[] = [];
+  let offset = 0;
+  while (offset < documentText.length) {
+    const end = Math.min(offset + BATCH_SIZE, documentText.length);
+    batches.push(documentText.slice(offset, end));
+    if (end >= documentText.length) break;
+    offset = end - BATCH_OVERLAP;
+  }
 
-Содержимое документа:
-${documentText.slice(0, 12000)}
+  const allRules: ExtractedRule[] = [];
+  const allQAPairs: ExtractedQA[] = [];
+  const allUncertainties: KnowledgeExtractionResult['uncertainties'] = [];
 
-Ответь в формате JSON точно по этой схеме:
+  for (let i = 0; i < batches.length; i++) {
+    const batch = batches[i];
+
+    const content = await createChatCompletion({
+      messages: [
+        { role: 'system', content: EXTRACTION_SYSTEM_PROMPT },
+        {
+          role: 'user',
+          content: `Извлеки ВСЕ правила из этой части документа. Нумерация начинается с R-${currentRuleCode}.
+${batches.length > 1 ? `Часть ${i + 1} из ${batches.length}.` : ''}
+
+ТЕКСТ ДОКУМЕНТА:
+${batch}
+
+ВАЖНО: Пройди текст построчно. Каждая строка с конкретным значением (цена, срок, требование, шаг) = отдельное правило.
+Аббревиатуры (СОН, ГТД, ДМС и т.д.) тоже оформляй как правило с расшифровкой.
+
+Ответь в формате JSON:
 {
-  "rules": [
-    {
-      "ruleCode": "R-${startCode}",
-      "title": "Краткое название правила на русском",
-      "body": "Полное описание правила на русском",
-      "confidence": 0.0-1.0,
-      "sourceSpan": {
-        "quote": "Точная цитата из документа",
-        "locationHint": "Раздел или контекст"
-      }
-    }
-  ],
-  "qaPairs": [
-    {
-      "question": "Вопрос на русском",
-      "answer": "Чёткий ответ на русском на основе извлечённых правил",
-      "linkedRuleCode": "R-X или null"
-    }
-  ],
-  "uncertainties": [
-    {
-      "type": "ambiguous|outdated|conflicting|missing_context",
-      "description": "Описание неясности на русском",
-      "suggestedQuestion": "Вопрос администратору на русском"
-    }
-  ]
+  "rules": [{"ruleCode": "R-${currentRuleCode}", "title": "...", "body": "...", "confidence": 0.95, "sourceSpan": {"quote": "...", "locationHint": "..."}}],
+  "qaPairs": [{"question": "...", "answer": "...", "linkedRuleCode": "R-X или null"}],
+  "uncertainties": [{"type": "ambiguous|outdated|conflicting|missing_context", "description": "...", "suggestedQuestion": "..."}]
 }`,
-      },
-    ],
-    responseFormat: 'json_object',
-    temperature: 0.2,
-    maxTokens: 4096,
-  });
-  if (!content) {
-    throw new Error('Empty response from Knowledge Extractor');
+        },
+      ],
+      responseFormat: 'json_object',
+      temperature: 0.1,
+      maxTokens: 8192,
+    });
+
+    if (!content) continue;
+
+    try {
+      const cleaned = normalizeJsonResponse(content);
+      const result = JSON.parse(cleaned) as Partial<KnowledgeExtractionResult>;
+      if (result && Array.isArray(result.rules)) {
+        allRules.push(...result.rules);
+        allQAPairs.push(...(result.qaPairs ?? []));
+        allUncertainties.push(...(result.uncertainties ?? []));
+        if (result.rules.length > 0) {
+          const maxCode = Math.max(...result.rules.map(r => parseInt(r.ruleCode.replace('R-', ''))));
+          currentRuleCode = maxCode + 1;
+        }
+      }
+    } catch (e) {
+      console.error(`[extractKnowledge] Failed to parse batch ${i + 1}:`, e);
+    }
   }
 
-  const cleaned = normalizeJsonResponse(content);
-  const result = JSON.parse(cleaned) as Partial<KnowledgeExtractionResult>;
-  if (
-    !result ||
-    !Array.isArray(result.rules) ||
-    !Array.isArray(result.qaPairs) ||
-    !Array.isArray(result.uncertainties)
-  ) {
-    throw new Error('Knowledge Extractor returned invalid JSON');
-  }
-
-  return result as KnowledgeExtractionResult;
+  return {
+    rules: allRules,
+    qaPairs: allQAPairs,
+    uncertainties: allUncertainties,
+  };
 }
 
 export async function saveExtractedRules(

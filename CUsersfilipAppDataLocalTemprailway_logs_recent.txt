@@ -1,0 +1,100 @@
+[process-stream] Saving rule 2/70: R-54
+[process-stream] Saving rule 3/70: R-55
+[process-stream] Saving rule 4/70: R-56
+[process-stream] Saving rule 5/70: R-57
+[process-stream] Saving rule 6/70: R-58
+[process-stream] Saving rule 7/70: R-59
+[process-stream] Saving rule 8/70: R-60
+[process-stream] Saving rule 9/70: R-61
+[process-stream] Saving rule 10/70: R-62
+[process-stream] Saving rule 11/70: R-63
+[process-stream] Saving rule 12/70: R-64
+[process-stream] Saving rule 13/70: R-65
+[process-stream] Saving rule 14/70: R-66
+[process-stream] Saving rule 17/70: R-69
+[process-stream] Saving rule 15/70: R-67
+[process-stream] Saving rule 16/70: R-68
+[process-stream] Saving rule 18/70: R-70
+[process-stream] Saving rule 19/70: R-71
+[process-stream] Saving rule 20/70: R-72
+[process-stream] Saving rule 21/70: R-73
+[process-stream] Saving rule 22/70: R-74
+[process-stream] Saving rule 23/70: R-75
+[process-stream] Saving rule 24/70: R-76
+[process-stream] Saving rule 25/70: R-77
+[process-stream] Saving rule 26/70: R-78
+[process-stream] Saving rule 27/70: R-79
+[process-stream] Saving rule 28/70: R-80
+[process-stream] Saving rule 29/70: R-81
+[process-stream] Saving rule 30/70: R-82
+[process-stream] Saving rule 31/70: R-83
+[process-stream] Saving rule 32/70: R-84
+[process-stream] Saving rule 33/70: R-85
+[process-stream] Saving rule 34/70: R-86
+[process-stream] Saving rule 35/70: R-87
+[process-stream] Saving rule 36/70: R-88
+[process-stream] Saving rule 37/70: R-89
+[process-stream] Saving rule 38/70: R-90
+[process-stream] Saving rule 39/70: R-91
+[process-stream] Saving rule 40/70: R-92
+[process-stream] Saving rule 41/70: R-93
+[process-stream] Saving rule 42/70: R-94
+[process-stream] Saving rule 43/70: R-95
+[process-stream] Saving rule 44/70: R-96
+[process-stream] Saving rule 45/70: R-97
+[process-stream] Saving rule 46/70: R-98
+[process-stream] Saving rule 47/70: R-99
+[process-stream] Saving rule 48/70: R-100
+[process-stream] Saving rule 49/70: R-101
+[process-stream] Saving rule 50/70: R-102
+[process-stream] Saving rule 51/70: R-103
+[process-stream] Saving rule 52/70: R-104
+[process-stream] Saving rule 53/70: R-105
+[process-stream] Saving rule 54/70: R-106
+[process-stream] Saving rule 55/70: R-107
+[process-stream] Saving rule 56/70: R-108
+[process-stream] Saving rule 57/70: R-109
+[process-stream] Saving rule 58/70: R-110
+[process-stream] Saving rule 59/70: R-111
+[process-stream] Saving rule 60/70: R-112
+[process-stream] Saving rule 61/70: R-113
+[process-stream] Saving rule 62/70: R-114
+[process-stream] Saving rule 63/70: R-115
+[process-stream] Saving rule 64/70: R-116
+[process-stream] Saving rule 65/70: R-117
+[process-stream] Saving rule 66/70: R-118
+[process-stream] Saving rule 67/70: R-119
+[process-stream] Saving rule 68/70: R-120
+[process-stream] Saving rule 69/70: R-121
+[process-stream] Saving rule 70/70: R-122
+[process-stream] Rules saved! Now saving 59 QA pairs...
+[process-stream] QA pairs saved! Now saving 47 uncertainties...
+[process-stream] Sending phase_complete for KNOWLEDGE_EXTRACTION...
+[process-stream] phase_complete sent!
+[process-stream] Forced GC after KNOWLEDGE_EXTRACTION
+[process-stream] Starting PHASE 3: CHUNKING...
+[process-stream] completedPhases has CHUNKING: false
+[process-stream] CHUNKING not in completedPhases, starting fresh chunking...
+[process-stream] CHUNKING phase_start sent!
+[process-stream] Calling splitTextIntoChunks...
+[Chunker] splitTextIntoChunks called with 10858 chars
+[Chunker] Starting while loop...
+[Chunker] Reached end of text, breaking loop
+[Chunker] While loop complete. Created 14 chunks from 10858 characters
+[Chunker] Returning chunks array...
+[process-stream] splitTextIntoChunks returned 14 chunks
+[process-stream] Forced GC after CHUNKING
+Error committing staged data: Error [PrismaClientKnownRequestError]: 
+Invalid `prisma.ruleDomain.create()` invocation:
+
+
+Unique constraint failed on the fields: (`ruleId`,`domainId`)
+    at async y (.next/server/chunks/[root-of-the-server]__75dea904._.js:1:3987)
+    at async l (.next/server/chunks/[root-of-the-server]__75dea904._.js:1:8491)
+    at async d (.next/server/chunks/[root-of-the-server]__75dea904._.js:1:9532)
+    at async Module.T (.next/server/chunks/[root-of-the-server]__75dea904._.js:1:10610) {
+  code: 'P2002',
+  clientVersion: '5.22.0',
+  meta: [Object]
+}
+Stopping Container

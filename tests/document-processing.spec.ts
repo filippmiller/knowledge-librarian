@@ -1,5 +1,9 @@
 import { test, expect } from '@playwright/test';
-import path from 'path';
+
+test.skip(
+  !process.env.RUN_PRODUCTION_MUTATION_TESTS,
+  'Production mutation test: uploads/processes documents. Set RUN_PRODUCTION_MUTATION_TESTS=1 to run.'
+);
 
 test.describe('Document Processing', () => {
   test('should upload document and navigate to processing page', async ({ page }) => {

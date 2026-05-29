@@ -1521,3 +1521,335 @@ This session delivered a "Stripe-level" UI/UX refresh for the public landing pag
 ## 7. Testing
 
 - Not run (UI-only changes).
+
+
+---
+
+# Session Notes - February 20, 2026
+
+## Executive Summary
+
+Implemented a comprehensive Telegram Mini App for the knowledge base, transforming the bot into a full-featured web application with search, favorites, comments, notifications, voice search, and admin tools.
+
+---
+
+## 1. Telegram Mini App Implementation
+
+### Overview
+
+Converted the Telegram bot into a hybrid system with a full-featured Mini App (WebApp) that provides a modern mobile interface for accessing, searching, and managing the knowledge base.
+
+### Architecture
+
+```
+Telegram Bot (Webhook)
+    ↓
+/api/telegram (Commands: /start, /app, etc.)
+    ↓
+/telegram-app (Mini App Page)
+    ↓
+/api/telegram/mini-app (API Endpoints)
+    ↓
+Prisma Database
+```
+
+### New Database Models
+
+#### UserFavorite
+```prisma
+model UserFavorite {
+  id          String   @id @default(cuid())
+  telegramId  String
+  ruleId      String
+  createdAt   DateTime @default(now())
+  notes       String?  @db.Text
+  rule        Rule     @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  @@unique([telegramId, ruleId])
+}
+```
+
+#### RuleComment
+```prisma
+model RuleComment {
+  id          String   @id @default(cuid())
+  ruleId      String
+  telegramId  String
+  content     String   @db.Text
+  parentId    String?  // Threaded replies
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  isEdited    Boolean  @default(false)
+  isDeleted   Boolean  @default(false)
+  rule        Rule     @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  parent      RuleComment? @relation("CommentReplies", fields: [parentId], references: [id])
+  replies     RuleComment[] @relation("CommentReplies")
+}
+```
+
+#### UserNotification / NotificationLog
+```prisma
+model UserNotification {
+  id              String   @id @default(cuid())
+  telegramId      String
+  type            NotificationType
+  domainId        String?
+  ruleId          String?
+  keywords        Json?
+  isActive        Boolean  @default(true)
+  lastNotifiedAt  DateTime?
+  createdAt       DateTime @default(now())
+}
+
+model NotificationLog {
+  id              String   @id @default(cuid())
+  telegramId      String
+  type            NotificationType
+  title           String
+  message         String   @db.Text
+  ruleId          String?
+  isRead          Boolean  @default(false)
+  sentAt          DateTime @default(now())
+  readAt          DateTime?
+}
+```
+
+#### UserPreference
+```prisma
+model UserPreference {
+  id              String   @id @default(cuid())
+  telegramId      String   @unique
+  theme           String   @default("system") // light, dark, system
+  fontSize        String   @default("medium")
+  offlineCache    Boolean  @default(true)
+  pushEnabled     Boolean  @default(true)
+  language        String   @default("ru")
+  lastSyncedAt    DateTime @default(now())
+}
+```
+
+---
+
+## 2. Features Implemented
+
+### 2.1 Search & Discovery
+
+| Feature | Description |
+|---------|-------------|
+| **Text Search** | Full-text search across rules, Q&A pairs, documents |
+| **Voice Search** | Whisper API integration for voice-to-text search |
+| **Confidence Filter** | Filter by AI confidence: High (90%+), Medium (70-90%), Low (<70%) |
+| **Domain Filter** | Filter by knowledge domain/category |
+| **Document Filter** | Filter by source document |
+| **Date Range** | Filter by creation date (from/to) |
+
+### 2.2 User Features
+
+| Feature | Description |
+|---------|-------------|
+| **🔖 Favorites** | Bookmark rules with personal notes |
+| **📝 Comments** | Threaded discussions on each rule |
+| **📤 Share** | Share rules to Telegram chats |
+| **🔔 Notifications** | Subscribe to rule/domain updates |
+| **📱 Offline Mode** | LocalStorage caching for offline access |
+| **🌙 Dark Theme** | Auto-detect Telegram theme + manual toggle |
+
+### 2.3 Admin Features
+
+| Feature | Description |
+|---------|-------------|
+| **✏️ Edit Rule** | In-place editing or create new version (R-X+1) |
+| **✓ Confirm Rule** | Set confidence to 100% |
+| **🗑 Delete Rule** | Mark as DEPRECATED |
+| **💬 Moderate Comments** | Edit/delete any comment |
+
+### 2.4 Statistics & Analytics
+
+- Total rules, Q&A pairs, documents
+- Confidence distribution (visual bar chart)
+- Recent activity feed
+- Domain statistics
+
+---
+
+## 3. API Endpoints
+
+### Public Endpoints (No Auth Required)
+```
+GET  /api/telegram/mini-app?initData=... - Load public data
+POST /api/telegram/mini-app - search, getRule, getStats, voiceSearch
+```
+
+### Protected Endpoints (Requires Telegram Auth)
+```
+POST /api/telegram/mini-app - favorites, comments, notifications
+POST /api/telegram/mini-app - editRule, confirmRule, deleteRule (admin only)
+```
+
+### Actions Supported
+| Action | Auth | Description |
+|--------|------|-------------|
+| `search` | Public | Full-text search with filters |
+| `voiceSearch` | Public | Transcribe audio and search |
+| `getRule` | Public | Get rule details |
+| `getStats` | Public | Get statistics |
+| `addFavorite` | Required | Add to favorites |
+| `removeFavorite` | Required | Remove from favorites |
+| `getComments` | Public | Get rule comments |
+| `addComment` | Required | Add comment |
+| `editComment` | Required | Edit own comment |
+| `deleteComment` | Required | Delete own comment |
+| `getNotifications` | Required | Get user notifications |
+| `markNotificationsRead` | Required | Mark as read |
+| `subscribe` | Required | Subscribe to updates |
+| `unsubscribe` | Required | Unsubscribe |
+| `updatePreferences` | Required | Update settings |
+| `editRule` | Admin | Edit rule |
+| `confirmRule` | Admin | Confirm rule (100%) |
+| `deleteRule` | Admin | Delete rule |
+
+---
+
+## 4. UI/UX Features
+
+### Navigation Tabs
+- 🔍 **Поиск** - Search with filters
+- ❤️ **Избранное** - Personal bookmarks
+- 📂 **Домены** - Browse by category
+- 🆕 **Новые** - Recently added rules
+- 📜 **История** - Chat history with AI
+- 📊 **Статистика** - Analytics dashboard
+- 🔔 **Уведомления** - Updates and alerts
+
+### Quick Action Tags
+Pre-defined search tags: Цены, Апостиль, Нотариус, Сроки, Доставка
+
+### Settings Panel
+- Theme selector (Light/Dark/System)
+- Font size preference
+- Offline cache toggle
+- Push notifications toggle
+
+---
+
+## 5. Technical Implementation
+
+### Frontend Stack
+- Next.js 16 + React + TypeScript
+- Tailwind CSS with dark mode support
+- Telegram WebApp SDK integration
+- LocalStorage for offline caching
+
+### Voice Search Flow
+```
+User clicks mic → MediaRecorder starts → User speaks → 
+Stop recording → Blob → Base64 → Whisper API → 
+Transcript → Auto-search with text
+```
+
+### Offline Strategy
+1. Load cached data from localStorage immediately
+2. Fetch fresh data from API in background
+3. Update cache on successful fetch
+4. Show offline indicator when no connection
+
+### Theme Integration
+```typescript
+// Auto-detect Telegram theme
+const tg = window.Telegram.WebApp;
+if (tg.colorScheme === 'dark') {
+  setIsDark(true);
+}
+
+// Sync with Telegram
+Telegram.WebApp.setHeaderColor(isDark ? '#1f2937' : '#ffffff');
+Telegram.WebApp.setBackgroundColor(isDark ? '#1f2937' : '#f5f5f5');
+```
+
+---
+
+## 6. Files Created/Modified
+
+### New Files
+| File | Purpose |
+|------|---------|
+| `src/app/telegram-app/page.tsx` | Main Mini App UI |
+| `src/app/api/telegram/mini-app/route.ts` | API endpoints |
+| `src/lib/telegram/mini-app-auth.ts` | WebApp auth verification |
+| `src/types/telegram.d.ts` | TypeScript types for Telegram SDK |
+
+### Modified Files
+| File | Changes |
+|------|---------|
+| `prisma/schema.prisma` | Added UserFavorite, RuleComment, UserNotification, NotificationLog, UserPreference models |
+| `src/lib/telegram/telegram-api.ts` | Added sendWebAppButton, setMenuButton |
+| `src/lib/telegram/commands.ts` | Updated /start with Mini App button, added /app command |
+| `src/lib/telegram/message-router.ts` | Added /app command handler |
+| `src/app/api/telegram/route.ts` | Added menu button setup |
+
+---
+
+## 7. Deployment Notes
+
+### Environment Variables
+```bash
+# Required
+TELEGRAM_BOT_TOKEN=...
+NEXT_PUBLIC_APP_URL=https://avrora-library-production.up.railway.app
+
+# Optional (for development)
+TELEGRAM_SUPER_ADMIN=96683003
+```
+
+### Database Migration
+```bash
+pnpm db:push
+```
+
+### Menu Button Setup
+The bot automatically sets the menu button on first interaction:
+```typescript
+await setMenuButton(); // Shows "📚 База знаний" button
+```
+
+---
+
+## 8. Testing Checklist
+
+- [x] Mini App loads with data
+- [x] Search works (text)
+- [x] Voice search works
+- [x] Filters work (confidence, domain, document, date)
+- [x] Favorites add/remove
+- [x] Comments add/display
+- [x] Theme switching works
+- [x] Offline mode indicators
+- [x] Admin editing works
+- [x] Notifications display
+- [x] Share functionality works
+
+---
+
+## 9. Known Issues & Limitations
+
+1. **Voice search** requires microphone permission
+2. **Offline mode** only caches previously loaded data
+3. **Comments** don't auto-refresh (manual pull-to-refresh not implemented)
+4. **Push notifications** require additional Telegram Bot API setup
+
+---
+
+## 10. Future Enhancements
+
+- [ ] QR code scanner for document lookup
+- [ ] Push notifications via Telegram
+- [ ] Export rules to PDF
+- [ ] Advanced analytics dashboard
+- [ ] Multi-language support
+- [ ] Rule comparison view
+- [ ] Auto-suggest related rules
+
+---
+
+**Session Date**: February 20, 2026  
+**Primary Task**: Telegram Mini App with full feature set  
+**Result**: ✅ Deployed and operational

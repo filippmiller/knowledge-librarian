@@ -266,7 +266,34 @@ export function useDocumentProcessing(documentId: string) {
     setState(prev => ({ ...prev, isPaused: !prev.isPaused }));
   }, []);
 
-  const connectEventSource = useCallback(() => {
+  // Store token for reconnections
+  const tokenRef = useRef<string | null>(null);
+  const connectEventSourceRef = useRef<((isReconnection?: boolean) => Promise<void>) | null>(null);
+
+  const fetchProcessingToken = useCallback(async (): Promise<string | null> => {
+    try {
+      addLog('DEBUG', 'Получаю токен для SSE соединения...');
+      const response = await fetch(`/api/documents/${documentId}/token`, {
+        method: 'POST',
+        credentials: 'include', // Include Basic Auth credentials
+      });
+      
+      if (!response.ok) {
+        addLog('ERROR', `Не удалось получить токен: ${response.status}`);
+        return null;
+      }
+      
+      const data = await response.json();
+      tokenRef.current = data.token;
+      addLog('DEBUG', 'Токен получен успешно');
+      return data.token;
+    } catch (error) {
+      addLog('ERROR', `Ошибка получения токена: ${error}`);
+      return null;
+    }
+  }, [documentId, addLog]);
+
+  const connectEventSource = useCallback(async (isReconnection = false) => {
     // Don't reconnect if stopped by user
     if (isStoppedRef.current) {
       addLog('INFO', 'Не переподключаюсь - обработка остановлена пользователем');
@@ -275,7 +302,31 @@ export function useDocumentProcessing(documentId: string) {
 
     addLog('SYSTEM', 'Устанавливаю соединение с сервером...');
 
-    const eventSource = new EventSource(`/api/documents/${documentId}/process-stream`);
+    // Get token for SSE auth (reuse existing token for reconnections)
+    let token = tokenRef.current;
+    if (!token || !isReconnection) {
+      token = await fetchProcessingToken();
+      if (!token) {
+        addLog('ERROR', 'Не удалось установить соединение: ошибка авторизации');
+        setState(prev => ({ 
+          ...prev, 
+          error: 'Ошибка авторизации. Обновите страницу и попробуйте снова.',
+          isProcessing: false 
+        }));
+        hasErrorRef.current = true;
+        return;
+      }
+    }
+
+    // Build URL with token and resume flag
+    const params = new URLSearchParams();
+    params.set('token', token);
+    if (isReconnection) {
+      params.set('resume', 'true');
+    }
+    const url = `/api/documents/${documentId}/process-stream?${params.toString()}`;
+    
+    const eventSource = new EventSource(url);
     eventSourceRef.current = eventSource;
 
     eventSource.onopen = () => {
@@ -468,40 +519,57 @@ export function useDocumentProcessing(documentId: string) {
       }
 
       // Only reconnect for pure connection drops (no error message received)
-      // Limited to 3 attempts maximum
-      const maxAttempts = 3;
+      // Limited to 5 attempts maximum with exponential backoff
+      const maxAttempts = 5;
       if (reconnectAttemptsRef.current < maxAttempts) {
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 5000);
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 10000);
         reconnectAttemptsRef.current++;
 
         addLog('WARNING', `Соединение потеряно. Попытка ${reconnectAttemptsRef.current}/${maxAttempts} через ${delay/1000}с...`);
+        addLog('INFO', 'Обработка продолжается на сервере. Переподключение для наблюдения за прогрессом.');
 
-        reconnectTimeoutRef.current = setTimeout(() => {
+        reconnectTimeoutRef.current = setTimeout(async () => {
           // Double-check before reconnecting
           if (!isCompleteRef.current && !hasErrorRef.current && !isStoppedRef.current) {
-            addLog('INFO', 'Переподключение...');
-            connectEventSource();
+            addLog('INFO', 'Переподключение (продолжение с сохранённого прогресса)...');
+            await connectEventSourceRef.current?.(true); // isReconnection = true to use resume mode
           } else {
             addLog('INFO', 'Переподключение отменено - статус изменился');
           }
         }, delay);
       } else {
-        // Max attempts reached - stop completely
+        // Max attempts reached - but processing may still be running on server
         setState((prev) => ({
           ...prev,
           isProcessing: false,
-          error: prev.error || 'Соединение прервано. Нажмите "Запустить" для повторной попытки.',
+          error: prev.error || 'Соединение прервано. Обработка может продолжаться на сервере. Нажмите "Запустить" для переподключения.',
         }));
         hasErrorRef.current = true; // Prevent further reconnection attempts
-        addLog('ERROR', 'Превышено максимальное количество попыток переподключения (3)');
-        addLog('ERROR', 'Нажмите "Запустить" для повторной попытки.');
+        addLog('ERROR', 'Превышено максимальное количество попыток переподключения (5)');
+        addLog('INFO', 'Обработка продолжается на сервере. Нажмите "Запустить" для переподключения.');
       }
 
       eventSource.close();
     };
-  }, [documentId, addLog]);
+  }, [documentId, addLog, fetchProcessingToken]);
+
+  useEffect(() => {
+    connectEventSourceRef.current = connectEventSource;
+  }, [connectEventSource]);
+
+  // Guard against React Strict Mode double-firing and concurrent starts
+  const isStartingRef = useRef(false);
 
   const startProcessing = useCallback(async () => {
+    // Prevent concurrent starts (React Strict Mode calls effects twice in dev)
+    if (isStartingRef.current) {
+      console.log('[useDocumentProcessing] Ignoring duplicate startProcessing call');
+      return;
+    }
+    isStartingRef.current = true;
+    // Reset after a tick to allow future manual starts
+    setTimeout(() => { isStartingRef.current = false; }, 1000);
+
     // Reset counters but keep logs (add separator)
     tokenCountRef.current = 0;
     tokensInLastSecondRef.current = [];
@@ -575,16 +643,15 @@ export function useDocumentProcessing(documentId: string) {
     addLog('SYSTEM', `  Started: ${new Date().toLocaleString('ru-RU')}`);
     addLog('SYSTEM', '═══════════════════════════════════════════════════════════════');
 
-    try {
-      connectEventSource();
-    } catch (err) {
+    // Connect EventSource (async)
+    connectEventSource().catch((err) => {
       setState((prev) => ({
         ...prev,
         isProcessing: false,
         error: err instanceof Error ? err.message : 'Неизвестная ошибка',
       }));
       addLog('ERROR', `Критическая ошибка: ${err}`);
-    }
+    });
   }, [documentId, addLog, connectEventSource]);
 
   const stopProcessing = useCallback(async () => {
@@ -692,6 +759,15 @@ export function useDocumentProcessing(documentId: string) {
 
       const result = await commitResponse.json();
       addLog('SUCCESS', `✓ Успешно сохранено ${selectedIds.length} элементов в базу знаний`);
+
+      // Remove committed items from state to prevent re-saving
+      setState(prev => ({
+        ...prev,
+        extractedItems: prev.extractedItems.filter(
+          item => !selectedIds.includes(item.id)
+        ),
+      }));
+
       return { success: true, result };
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Неизвестная ошибка';
@@ -699,6 +775,20 @@ export function useDocumentProcessing(documentId: string) {
       return { success: false, error: message };
     }
   }, [documentId, state.extractedItems, addLog]);
+
+  // Reconnect when tab becomes visible again (browser may have killed the connection)
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && state.isProcessing && !state.isConnected && !isStoppedRef.current && !isCompleteRef.current && !hasErrorRef.current) {
+        addLog('INFO', 'Вкладка снова активна - переподключение...');
+        reconnectAttemptsRef.current = 0; // Reset attempts on tab reactivation
+        connectEventSource(true);
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [state.isProcessing, state.isConnected, connectEventSource, addLog]);
 
   // Cleanup on unmount
   useEffect(() => {

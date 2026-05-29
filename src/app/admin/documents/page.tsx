@@ -82,7 +82,7 @@ export default function DocumentsPage() {
     setToast({ message, type });
   }, []);
 
-  async function fetchDocuments() {
+  const fetchDocuments = useCallback(async () => {
     try {
       const response = await fetch('/api/documents');
       const data = await response.json();
@@ -93,14 +93,14 @@ export default function DocumentsPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [showToast]);
 
   useEffect(() => {
     fetchDocuments();
     // Refresh every 30 seconds to update statuses
     const interval = setInterval(fetchDocuments, 30000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchDocuments]);
 
   async function handleUpload(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -130,6 +130,11 @@ export default function DocumentsPage() {
           autoStart: true,
         });
 
+        fetchDocuments();
+      } else if (response.status === 409) {
+        // Duplicate document
+        const data = await response.json();
+        showToast(data.error || 'Документ уже существует', 'error');
         fetchDocuments();
       } else {
         const error = await response.json();
@@ -176,7 +181,7 @@ export default function DocumentsPage() {
           throw new Error('Failed to perform action');
         }
       }
-    } catch (error) {
+    } catch {
       showToast('Ошибка выполнения действия', 'error');
     }
   }
@@ -197,7 +202,7 @@ export default function DocumentsPage() {
       } else {
         throw new Error('Failed to perform bulk action');
       }
-    } catch (error) {
+    } catch {
       showToast('Ошибка выполнения действия', 'error');
     }
   }
@@ -231,8 +236,9 @@ export default function DocumentsPage() {
 
   function getStatusBadge(status: string) {
     const config: Record<string, { variant: 'default' | 'secondary' | 'destructive' | 'outline'; className: string }> = {
-      PENDING: { variant: 'secondary', className: 'bg-gray-500/20 text-gray-400' },
+      PENDING: { variant: 'secondary', className: 'bg-yellow-500/20 text-yellow-400' },
       PROCESSING: { variant: 'outline', className: 'bg-cyan-500/20 text-cyan-400 border-cyan-500/50' },
+      EXTRACTED: { variant: 'outline', className: 'bg-orange-500/20 text-orange-400 border-orange-500/50' },
       COMPLETED: { variant: 'default', className: 'bg-green-500/20 text-green-400' },
       FAILED: { variant: 'destructive', className: 'bg-red-500/20 text-red-400' },
     };
@@ -252,12 +258,15 @@ export default function DocumentsPage() {
       <Badge variant={c.variant} className={`font-mono ${c.className}`}>
         {status === 'COMPLETED' && '✓ '}
         {status === 'FAILED' && '✗ '}
+        {status === 'PENDING' && '◌ '}
+        {status === 'EXTRACTED' && '⬡ '}
         {status}
       </Badge>
     );
   }
 
   const processingCount = documents.filter(d => d.parseStatus === 'PROCESSING').length;
+  const extractedCount = documents.filter(d => d.parseStatus === 'EXTRACTED').length;
   const stuckCount = documents.filter(d => {
     if (d.parseStatus !== 'PROCESSING') return false;
     const age = Date.now() - new Date(d.uploadedAt).getTime();
@@ -279,7 +288,9 @@ export default function DocumentsPage() {
         <div>
           <h1 className="text-2xl font-bold">Документы</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Всего: {documents.length} | В обработке: {processingCount}
+            Всего: {documents.length}
+            {processingCount > 0 && ` | В обработке: ${processingCount}`}
+            {extractedCount > 0 && <span className="text-orange-500"> | Ожидают проверки: {extractedCount}</span>}
             {stuckCount > 0 && <span className="text-yellow-500"> | Зависших: {stuckCount}</span>}
           </p>
         </div>
@@ -406,7 +417,7 @@ export default function DocumentsPage() {
                         onClick={() => openProcessingModal(doc)}
                         className="font-mono text-xs"
                       >
-                        {doc.parseStatus === 'COMPLETED' ? 'Просмотр' : 'Терминал'}
+                        {doc.parseStatus === 'COMPLETED' ? 'Просмотр' : doc.parseStatus === 'EXTRACTED' ? 'Проверить' : doc.parseStatus === 'PENDING' ? 'Обработать' : 'Терминал'}
                       </Button>
 
                       <DropdownMenu>
@@ -416,10 +427,25 @@ export default function DocumentsPage() {
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
+                          {doc.parseStatus === 'PENDING' && (
+                            <DropdownMenuItem onClick={() => openProcessingModal(doc)}>
+                              ▶ Начать обработку
+                            </DropdownMenuItem>
+                          )}
                           {doc.parseStatus === 'PROCESSING' && (
                             <DropdownMenuItem onClick={() => handleDocumentAction(doc.id, 'cancel')}>
                               ✗ Отменить обработку
                             </DropdownMenuItem>
+                          )}
+                          {doc.parseStatus === 'EXTRACTED' && (
+                            <>
+                              <DropdownMenuItem onClick={() => openProcessingModal(doc)}>
+                                ⬡ Проверить и сохранить
+                              </DropdownMenuItem>
+                              <DropdownMenuItem onClick={() => handleDocumentAction(doc.id, 'reset')}>
+                                ↻ Сбросить и переобработать
+                              </DropdownMenuItem>
+                            </>
                           )}
                           {doc.parseStatus === 'FAILED' && (
                             <DropdownMenuItem onClick={() => handleDocumentAction(doc.id, 'retry')}>
@@ -451,6 +477,7 @@ export default function DocumentsPage() {
 
       {/* Processing Modal */}
       <ProcessingModal
+        key={processingModal.documentId || 'none'}
         isOpen={processingModal.isOpen}
         onClose={() => {
           setProcessingModal({ isOpen: false, documentId: null, documentTitle: '', autoStart: true });

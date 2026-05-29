@@ -1,5 +1,10 @@
 import { test, expect } from '@playwright/test';
 
+test.skip(
+  !process.env.RUN_PRODUCTION_MUTATION_TESTS,
+  'Production mutation test: starts document processing. Set RUN_PRODUCTION_MUTATION_TESTS=1 to run.'
+);
+
 test.describe('Streaming Document Processing', () => {
   test('should process document using streaming interface', async ({ page }) => {
     // Navigate to documents page

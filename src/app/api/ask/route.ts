@@ -3,6 +3,7 @@ import {
   answerQuestionEnhanced,
   answerWithContext,
 } from '@/lib/ai/enhanced-answering-engine';
+import { getCachedAnswer, storeCachedAnswer } from '@/lib/ai/answer-cache';
 import {
   saveChatMessage,
   getOrCreateSession,
@@ -12,6 +13,7 @@ import {
   getClientKey,
   RATE_LIMITS,
 } from '@/lib/rate-limiter';
+import { escalateUnconvincingAIAnswer } from '@/lib/telegram/ai-escalation';
 
 export async function POST(request: NextRequest) {
   // Rate limiting
@@ -49,12 +51,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid request body' }, { status: 400 });
     }
 
-    const { question, sessionId, includeDebug, useConversationContext } =
+    const { question, sessionId, includeDebug, useConversationContext, clarificationAnswer } =
       body as {
         question?: unknown;
         sessionId?: string;
         includeDebug?: boolean;
         useConversationContext?: boolean;
+        clarificationAnswer?: string;
       };
 
     if (!question || typeof question !== 'string') {
@@ -69,21 +72,53 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    console.log('[ASK] Received question:', question);
+
     // Get or create session
     let currentSessionId = sessionId;
     if (!currentSessionId) {
+      console.log('[ASK] Creating new session...');
       const session = await getOrCreateSession('API');
       currentSessionId = session.id;
+      console.log('[ASK] Created session:', currentSessionId);
     }
 
     // Save user message
+    console.log('[ASK] Saving user message...');
     await saveChatMessage(currentSessionId, 'USER', question);
+
+    // Check shared answer cache first (skip for debug and conversation-context requests).
+    if (!includeDebug) {
+      const cached = !useConversationContext ? getCachedAnswer(question, clarificationAnswer) : null;
+      if (cached) {
+        console.log('[ASK] Returning cached answer for:', question.substring(0, 60));
+        return NextResponse.json({ sessionId: currentSessionId, ...cached.result });
+      }
+    }
+
+    // Build effective question (append clarification context if provided)
+    const effectiveQuestion = clarificationAnswer
+      ? `${question}\n\nУточнение пользователя: ${clarificationAnswer}`
+      : question;
 
     // Generate answer using enhanced engine
     // Use conversation context if session exists and flag is set
+    console.log('[ASK] Generating answer...');
     const result = useConversationContext && sessionId
-      ? await answerWithContext(question, currentSessionId, includeDebug === true)
-      : await answerQuestionEnhanced(question, currentSessionId, includeDebug === true);
+      ? await answerWithContext(effectiveQuestion, currentSessionId, includeDebug === true)
+      : await answerQuestionEnhanced(effectiveQuestion, currentSessionId, includeDebug === true);
+    console.log('[ASK] Answer generated successfully');
+    void escalateUnconvincingAIAnswer({
+      question,
+      result,
+      source: 'API',
+      sessionId: currentSessionId,
+    });
+
+    // Cache only convincing final answers; weak answers and clarification prompts are skipped.
+    if (!includeDebug && !useConversationContext) {
+      storeCachedAnswer(question, result, clarificationAnswer);
+    }
 
     // Save assistant message with enhanced metadata
     await saveChatMessage(currentSessionId, 'ASSISTANT', result.answer, {

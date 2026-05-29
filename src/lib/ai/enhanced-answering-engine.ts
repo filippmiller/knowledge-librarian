@@ -12,7 +12,10 @@
 import { createChatCompletion } from '@/lib/ai/chat-provider';
 import prisma from '@/lib/db';
 import { hybridSearch, HybridSearchResult } from './vector-search';
-import { expandQuery, ExtractedEntities, extractEntities } from './query-expansion';
+import { expandQuery, ExpandedQueries, ExtractedEntities, extractEntities } from './query-expansion';
+import { classifyScenario, type ScenarioDecision } from '@/lib/knowledge/scenario-classifier';
+import { ancestorsOf } from '@/lib/knowledge/scenarios';
+import { verifyAnswer, type ConsistencyReport } from '@/lib/ai/consistency-gate';
 
 // Confidence thresholds
 const CONFIDENCE_THRESHOLD_HIGH = 0.7;    // Answer confidently
@@ -47,6 +50,35 @@ export interface EnhancedAnswerResult {
       maxSimilarity: number;
     };
   };
+  clarificationQuestion?: {
+    question: string;
+    options: string[];
+  };
+  primarySource?: {
+    documentId: string;
+    documentTitle: string;
+    chunkContent: string;
+    relevanceScore: number;
+  };
+  supplementarySources?: Array<{
+    documentId: string;
+    documentTitle: string;
+    chunkContent: string;
+    relevanceScore: number;
+  }>;
+  // Scenario decision gate output — present after Пачка A lands.
+  // scenarioKey/scenarioLabel set when the gate picked a concrete scenario;
+  // scenarioClarification set when the gate needs a user choice (and no
+  // retrieval/synthesis was run — answer field will hold the prompt text).
+  scenarioKey?: string;
+  scenarioLabel?: string;
+  scenarioClarification?: {
+    atNodeKey: string;
+    prompt: string;
+    options: Array<{ id: string; label: string; targetScenarioKey: string }>;
+  };
+  answerSource?: 'knowledge_base' | 'general_ai' | 'deterministic_guardrail';
+  requiresHumanReview?: boolean;
 }
 
 interface IntentClassification {
@@ -89,30 +121,60 @@ const INTENT_CLASSIFIER_PROMPT = `Ты - классификатор намере
   "reasoning": "краткое объяснение"
 }`;
 
-const ENHANCED_ANSWERING_PROMPT = `Ты - ИИ-библиотекарь знаний для бюро переводов.
+const ENHANCED_ANSWERING_PROMPT = `Ты — ИИ-библиотекарь знаний для бюро переводов.
 
-КРИТИЧЕСКИЕ ПРАВИЛА:
-1. Отвечай ТОЛЬКО на основе предоставленных знаний
-2. Если информации недостаточно - честно скажи об этом
-3. Всегда указывай источники (коды правил)
-4. Будь краток и точен
-5. Отвечай на русском языке
+СЦЕНАРИЙ ПРОИЗВОДСТВА ОТВЕТА УЖЕ ЗАФИКСИРОВАН. Все приведённые ниже цитаты (правила, Q&A, фрагменты документов) принадлежат ЭТОМУ сценарию. Отвечай ТОЛЬКО на его основе.
 
-УРОВНИ УВЕРЕННОСТИ:
-- Высокий: найдена точная информация → отвечай уверенно
-- Средний: информация частичная → отвечай с оговоркой "насколько мне известно"
-- Низкий: информация косвенная → предложи уточнить вопрос
-- Недостаточный: ничего не найдено → честно скажи "Я не нашёл информации"
+═══ ЖЕЛЕЗНЫЕ ПРАВИЛА (нарушение недопустимо) ═══
 
-ДЛЯ ЦЕН И СРОКОВ:
-- Цитируй точные значения из базы знаний
-- Если цена может быть устаревшей (более 6 месяцев) - предупреди
-- Если есть несколько вариантов - перечисли все
+1. **НЕ ВЫДУМЫВАЙ КОНКРЕТИКУ**, которой нет в цитатах:
+   — адреса и телефоны копируй СИМВОЛ-В-СИМВОЛ из цитат
+   — цены и числа — строго по источнику (не "примерно 5000", а "2500₽" как в цитате)
+   — дни недели и часы работы — только если явно указаны в цитате
+   — URL, фамилии, названия учреждений — ТОЛЬКО из цитат
 
-ДЛЯ ПРОЦЕДУР:
-- Опиши шаги последовательно
-- Укажи необходимые документы
-- Упомяни исключения, если есть`;
+2. **ПРИ ОТСУТСТВИИ ДАННЫХ** — не придумывай, а напиши "в источнике не указано" или просто не упоминай.
+
+3. **НЕ ОБОБЩАЙ И НЕ ЭКСТРАПОЛИРУЙ**: если в источнике написано "2500₽ за документ" — не добавляй "значит 5000₽ за два"; если написано "нотариус СПб" — не расширяй до "нотариус СПб или ЛО".
+
+4. **НЕ СМЕШИВАЙ** факты из разных цитат в один: если цитата 1 говорит "Вторник 10-12", а цитата 2 "Четверг 14-16", пиши их раздельно с указанием источника, не склеивай в "Вторник-четверг 10-16".
+
+5. **НЕ РЕДАКТИРУЙ ПРАВИЛА**: не предупреждай "цена может быть устаревшей", не добавляй юридических оговорок, которых нет в источнике.
+
+6. **Цитируй точно**: если факт важен — приведи дословно из цитаты в кавычках "...".
+
+═══ ФОРМАТ ОТВЕТА ═══
+
+- Язык ответа: русский, кратко и по делу.
+- Ссылайся на правила формата [R-123] если они есть в цитатах.
+- Если в цитатах есть **адрес/телефон/график/цена** — процитируй их дословно, не пересказывай.
+- Структурируй длинные ответы подзаголовками, но не раздувай пустыми секциями.
+
+═══ КАК ПОНИМАТЬ ЦИТАТЫ ═══
+
+Все три типа источника (правила, Q&A, фрагменты документов) — равнозначные цитаты из базы знаний. Фрагменты документов — наиболее полный и точный источник; правила — извлечённые ключевые факты; Q&A — уже сформулированные готовые ответы.
+
+Если по конкретному аспекту вопроса НЕТ ни одной цитаты — скажи это прямо ("в базе знаний не указано, уточните у …"), НЕ ВЫДУМЫВАЙ.`;
+
+const GENERAL_KNOWLEDGE_FALLBACK_PROMPT = `Ты — экспертный помощник бюро переводов.
+
+База знаний не дала прямого уверенного ответа. Используй ОБЩЕЕ профессиональное знание только для вопросов по услугам бюро: апостиль, легализация, нотариальные документы, ЗАГС, МВД, переводы.
+
+Правила:
+- Не выдумывай адреса, телефоны, цены, сроки и графики.
+- Если вопрос юридически или операционно зависит от типа документа, прямо назови условие.
+- Если уверенности нет, скажи, что нужен ручной разбор.
+- Отвечай кратко и практически.
+- Не представляй ответ как факт из базы знаний.
+
+Ответ СТРОГО JSON:
+{
+  "canAnswer": true | false,
+  "answer": "краткий ответ пользователю",
+  "confidence": 0.0,
+  "requiresHumanReview": true | false,
+  "reasoning": "коротко почему"
+}`;
 
 async function classifyIntent(question: string): Promise<IntentClassification> {
   const { createChatCompletion, normalizeJsonResponse } = await import('@/lib/ai/chat-provider');
@@ -154,11 +216,12 @@ async function classifyIntent(question: string): Promise<IntentClassification> {
 async function multiQuerySearch(
   queries: string[],
   domainSlugs: string[],
-  limit: number
+  limit: number,
+  scenarioAncestors: string[] = []
 ): Promise<HybridSearchResult[]> {
   // Run searches in parallel
   const allResults = await Promise.all(
-    queries.map(q => hybridSearch(q, domainSlugs, limit))
+    queries.map(q => hybridSearch(q, domainSlugs, limit, 0.7, scenarioAncestors))
   );
 
   // Merge and deduplicate results using max score
@@ -199,6 +262,56 @@ function selectContextChunks(
     .slice(0, maxChunks);
 }
 
+function extractSearchTerms(value: string): string[] {
+  const normalized = value
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[^\p{L}\p{N}\s()-]/gu, ' ');
+
+  const words = normalized
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter((word) => word.length >= 3);
+
+  const expanded = words.flatMap((word) => {
+    const variants = [word];
+    if (word.length >= 6) variants.push(word.slice(0, -1));
+    if (word.length >= 8) variants.push(word.slice(0, -2));
+    return variants;
+  });
+
+  return [...new Set(expanded)];
+}
+
+function scoreText(value: string, terms: string[]): number {
+  const text = value.toLowerCase().replace(/ё/g, 'е');
+  let score = 0;
+  for (const term of terms) {
+    if (!text.includes(term)) continue;
+    score += term.length >= 6 ? 3 : 1;
+    if (/загс|свидетельств|справк|документ|брак|рожд|смерт/.test(term)) {
+      score += 2;
+    }
+  }
+  return score;
+}
+
+function rankByQuestion<T>(
+  items: T[],
+  question: string,
+  getText: (item: T) => string,
+  getBoost: (item: T) => number = () => 0
+): T[] {
+  const terms = extractSearchTerms(question);
+  if (terms.length === 0) return items;
+
+  return items
+    .map((item) => ({ item, score: scoreText(getText(item), terms) + getBoost(item) }))
+    .filter(({ score }) => score > 0)
+    .sort((a, b) => b.score - a.score)
+    .map(({ item }) => item);
+}
+
 /**
  * Main enhanced answering function
  */
@@ -207,58 +320,227 @@ export async function answerQuestionEnhanced(
   sessionId?: string,
   includeDebug: boolean = false
 ): Promise<EnhancedAnswerResult> {
-  // Step 1: Expand query and extract entities in parallel
-  const [expandedQueries, entities, intentResult] = await Promise.all([
+  console.log('[enhanced-answering] Starting for question:', question.substring(0, 100));
+
+  // Step 0: Scenario decision gate — decides whether we have enough info to
+  // pick a single procedure, need to ask the user, or should say "out of
+  // scope". Runs BEFORE retrieval so ambiguous queries never trigger a
+  // cross-scenario blended synthesis.
+  console.log('[enhanced-answering] Step 0: Scenario decision gate...');
+  let scenarioDecision: ScenarioDecision;
+  try {
+    scenarioDecision = await classifyScenario(question);
+    console.log('[enhanced-answering] Scenario decision:', scenarioDecision.kind,
+      'kind' in scenarioDecision && scenarioDecision.kind === 'scenario_clear' ? `→ ${scenarioDecision.scenarioKey}` :
+      'kind' in scenarioDecision && scenarioDecision.kind === 'needs_clarification' ? `at ${scenarioDecision.atNodeKey}` : '');
+  } catch (e) {
+    console.warn('[enhanced-answering] Scenario gate failed, proceeding without filter:', e);
+    scenarioDecision = { kind: 'out_of_scope', reasoning: 'gate error; fell through to open retrieval' };
+  }
+
+  // Short-circuit: if the gate needs clarification, skip retrieval entirely
+  // and return a structured clarification response. The mini-app renders this
+  // as buttons (Пачка B); legacy clients see the prompt text in `answer`.
+  if (scenarioDecision.kind === 'needs_clarification') {
+    const guardrail = buildDeterministicGuardrailResult(question);
+    if (guardrail) return guardrail;
+    return buildClarificationResult(question, scenarioDecision);
+  }
+
+  // out_of_scope handling. The classifier marks a question out_of_scope when
+  // it doesn't map to a concrete apostille scenario — but the scenario tree
+  // only covers apostille (ЗАГС/нотариалка/опека). Lots of legitimate bureau
+  // questions (education apostille, criminal-record certs, prices, translation)
+  // land here even though the KB DOES hold the answer. So:
+  //   1) deterministic region guardrail still wins (Moscow↔СПб);
+  //   2) if the question is about a bureau topic at all → reclassify to an
+  //      OPEN knowledge lookup over the whole KB (general_ai stays a last
+  //      resort, only if open retrieval finds nothing — handled downstream);
+  //   3) only genuinely off-topic questions (no bureau keyword: weather,
+  //      crypto, …) get the honest "no data" short-circuit, never general_ai.
+  if (scenarioDecision.kind === 'out_of_scope') {
+    const guardrail = buildDeterministicGuardrailResult(question);
+    if (guardrail) return guardrail;
+
+    if (!isBureauTopic(question)) {
+      return buildOutOfScopeResult(question, scenarioDecision);
+    }
+
+    console.log('[enhanced-answering] out_of_scope but bureau topic → open knowledge lookup');
+    scenarioDecision = {
+      kind: 'knowledge_lookup',
+      label: 'Открытый поиск по базе знаний',
+      reasoning: `out_of_scope reclassified to open lookup (bureau topic): ${scenarioDecision.reasoning}`,
+    };
+  }
+
+  const openKnowledgeLookup = scenarioDecision.kind === 'knowledge_lookup';
+  const scenarioAncestors = scenarioDecision.kind === 'scenario_clear'
+    ? ancestorsOf(scenarioDecision.scenarioKey)
+    : [];
+  const scenarioLabelForAnswer = scenarioDecision.kind === 'scenario_clear'
+    ? scenarioDecision.scenarioLabel
+    : scenarioDecision.label;
+  const scenarioKeyForAnswer = scenarioDecision.kind === 'scenario_clear'
+    ? scenarioDecision.scenarioKey
+    : undefined;
+  console.log(
+    '[enhanced-answering] Retrieval scope:',
+    openKnowledgeLookup ? 'open knowledge lookup' : scenarioAncestors.join(' > ')
+  );
+
+  // Step 1: Expand query and extract entities in parallel (resilient - each can fail independently)
+  console.log('[enhanced-answering] Step 1: Query expansion and intent classification...');
+  const [expandedResult, entitiesResult, intentSettled] = await Promise.allSettled([
     expandQuery(question),
     extractEntities(question),
     classifyIntent(question),
   ]);
 
-  // Step 2: Build query list for multi-query retrieval
-  const allQueries = [question, ...expandedQueries.variants];
+  const expandedQueries: ExpandedQueries = expandedResult.status === 'fulfilled'
+    ? expandedResult.value
+    : { original: question, variants: [], isAmbiguous: false };
+  const entities: ExtractedEntities = entitiesResult.status === 'fulfilled'
+    ? entitiesResult.value
+    : { dates: [], prices: [], documentTypes: [], services: [] };
+  const intentResult: IntentClassification = intentSettled.status === 'fulfilled'
+    ? intentSettled.value
+    : { intent: 'general_info', domains: [], confidence: 0.5 };
 
-  // Step 3: Run hybrid multi-query search
-  const chunks = await multiQuerySearch(
-    allQueries,
-    intentResult.domains,
-    10
-  );
+  if (expandedResult.status === 'rejected') console.warn('[enhanced-answering] Query expansion failed, using original query');
+  if (entitiesResult.status === 'rejected') console.warn('[enhanced-answering] Entity extraction failed, using empty entities');
+  if (intentSettled.status === 'rejected') console.warn('[enhanced-answering] Intent classification failed, using defaults');
+  console.log('[enhanced-answering] Step 1 completed. Intent:', intentResult.intent, 'Domains:', intentResult.domains);
+  const relevanceText = [question, ...expandedQueries.variants, ...entities.documentTypes, ...entities.services].join(' ');
+
+  // Step 2: Build query list for multi-query retrieval
+  const allQueries = [
+    question,
+    ...expandedQueries.variants,
+    ...getDeterministicQueryVariants(question),
+  ];
+  console.log('[enhanced-answering] Step 2: Built', allQueries.length, 'query variants');
+
+  // Step 3: Run hybrid multi-query search (scenario-filtered, no domain
+  // filter — see Step 5 comment for why domains are now ignored at retrieval).
+  console.log('[enhanced-answering] Step 3: Running hybrid search...');
+  let chunks;
+  try {
+    chunks = await multiQuerySearch(
+      allQueries,
+      [], // domains disabled — scenario filter does the narrowing
+      10,
+      scenarioAncestors
+    );
+    console.log('[enhanced-answering] Step 3 completed. Found', chunks.length, 'chunks');
+  } catch (error) {
+    console.error('[enhanced-answering] Step 3 (hybrid search) failed:', error);
+    throw error;
+  }
+
+  // Fetch document titles for source attribution
+  const uniqueDocIds = [...new Set(chunks.map(c => c.documentId).filter(Boolean))];
+  const docTitleMap = new Map<string, string>();
+  if (uniqueDocIds.length > 0) {
+    try {
+      const docs = await prisma.document.findMany({
+        where: { id: { in: uniqueDocIds } },
+        select: { id: true, title: true },
+      });
+      for (const d of docs) docTitleMap.set(d.id, d.title);
+    } catch (e) {
+      console.warn('[enhanced-answering] Failed to fetch doc titles:', e);
+    }
+  }
 
   // Step 4: Select context chunks dynamically
   const contextChunks = selectContextChunks(chunks, 5);
+  console.log('[enhanced-answering] Step 4: Selected', contextChunks.length, 'context chunks');
 
-  // Step 5: Get relevant active rules
-  const rules = await prisma.rule.findMany({
-    where: {
-      status: 'ACTIVE',
-      domains: intentResult.domains.length > 0
-        ? { some: { domain: { slug: { in: intentResult.domains } } } }
-        : undefined,
-    },
-    include: {
-      document: { select: { title: true } },
-    },
-    take: 10,
-    orderBy: { confidence: 'desc' },
-  });
+  // Group context chunks by document for source attribution
+  const chunksByDoc = new Map<string, HybridSearchResult[]>();
+  for (const chunk of contextChunks) {
+    if (!chunk.documentId) continue;
+    const existing = chunksByDoc.get(chunk.documentId) ?? [];
+    existing.push(chunk);
+    chunksByDoc.set(chunk.documentId, existing);
+  }
+  // Rank documents by SEMANTIC similarity, not the RRF combinedScore. RRF
+  // scores are tiny and nearly flat (~0.015 across all results), so picking
+  // the "primary" doc by combinedScore was effectively random — it routinely
+  // surfaced an off-topic doc (e.g. the МВД instruction under a КЗАГС answer).
+  // semanticScore has real spread (0.4–0.6) and tracks topical relevance.
+  let primaryDocId = '';
+  let bestDocScore = 0;
+  for (const [docId, docChunks] of chunksByDoc) {
+    const maxScore = Math.max(...docChunks.map(c => c.semanticScore));
+    if (maxScore > bestDocScore) { bestDocScore = maxScore; primaryDocId = docId; }
+  }
 
-  // Step 6: Get relevant Q&A pairs
-  const qaPairs = await prisma.qAPair.findMany({
-    where: {
-      status: 'ACTIVE',
-      domains: intentResult.domains.length > 0
-        ? { some: { domain: { slug: { in: intentResult.domains } } } }
-        : undefined,
-    },
-    take: 5,
-  });
+  // Step 5: Get relevant active rules (scenario-filtered).
+  //
+  // NB: we deliberately DO NOT filter by intentResult.domains anymore. Audit
+  // on 2026-04-23 showed the existing Domain assignments are over-broad —
+  // notary/legal_compliance/pricing/general_ops each cover 161 of 163 rules
+  // (every rule gets ~4 domains tagged at extraction time), making the
+  // domain filter equivalent to no filter. Scenario filtering does the
+  // meaningful narrowing; domains were adding zero signal and creating a
+  // false sense of precision. Intent classification still returns domains
+  // for logging/debugging purposes, but they no longer gate retrieval.
+  console.log('[enhanced-answering] Step 5: Fetching rules and QA pairs...');
+  const scenarioWhere = scenarioAncestors.length > 0
+    ? { OR: [{ scenarioKey: null }, { scenarioKey: { in: scenarioAncestors } }] }
+    : {};
+  let rules;
+  try {
+    const ruleCandidates = await prisma.rule.findMany({
+      where: {
+        status: 'ACTIVE',
+        ...scenarioWhere,
+      },
+      include: {
+        document: { select: { title: true } },
+      },
+      take: 100,
+      orderBy: { confidence: 'desc' },
+    });
+    rules = rankByQuestion(
+      ruleCandidates,
+      relevanceText,
+      (rule) => `${rule.ruleCode} ${rule.title} ${rule.body} ${rule.document?.title ?? ''}`,
+      (rule) => rule.confidence >= 1 ? 2 : 0
+    ).slice(0, 10);
+    console.log('[enhanced-answering] Found', rules.length, 'rules');
+  } catch (error) {
+    console.error('[enhanced-answering] Step 5 (rules fetch) failed:', error);
+    throw error;
+  }
+
+  // Step 6: Get relevant Q&A pairs (scenario-filtered, no domain filter).
+  let qaPairs;
+  try {
+    const qaCandidates = await prisma.qAPair.findMany({
+      where: {
+        status: 'ACTIVE',
+        ...scenarioWhere,
+      },
+      take: 100,
+    });
+    qaPairs = rankByQuestion(qaCandidates, relevanceText, (qa) => `${qa.question} ${qa.answer}`)
+      .slice(0, 5);
+    console.log('[enhanced-answering] Found', qaPairs.length, 'QA pairs');
+  } catch (error) {
+    console.error('[enhanced-answering] Step 6 (QA pairs fetch) failed:', error);
+    throw error;
+  }
 
   // Step 7: Calculate overall confidence
-  const searchConfidence = contextChunks.length > 0
-    ? contextChunks[0].combinedScore
+  // Use semantic similarity (not RRF rank score) for confidence, since RRF produces tiny values (0.01-0.02) by design
+  const bestSemanticScore = contextChunks.length > 0
+    ? Math.max(...contextChunks.map(c => c.semanticScore))
     : 0;
   const overallConfidence = Math.min(
-    (intentResult.confidence * 0.4) + (searchConfidence * 0.6),
+    (intentResult.confidence * 0.3) + (bestSemanticScore * 0.7),
     1.0
   );
 
@@ -284,38 +566,173 @@ export async function answerQuestionEnhanced(
   }
 
   // Step 9: Build context and generate answer
-  const context = buildEnhancedContext(contextChunks, rules, qaPairs, confidenceLevel);
+  console.log('[enhanced-answering] Step 9: Generating answer with confidence level:', confidenceLevel);
+  const context = buildEnhancedContext(contextChunks, rules, qaPairs);
 
-  const systemPrompt = ENHANCED_ANSWERING_PROMPT + `
+  if (confidenceLevel === 'insufficient' && shouldUseGeneralKnowledgeFallback(question)) {
+    const guardrail = buildDeterministicGuardrailResult(question);
+    if (guardrail) return guardrail;
 
-ТЕКУЩИЙ УРОВЕНЬ УВЕРЕННОСТИ: ${confidenceLevel}
-${needsClarification ? 'РЕКОМЕНДУЕТСЯ УТОЧНЕНИЕ' : ''}`;
+    return answerFromGeneralKnowledgeFallback(
+      question,
+      `retrieval insufficient; scenario=${scenarioLabelForAnswer}; chunks=${contextChunks.length}; rules=${rules.length}; qa=${qaPairs.length}`
+    );
+  }
 
-  const answer =
-    (await createChatCompletion({
+  // Declare the chosen scenario explicitly so the synthesizer knows the
+  // frame. This amplifies the evidence-only contract: "all your citations
+  // belong to {{scenarioLabel}} — don't mention any other scenario".
+  const scenarioPreamble = openKnowledgeLookup
+    ? `СЦЕНАРИЙ: ${scenarioLabelForAnswer}\nВсе цитаты ниже найдены открытым поиском по базе знаний. Отвечай только по приведенным цитатам.\n`
+    : `СЦЕНАРИЙ: ${scenarioLabelForAnswer}  (ключ: ${scenarioKeyForAnswer})\n` +
+      `Все цитаты ниже относятся к этому сценарию. НЕ упоминай другие процедуры (например другие регионы или учреждения), даже если они существуют вообще.\n`;
+
+  const systemPrompt = ENHANCED_ANSWERING_PROMPT;
+
+  let answer: string;
+  try {
+    answer =
+      (await createChatCompletion({
       messages: [
         { role: 'system', content: systemPrompt },
         {
           role: 'user',
-          content: `Вопрос: ${question}
+          content: `${scenarioPreamble}
+Вопрос пользователя: ${question}
 
-Доступные знания:
+═══ ЦИТАТЫ ИЗ БАЗЫ ЗНАНИЙ ═══
 ${context}
 
+═══ ЗАДАЧА ═══
 ${confidenceLevel === 'insufficient'
-              ? 'Информации недостаточно. Ответь, что не нашёл релевантной информации, и предложи уточнить вопрос.'
-              : 'Предоставь полезный ответ на основе ТОЛЬКО приведённых знаний.'}`,
+              ? 'Релевантных цитат не найдено. Ответь: "В базе знаний по этому вопросу нет данных." Ни в коем случае не выдумывай факты.'
+              : 'Ответь на вопрос, СТРОГО опираясь только на приведённые цитаты. Адреса, телефоны, цены, графики работы — цитируй дословно. Если какой-то аспект не покрыт цитатами, так и скажи: "в источнике не указано". Не добавляй информацию, которой нет выше.'}`,
         },
       ],
-      temperature: 0.3,
+      temperature: 0,
     })) || 'Не удалось сформировать ответ';
+    console.log('[enhanced-answering] Answer generated successfully, length:', answer.length);
+  } catch (error) {
+    console.error('[enhanced-answering] Step 9 (answer generation) failed:', error);
+    throw error;
+  }
 
-  // Build citations with relevance scores
-  const citations = rules.slice(0, 5).map((r, i) => ({
+  // Step 9.5: Consistency gate — verify claims against source chunks. If any
+  // claim isn't supported, regenerate ONCE with the unsupported claims flagged
+  // as errors to remove. This catches the "Вторник-пятница 10-17" class of
+  // hallucinations where the model invents a plausible schedule/address/price
+  // that isn't actually in the retrieved chunks. Every finding is persisted
+  // to HallucinationLog for post-hoc analysis (which scenarios are worst,
+  // does regeneration actually fix them, etc.).
+  let consistency: ConsistencyReport | undefined;
+  const initialAnswerForLog = answer;
+  let regenerated = false;
+  if (contextChunks.length > 0 && confidenceLevel !== 'insufficient') {
+    try {
+      consistency = await verifyAnswer(
+        answer,
+        contextChunks.map((c) => c.content)
+      );
+      console.log(`[enhanced-answering] Consistency: ${consistency.claims.length} claims, ${consistency.unsupported.length} unsupported`);
+      if (consistency.unsupported.length > 0) {
+        console.warn('[enhanced-answering] Unsupported claims:',
+          consistency.unsupported.map((c) => `"${c.claim}" (${c.reasoning ?? '?'})`).join(' | '));
+        const fixList = consistency.unsupported
+          .map((c, i) => `${i + 1}. "${c.claim}" — ${c.reasoning ?? 'not in sources'}`)
+          .join('\n');
+        try {
+          const revised = (await createChatCompletion({
+            messages: [
+              { role: 'system', content: ENHANCED_ANSWERING_PROMPT },
+              {
+                role: 'user',
+                content: `${scenarioPreamble}
+Вопрос пользователя: ${question}
+
+═══ ЦИТАТЫ ИЗ БАЗЫ ЗНАНИЙ ═══
+${context}
+
+═══ ПРЕДЫДУЩИЙ ОТВЕТ (нужна правка) ═══
+${answer}
+
+═══ ФАКТЫ НЕ ПОДТВЕРЖДЕНЫ ЦИТАТАМИ — УДАЛИ ИЛИ ЗАМЕНИ НА "в источнике не указано" ═══
+${fixList}
+
+Перепиши ответ, убрав указанные неподтверждённые факты. Остальное сохрани максимально близко к оригиналу.`,
+              },
+            ],
+            temperature: 0,
+          })) ?? '';
+          if (revised.trim().length > 0) {
+            console.log('[enhanced-answering] Regenerated after consistency flag, new length:', revised.length);
+            answer = revised;
+            regenerated = true;
+          }
+        } catch (e) {
+          console.warn('[enhanced-answering] Regeneration failed, keeping original answer:', e);
+        }
+
+        // Persist telemetry — fire-and-forget, never block the response.
+        prisma.hallucinationLog.create({
+          data: {
+            sessionId: sessionId ?? null,
+            question,
+            scenarioKey: scenarioKeyForAnswer ?? null,
+            initialAnswer: initialAnswerForLog,
+            regeneratedAnswer: regenerated ? answer : null,
+            unsupportedClaims: consistency.unsupported as unknown as object,
+            unsupportedCount: consistency.unsupported.length,
+            regenerated,
+          },
+        }).catch((e) => console.warn('[enhanced-answering] HallucinationLog write failed:', e));
+      }
+    } catch (e) {
+      console.warn('[enhanced-answering] Consistency gate failed (fail-open):', e);
+    }
+  }
+
+  // Clarification is handled by the scenario decision gate upstream.
+  const clarificationQuestion: { question: string; options: string[] } | undefined = undefined;
+
+  // Build source references from context chunks
+  const primarySource = primaryDocId ? {
+    documentId: primaryDocId,
+    documentTitle: docTitleMap.get(primaryDocId) ?? 'Документ',
+    chunkContent: [...(chunksByDoc.get(primaryDocId) ?? [])]
+      .sort((a, b) => b.semanticScore - a.semanticScore)[0]?.content?.slice(0, 400) ?? '',
+    relevanceScore: bestDocScore,
+  } : undefined;
+
+  const supplementarySources = [...chunksByDoc.entries()]
+    .filter(([docId]) => docId !== primaryDocId)
+    .map(([docId, docChunks]) => {
+      const bestChunk = [...docChunks].sort((a, b) => b.semanticScore - a.semanticScore)[0];
+      return {
+        documentId: docId,
+        documentTitle: docTitleMap.get(docId) ?? 'Документ',
+        chunkContent: bestChunk?.content?.slice(0, 400) ?? '',
+        relevanceScore: bestChunk?.semanticScore ?? 0,
+      };
+    })
+    .sort((a, b) => b.relevanceScore - a.relevanceScore);
+
+  // Build citations with REAL relevance scores.
+  // Rules don't come with their own retrieval score (they're fetched by domain
+  // filter, not ranked by the query). We approximate by matching each rule's
+  // source document to the best chunk we retrieved for that document — so a
+  // rule from the primary-source document gets its doc's score, a rule from a
+  // supplementary doc gets that doc's score, and an unlinked rule gets 0.
+  // This is honest even if imperfect: "scores reflect how close your question
+  // was to the document this rule came from" — not an arbitrary rank decay.
+  const docScoreByDocId = new Map<string, number>();
+  for (const [docId, docChunks] of chunksByDoc) {
+    docScoreByDocId.set(docId, Math.max(...docChunks.map((c) => c.semanticScore)));
+  }
+  const citations = rules.slice(0, 5).map((r) => ({
     ruleCode: r.ruleCode,
     documentTitle: r.document?.title,
     quote: r.body.slice(0, 200) + (r.body.length > 200 ? '...' : ''),
-    relevanceScore: Math.max(0.9 - (i * 0.1), 0.5),
+    relevanceScore: r.documentId ? (docScoreByDocId.get(r.documentId) ?? 0) : 0,
   }));
 
   const result: EnhancedAnswerResult = {
@@ -332,6 +749,12 @@ ${confidenceLevel === 'insufficient'
       extractedEntities: entities,
       isAmbiguous: expandedQueries.isAmbiguous,
     },
+    clarificationQuestion,
+    primarySource,
+    supplementarySources,
+    scenarioKey: scenarioKeyForAnswer,
+    scenarioLabel: scenarioLabelForAnswer,
+    answerSource: 'knowledge_base',
   };
 
   if (includeDebug) {
@@ -358,6 +781,216 @@ ${confidenceLevel === 'insufficient'
   return result;
 }
 
+function buildDeterministicGuardrailResult(question: string): EnhancedAnswerResult | null {
+  const text = normalizeRussianText(question);
+  const mentionsApostille = /апостил/.test(text);
+  const mentionsSpb = /санкт\s*петербург|петербург|(?:^|[^а-я])спб(?:[^а-я]|$)/.test(text);
+  const mentionsMoscow = /москв/.test(text);
+  const asksHowOrCan =
+    /как|можн|нельзя|получится|сдела|постав|простав|подат|оформ/.test(text);
+  const mentionsEducation =
+    /образован|диплом|аттестат|вуз|университет|колледж|школ/.test(text);
+
+  if (!mentionsApostille || !mentionsSpb || !mentionsMoscow || !asksHowOrCan || mentionsEducation) {
+    return null;
+  }
+
+  // Direction matters: an original is apostilled by its PLACE OF ISSUE. The old
+  // canned answer always assumed a Moscow-issued document, so for the mirror
+  // case ("выдан в СПб, апостилировать в Москве") it confidently described the
+  // wrong scenario. Detect the issue place from the first city that follows an
+  // issue verb (выдан/составлен/…); the other city is the requested target.
+  // NB: \w does NOT match Cyrillic in JS, so use [а-я]* for word tails
+  // (text is already lowercased + ё→е by normalizeRussianText).
+  const issueMatch = text.match(
+    /(?:выдан[а-я]*|составлен[а-я]*|получен[а-я]*|оформлен[а-я]*|выписан[а-я]*|выдал[а-я]*)\s+(?:в\s+|во\s+)?(москв[а-я]*|санкт[-\s]?петербург[а-я]*|петербург[а-я]*|спб)/
+  );
+  const issuePlace: 'Москве' | 'Санкт-Петербурге' | null = issueMatch
+    ? (/москв/.test(issueMatch[1]) ? 'Москве' : 'Санкт-Петербурге')
+    : null;
+  const targetPlace = issuePlace === 'Москве' ? 'Санкт-Петербурге' : 'Москве';
+
+  const answer = issuePlace
+    ? [
+        `Апостиль на оригинал ставится по месту выдачи документа. Документ выдан в ${issuePlace} — значит, апостиль на него ставится в ${issuePlace}, а в ${targetPlace} поставить апостиль на этот оригинал нельзя.`,
+        '',
+        'Ориентир: обычные документы ЗАГС, МВД и документы для Минюста подаются по месту выдачи/составления документа.',
+        '',
+        `В ${targetPlace} можно разбирать только альтернативный вариант, если принимающая сторона согласна на апостиль не на оригинал, а на нотариальную копию/нотариальный документ. Это уже другая процедура, её нужно проверять по требованиям страны/органа.`,
+      ].join('\n')
+    : [
+        // Direction not stated → give the correct principle without asserting
+        // which city is which (never invent a direction).
+        'Апостиль на оригинал ставится по месту выдачи/составления документа: где документ выдан — там и апостилируется. Поставить апостиль на оригинал в другом регионе (Москва ↔ Санкт-Петербург) нельзя.',
+        '',
+        'Ориентир: обычные документы ЗАГС, МВД и документы для Минюста подаются по месту выдачи. Уточните, в каком городе выдан документ — апостиль ставится именно там.',
+        '',
+        'Перенести процедуру в другой город можно только через альтернативу: апостиль на нотариальную копию/нотариальный документ (если принимающая сторона это допускает) — это отдельная процедура.',
+      ].join('\n');
+
+  return {
+    answer,
+    confidence: 0.9,
+    confidenceLevel: 'medium',
+    needsClarification: false,
+    citations: [
+      {
+        documentTitle: 'Операционный guardrail',
+        quote: 'Документы апостилируются по месту выдачи/составления; московский оригинал нельзя апостилировать в Санкт-Петербурге.',
+        relevanceScore: 0.9,
+      },
+    ],
+    domainsUsed: ['legal_compliance'],
+    queryAnalysis: {
+      originalQuery: question,
+      expandedQueries: [],
+      extractedEntities: {
+        dates: [],
+        prices: [],
+        documentTypes: ['документ'],
+        services: ['апостиль'],
+      },
+      isAmbiguous: false,
+    },
+    answerSource: 'deterministic_guardrail',
+    requiresHumanReview: false,
+  };
+}
+
+// Does the question concern a service/document the bureau actually deals with?
+// Used to decide whether an out_of_scope verdict should fall through to an
+// OPEN knowledge-base lookup (bureau topic) or be honestly refused (off-topic).
+//
+// IMPORTANT: the trigger is a SERVICE or DOCUMENT word — NOT a generic
+// price/time word. "сколько стоит биткоин" must stay off-topic, so "стоит"
+// alone must never qualify; it only counts when paired with a service below.
+//
+// Domain owner: extend this list as the bureau's services grow. Each entry is
+// a stem (matched case-insensitively, ё→е normalised).
+const BUREAU_TOPIC_PATTERN =
+  /апостил|легализац|нотари|загс|кзагс|минюст|(?:^|[^а-я])мвд(?:[^а-я]|$)|(?:^|[^а-я])мю(?:[^а-я]|$)|перевод|доверенност|свидетельств|справк|диплом|аттестат|образован|судим|паспорт|истреб|консульск|заверен|печат|штамп|загранпаспорт|гражданств|виз[аыуео]|опек|документ/;
+
+function isBureauTopic(question: string): boolean {
+  return BUREAU_TOPIC_PATTERN.test(normalizeRussianText(question));
+}
+
+function shouldUseGeneralKnowledgeFallback(question: string): boolean {
+  const text = normalizeRussianText(question);
+  const mentionsKnownService =
+    /апостил|легализац|нотари|загс|мвд|минюст|перевод|доверенност|свидетельств|справк|документ/.test(text);
+  const asksPracticalQuestion =
+    /как|где|можн|нужн|нельзя|надо|что\s+делать|подат|оформ|постав|простав|апостилир|легализ/.test(text);
+
+  return mentionsKnownService && asksPracticalQuestion;
+}
+
+async function answerFromGeneralKnowledgeFallback(
+  question: string,
+  reason: string
+): Promise<EnhancedAnswerResult> {
+  let parsed: {
+    canAnswer?: unknown;
+    answer?: unknown;
+    confidence?: unknown;
+    requiresHumanReview?: unknown;
+    reasoning?: unknown;
+  } = {};
+
+  try {
+    const raw = await createChatCompletion({
+      messages: [
+        { role: 'system', content: GENERAL_KNOWLEDGE_FALLBACK_PROMPT },
+        {
+          role: 'user',
+          content: `Вопрос пользователя: ${question}\n\nПочему база знаний не ответила уверенно: ${reason}`,
+        },
+      ],
+      responseFormat: 'json_object',
+      temperature: 0,
+      maxTokens: 900,
+    });
+    if (raw) {
+      const { normalizeJsonResponse } = await import('@/lib/ai/chat-provider');
+      parsed = JSON.parse(normalizeJsonResponse(raw));
+    }
+  } catch (error) {
+    console.warn('[enhanced-answering] General knowledge fallback failed:', error);
+  }
+
+  const canAnswer = parsed.canAnswer === true;
+  const answer = typeof parsed.answer === 'string' ? parsed.answer.trim() : '';
+  const confidence = typeof parsed.confidence === 'number'
+    ? Math.max(0, Math.min(parsed.confidence, 0.65))
+    : 0.35;
+  // Policy (2026-05-29): an answer drawn from the model's general knowledge
+  // (no KB grounding) ALWAYS requires human review and escalates — regardless
+  // of the model's own self-assessment. Never let the model clear its own flag.
+  const requiresHumanReview = true;
+
+  if (!canAnswer || answer.length < 10) {
+    return {
+      answer:
+        'В базе знаний нет прямого ответа, а общего знания ИИ недостаточно для уверенной консультации. Передайте вопрос на ручную проверку.',
+      confidence: 0.2,
+      confidenceLevel: 'low',
+      needsClarification: true,
+      suggestedClarification: 'Нужна ручная проверка специалистом.',
+      citations: [],
+      domainsUsed: ['legal_compliance'],
+      queryAnalysis: {
+        originalQuery: question,
+        expandedQueries: [],
+        extractedEntities: { dates: [], prices: [], documentTypes: [], services: [] },
+        isAmbiguous: false,
+      },
+      answerSource: 'general_ai',
+      requiresHumanReview: true,
+    };
+  }
+
+  return {
+    answer: [
+      answer,
+      '',
+      'Источник: общее знание ИИ, не подтверждено прямой цитатой из базы знаний. Рекомендуется проверить и добавить правило в базу.',
+    ].join('\n'),
+    confidence,
+    confidenceLevel: confidence >= 0.5 ? 'medium' : 'low',
+    needsClarification: requiresHumanReview,
+    suggestedClarification: requiresHumanReview ? 'Проверьте ответ и добавьте подтверждённое правило в базу знаний.' : undefined,
+    citations: [],
+    domainsUsed: ['legal_compliance'],
+    queryAnalysis: {
+      originalQuery: question,
+      expandedQueries: [],
+      extractedEntities: { dates: [], prices: [], documentTypes: [], services: [] },
+      isAmbiguous: false,
+    },
+    answerSource: 'general_ai',
+    requiresHumanReview,
+  };
+}
+
+function normalizeRussianText(value: string): string {
+  return value.toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim();
+}
+
+function getDeterministicQueryVariants(question: string): string[] {
+  const text = question.toLowerCase().replace(/ё/g, 'е');
+  const variants: string[] = [];
+
+  if (
+    /консульск[а-яa-z]*\s+легализац|легализац[а-яa-z]*\s+.*консульск|(?:^|[^а-я])кл(?:[^а-я]|$)/.test(text) &&
+    /для\s+каких\s+стран|какие\s+страны|список\s+стран/.test(text)
+  ) {
+    variants.push(
+      'СПИСОК СТРАН, ДЛЯ КОТОРЫХ НУЖНА КОНСУЛЬСКАЯ ЛЕГАЛИЗАЦИЯ ДОКУМЕНТОВ'
+    );
+  }
+
+  return variants;
+}
+
 function generateClarificationQuestion(
   question: string,
   intent: IntentClassification
@@ -376,15 +1009,17 @@ function generateClarificationQuestion(
 function buildEnhancedContext(
   chunks: HybridSearchResult[],
   rules: { ruleCode: string; title: string; body: string }[],
-  qaPairs: { question: string; answer: string }[],
-  confidenceLevel: string
+  qaPairs: { question: string; answer: string }[]
 ): string {
   let context = '';
 
-  if (rules.length > 0) {
-    context += '## Правила и регламенты\n';
-    for (const rule of rules) {
-      context += `[${rule.ruleCode}] ${rule.title}:\n${rule.body}\n\n`;
+  // Put document chunks FIRST since they're semantically matched to the question
+  if (chunks.length > 0) {
+    context += '## Фрагменты документов (найдены по вашему вопросу)\n';
+    for (const chunk of chunks) {
+      const confidence = chunk.semanticScore >= 0.6 ? '(высокая релевантность)' :
+        chunk.semanticScore >= 0.4 ? '(средняя релевантность)' : '';
+      context += `${chunk.content} ${confidence}\n---\n`;
     }
   }
 
@@ -395,12 +1030,10 @@ function buildEnhancedContext(
     }
   }
 
-  if (chunks.length > 0) {
-    context += '## Фрагменты документов\n';
-    for (const chunk of chunks) {
-      const confidence = chunk.combinedScore >= 0.7 ? '(высокая релевантность)' :
-        chunk.combinedScore >= 0.5 ? '(средняя релевантность)' : '';
-      context += `${chunk.content} ${confidence}\n---\n`;
+  if (rules.length > 0) {
+    context += '## Правила и регламенты\n';
+    for (const rule of rules) {
+      context += `[${rule.ruleCode}] ${rule.title}:\n${rule.body}\n\n`;
     }
   }
 
@@ -493,4 +1126,77 @@ ${context}
     console.error('Follow-up detection parse failed:', error);
     return { isFollowUp: false };
   }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Decision-gate short-circuit builders — keep the shape of EnhancedAnswerResult
+// so downstream consumers (API route, mini-app, Telegram bot) don't need
+// special cases. The `answer` field carries the user-facing prompt; structured
+// fields (scenarioClarification, scenarioKey) let UI render buttons.
+// ────────────────────────────────────────────────────────────────────────────
+
+function buildClarificationResult(
+  question: string,
+  decision: Extract<ScenarioDecision, { kind: 'needs_clarification' }>
+): EnhancedAnswerResult {
+  const { disambiguation } = decision;
+  // User-facing answer = the disambiguation prompt + options, plain text so
+  // legacy clients still show something useful. Buttons come from the
+  // structured `scenarioClarification` field.
+  const answer = [
+    disambiguation.prompt,
+    '',
+    ...disambiguation.options.map((o, i) => `${i + 1}. ${o.label}`),
+  ].join('\n');
+
+  return {
+    answer,
+    confidence: 0,
+    confidenceLevel: 'insufficient',
+    needsClarification: true,
+    suggestedClarification: disambiguation.prompt,
+    citations: [],
+    domainsUsed: [],
+    queryAnalysis: {
+      originalQuery: question,
+      expandedQueries: [],
+      extractedEntities: { dates: [], prices: [], documentTypes: [], services: [] },
+      isAmbiguous: true,
+    },
+    clarificationQuestion: {
+      question: disambiguation.prompt,
+      options: disambiguation.options.map((o) => o.label),
+    },
+    scenarioClarification: {
+      atNodeKey: decision.atNodeKey,
+      prompt: disambiguation.prompt,
+      options: disambiguation.options.map((o) => ({
+        id: o.id,
+        label: o.label,
+        targetScenarioKey: o.targetScenarioKey,
+      })),
+    },
+  };
+}
+
+function buildOutOfScopeResult(
+  question: string,
+  decision: Extract<ScenarioDecision, { kind: 'out_of_scope' }>
+): EnhancedAnswerResult {
+  return {
+    answer:
+      'В базе знаний нет данных по этому вопросу. Уточните, пожалуйста, о какой услуге идёт речь — апостиль, перевод, нотариальное заверение?',
+    confidence: 0,
+    confidenceLevel: 'insufficient',
+    needsClarification: true,
+    suggestedClarification: decision.reasoning,
+    citations: [],
+    domainsUsed: [],
+    queryAnalysis: {
+      originalQuery: question,
+      expandedQueries: [],
+      extractedEntities: { dates: [], prices: [], documentTypes: [], services: [] },
+      isAmbiguous: false,
+    },
+  };
 }

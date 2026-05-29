@@ -1,0 +1,6 @@
+nul
+NUL
+*.log
+node_modules
+.next
+test-results

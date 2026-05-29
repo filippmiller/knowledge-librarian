@@ -21,14 +21,14 @@ export async function parseDocument(
     lowerFilename.endsWith('.docx')
   ) {
     const result = await mammoth.extractRawText({ buffer });
-    return result.value;
+    return normalizeParsedText(result.value);
   }
 
   if (mimeType === 'application/msword' || lowerFilename.endsWith('.doc')) {
     // For .doc files, try mammoth (may not work for all .doc files)
     try {
       const result = await mammoth.extractRawText({ buffer });
-      return result.value;
+      return normalizeParsedText(result.value);
     } catch {
       throw new Error('Unable to parse .doc file. Please convert to .docx');
     }
@@ -49,10 +49,22 @@ export async function parseDocument(
     let text = buffer.toString('utf-8');
     text = text.replace(/\\[a-z]+(-?\d+)? ?/gi, '');
     text = text.replace(/[{}]/g, '');
-    return text;
+    return normalizeParsedText(text);
   }
 
   throw new Error(`Unsupported file type: ${mimeType}`);
+}
+
+function normalizeParsedText(value: string): string {
+  return value
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/([:;.!?])(?=[«"“”А-ЯA-ZЁ])/g, '$1 ')
+    .replace(/([»"“”])(?=[А-ЯA-ZЁ])/g, '$1 ')
+    .replace(/([а-яёa-z0-9])(?=[А-ЯЁ][а-яё])/g, '$1 ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .trim();
 }
 
 export function detectMimeType(filename: string): string {

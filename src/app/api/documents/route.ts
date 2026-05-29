@@ -112,7 +112,16 @@ export async function GET(request: NextRequest): Promise<Response> {
     });
 
     const documents = await prisma.document.findMany({
-      include: {
+      select: {
+        id: true,
+        title: true,
+        filename: true,
+        mimeType: true,
+        parseStatus: true,
+        parseError: true,
+        retryCount: true,
+        uploadedAt: true,
+        // Explicitly exclude rawText and rawBytes - they can be megabytes each
         domains: {
           include: {
             domain: { select: { slug: true, title: true } },
@@ -145,29 +154,57 @@ export async function POST(request: NextRequest): Promise<Response> {
       return NextResponse.json({ error: 'No file provided' }, { status: 400 });
     }
 
-    const buffer = Buffer.from(await file.arrayBuffer());
     const filename = file.name;
+
+    // Check for duplicate uploads - prevent re-uploading same file
+    const existingDoc = await prisma.document.findFirst({
+      where: { filename },
+      select: { id: true, title: true, parseStatus: true },
+    });
+
+    if (existingDoc) {
+      return NextResponse.json({
+        error: `Документ "${existingDoc.title}" (${filename}) уже загружен (статус: ${existingDoc.parseStatus}). Удалите существующий документ перед повторной загрузкой.`,
+        existingId: existingDoc.id,
+      }, { status: 409 });
+    }
+
+    const buffer = Buffer.from(await file.arrayBuffer());
     const mimeType = file.type || detectMimeType(filename);
 
-    // Create document record
+    // Step 1: Parse document text FIRST (required for SSE processing)
+    console.log(`[Upload] Parsing document: ${filename}`);
+    let rawText: string;
+    try {
+      rawText = await parseDocument(buffer, mimeType, filename);
+      console.log(`[Upload] Parsed ${rawText.length} characters from ${filename}`);
+    } catch (parseError) {
+      console.error(`[Upload] Failed to parse ${filename}:`, parseError);
+      return NextResponse.json({ 
+        error: `Failed to parse document: ${parseError instanceof Error ? parseError.message : 'Unknown error'}` 
+      }, { status: 400 });
+    }
+
+    // Step 2: Create document record WITH rawText
     const document = await prisma.document.create({
       data: {
         title: title || filename,
         filename,
         mimeType,
         rawBytes: buffer,
-        parseStatus: 'PROCESSING',
+        rawText, // Include parsed text so SSE can proceed
+        parseStatus: 'PENDING', // PENDING until user opens processing terminal
       },
     });
 
-    // NOTE: We don't start background processing here because the UI immediately 
-    // opens the Librarian Terminal (SSE stream) which handles the processing.
-    // Running both simultaneously causes high memory usage and OOM crashes.
-    // processDocument(document.id, buffer, mimeType, filename).catch(console.error);
+    console.log(`[Upload] Document created: ${document.id} (PENDING)`);
+
+    // NOTE: AI processing is handled by the Librarian Terminal (SSE stream).
+    // Status transitions: PENDING → PROCESSING (when SSE starts) → COMPLETED (after commit)
 
     return NextResponse.json({
       id: document.id,
-      message: 'Document uploaded, processing started',
+      message: 'Document uploaded and parsed, ready for processing',
     });
   } catch (error) {
     console.error('Error uploading document:', error);
@@ -175,7 +212,7 @@ export async function POST(request: NextRequest): Promise<Response> {
   }
 }
 
-async function processDocument(
+async function _processDocument(
   documentId: string,
   buffer: Buffer,
   mimeType: string,

@@ -15,32 +15,58 @@ datasource db {
 // ============================================
 
 model Document {
-  id          String   @id @default(cuid())
+  id          String      @id @default(cuid())
   title       String
   filename    String
   mimeType    String
-  rawText     String?  @db.Text
+  rawText     String?     @db.Text
   rawBytes    Bytes?
-  uploadedAt  DateTime @default(now())
+  uploadedAt  DateTime    @default(now())
   parseStatus ParseStatus @default(PENDING)
   parseError  String?
+  retryCount  Int         @default(0)
+
+  // Scenario tagging — see src/lib/knowledge/scenarios.ts. Null = universal
+  // (cross-service) or not-yet-classified. See scenarioFilterClause() for
+  // retrieval semantics (ancestor path + null).
+  scenarioKey String?
 
   // Relations
-  domains           DocumentDomain[]
-  rules             Rule[]
-  qaPairs           QAPair[]
-  chunks            DocChunk[]
-  domainSuggestions DomainSuggestion[]
-  stagedExtractions StagedExtraction[]
+  domains            DocumentDomain[]
+  rules              Rule[]
+  qaPairs            QAPair[]
+  chunks             DocChunk[]
+  domainSuggestions  DomainSuggestion[]
+  stagedExtractions  StagedExtraction[]
+  processingAttempts ProcessingAttempt[]
 
   @@index([parseStatus])
+  @@index([scenarioKey])
 }
 
 enum ParseStatus {
   PENDING
   PROCESSING
+  EXTRACTED // All processing phases complete, staged data ready for user review/commit
   COMPLETED
   FAILED
+  DEAD // Exceeded max retries — needs manual revival
+}
+
+// Dead Letter Queue — logs every processing attempt for a document
+model ProcessingAttempt {
+  id           String    @id @default(cuid())
+  documentId   String
+  document     Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  startedAt    DateTime  @default(now())
+  completedAt  DateTime?
+  status       String // RUNNING | SUCCESS | FAILED
+  errorMessage String?   @db.Text
+  failedPhase  String? // DOMAIN_CLASSIFICATION | KNOWLEDGE_EXTRACTION | CHUNKING
+  durationMs   Int?
+
+  @@index([documentId])
+  @@index([status])
 }
 
 // Hierarchical domain structure
@@ -50,12 +76,12 @@ model Domain {
   title          String
   description    String?  @db.Text
   parentDomainId String?
-  policy         Json?    // domain-specific policies
+  policy         Json? // domain-specific policies
   createdAt      DateTime @default(now())
 
   // Self-relation for hierarchy
-  parentDomain   Domain?  @relation("DomainHierarchy", fields: [parentDomainId], references: [id])
-  childDomains   Domain[] @relation("DomainHierarchy")
+  parentDomain Domain?  @relation("DomainHierarchy", fields: [parentDomainId], references: [id])
+  childDomains Domain[] @relation("DomainHierarchy")
 
   // Relations
   documents        DocumentDomain[]
@@ -63,6 +89,7 @@ model Domain {
   qaPairs          QADomain[]
   chunks           ChunkDomain[]
   librarianEntries LibrarianEntry[]
+  notifications    UserNotification[]
 
   @@index([parentDomainId])
   @@index([slug])
@@ -70,16 +97,16 @@ model Domain {
 
 // AI-suggested new domains awaiting approval
 model DomainSuggestion {
-  id                    String   @id @default(cuid())
+  id                    String           @id @default(cuid())
   suggestedSlug         String
   title                 String
-  description           String?  @db.Text
+  description           String?          @db.Text
   parentSlug            String?
   confidence            Float
-  reason                String   @db.Text
+  reason                String           @db.Text
   status                SuggestionStatus @default(PENDING)
   createdFromDocumentId String?
-  createdAt             DateTime @default(now())
+  createdAt             DateTime         @default(now())
   reviewedAt            DateTime?
   reviewedBy            String?
 
@@ -102,56 +129,68 @@ enum SuggestionStatus {
 
 // Business rules extracted from documents
 model Rule {
-  id              String   @id @default(cuid())
-  documentId      String?
-  ruleCode        String   // e.g., "R-1", "R-2"
-  title           String
-  body            String   @db.Text
-  confidence      Float    @default(0.8)
-  status          KnowledgeStatus @default(ACTIVE)
-  version         Int      @default(1)
+  id               String          @id @default(cuid())
+  documentId       String?
+  ruleCode         String // e.g., "R-1", "R-2"
+  title            String
+  body             String          @db.Text
+  confidence       Float           @default(0.8)
+  status           KnowledgeStatus @default(ACTIVE)
+  version          Int             @default(1)
   supersedesRuleId String?
-  sourceSpan      Json?    // { quote, locationHint }
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  sourceSpan       Json? // { quote, locationHint }
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  // Scenario tagging — rules inherit from their source Document by default
+  // but may be placed at a broader ancestor (applies to multiple procedures)
+  // or left null (universal cross-service). See src/lib/knowledge/scenarios.ts.
+  scenarioKey String?
 
   // Relations
-  document        Document? @relation(fields: [documentId], references: [id])
-  supersedesRule  Rule?     @relation("RuleVersions", fields: [supersedesRuleId], references: [id])
-  supersededBy    Rule[]    @relation("RuleVersions")
-  domains         RuleDomain[]
-  qaPairs         QAPair[]
-  changes         KnowledgeChange[] @relation("RuleChanges")
+  document       Document?          @relation(fields: [documentId], references: [id])
+  supersedesRule Rule?              @relation("RuleVersions", fields: [supersedesRuleId], references: [id])
+  supersededBy   Rule[]             @relation("RuleVersions")
+  domains        RuleDomain[]
+  qaPairs        QAPair[]
+  changes        KnowledgeChange[]  @relation("RuleChanges")
+  favorites      UserFavorite[]
+  comments       RuleComment[]
+  notifications  UserNotification[]
 
   @@index([status])
   @@index([ruleCode])
   @@index([documentId])
+  @@index([scenarioKey])
 }
 
 // Q&A pairs extracted from documents
 model QAPair {
-  id              String   @id @default(cuid())
-  documentId      String?
-  ruleId          String?
-  question        String   @db.Text
-  answer          String   @db.Text
-  status          KnowledgeStatus @default(ACTIVE)
-  version         Int      @default(1)
-  supersedesQaId  String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id             String          @id @default(cuid())
+  documentId     String?
+  ruleId         String?
+  question       String          @db.Text
+  answer         String          @db.Text
+  status         KnowledgeStatus @default(ACTIVE)
+  version        Int             @default(1)
+  supersedesQaId String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  scenarioKey String?
 
   // Relations
-  document        Document? @relation(fields: [documentId], references: [id])
-  rule            Rule?     @relation(fields: [ruleId], references: [id])
-  supersedesQa    QAPair?   @relation("QAVersions", fields: [supersedesQaId], references: [id])
-  supersededBy    QAPair[]  @relation("QAVersions")
-  domains         QADomain[]
-  changes         KnowledgeChange[] @relation("QAChanges")
+  document     Document?         @relation(fields: [documentId], references: [id])
+  rule         Rule?             @relation(fields: [ruleId], references: [id])
+  supersedesQa QAPair?           @relation("QAVersions", fields: [supersedesQaId], references: [id])
+  supersededBy QAPair[]          @relation("QAVersions")
+  domains      QADomain[]
+  changes      KnowledgeChange[] @relation("QAChanges")
 
   @@index([status])
   @@index([documentId])
   @@index([ruleId])
+  @@index([scenarioKey])
 }
 
 enum KnowledgeStatus {
@@ -165,13 +204,15 @@ enum KnowledgeStatus {
 // ============================================
 
 model DocChunk {
-  id              String   @id @default(cuid())
-  documentId      String
-  chunkIndex      Int
-  content         String   @db.Text
-  embedding       Json?    // vector embeddings stored as JSON array
-  metadata        Json?    // additional context
-  createdAt       DateTime @default(now())
+  id         String   @id @default(cuid())
+  documentId String
+  chunkIndex Int
+  content    String   @db.Text
+  embedding  Json? // vector embeddings stored as JSON array
+  metadata   Json? // additional context
+  createdAt  DateTime @default(now())
+
+  scenarioKey String?
 
   // Relations
   document Document      @relation(fields: [documentId], references: [id], onDelete: Cascade)
@@ -179,6 +220,7 @@ model DocChunk {
 
   @@unique([documentId, chunkIndex])
   @@index([documentId])
+  @@index([scenarioKey])
 }
 
 // ============================================
@@ -188,8 +230,8 @@ model DocChunk {
 model DocumentDomain {
   documentId String
   domainId   String
-  isPrimary  Boolean @default(false)
-  confidence Float   @default(0.8)
+  isPrimary  Boolean  @default(false)
+  confidence Float    @default(0.8)
   assignedAt DateTime @default(now())
 
   document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
@@ -201,7 +243,7 @@ model DocumentDomain {
 model RuleDomain {
   ruleId     String
   domainId   String
-  confidence Float   @default(0.8)
+  confidence Float    @default(0.8)
   assignedAt DateTime @default(now())
 
   rule   Rule   @relation(fields: [ruleId], references: [id], onDelete: Cascade)
@@ -213,7 +255,7 @@ model RuleDomain {
 model QADomain {
   qaId       String
   domainId   String
-  confidence Float   @default(0.8)
+  confidence Float    @default(0.8)
   assignedAt DateTime @default(now())
 
   qa     QAPair @relation(fields: [qaId], references: [id], onDelete: Cascade)
@@ -225,7 +267,7 @@ model QADomain {
 model ChunkDomain {
   chunkId    String
   domainId   String
-  confidence Float   @default(0.8)
+  confidence Float    @default(0.8)
   assignedAt DateTime @default(now())
 
   chunk  DocChunk @relation(fields: [chunkId], references: [id], onDelete: Cascade)
@@ -239,17 +281,17 @@ model ChunkDomain {
 // ============================================
 
 model KnowledgeChange {
-  id          String   @id @default(cuid())
+  id          String           @id @default(cuid())
   targetType  ChangeTargetType
   targetId    String
   changeType  ChangeType
   oldValue    Json?
   newValue    Json?
-  reason      String   @db.Text
+  reason      String           @db.Text
   initiatedBy InitiatedBy
   approvedBy  String?
-  status      ChangeStatus @default(PENDING)
-  createdAt   DateTime @default(now())
+  status      ChangeStatus     @default(PENDING)
+  createdAt   DateTime         @default(now())
   reviewedAt  DateTime?
 
   // Polymorphic relations
@@ -289,15 +331,15 @@ enum ChangeStatus {
 // ============================================
 
 model AIQuestion {
-  id             String   @id @default(cuid())
-  issueType      String   // price_conflict, ambiguous_rule, outdated_info
-  question       String   @db.Text
-  context        Json?    // related rule/doc info
-  proposedChange Json?    // { old, new }
+  id             String         @id @default(cuid())
+  issueType      String // price_conflict, ambiguous_rule, outdated_info
+  question       String         @db.Text
+  context        Json? // related rule/doc info
+  proposedChange Json? // { old, new }
   affectedRuleId String?
   status         QuestionStatus @default(OPEN)
-  response       String?  @db.Text
-  createdAt      DateTime @default(now())
+  response       String?        @db.Text
+  createdAt      DateTime       @default(now())
   respondedAt    DateTime?
 
   @@index([status])
@@ -315,22 +357,22 @@ enum QuestionStatus {
 // ============================================
 
 model ChatSession {
-  id        String   @id @default(cuid())
+  id        String     @id @default(cuid())
   source    ChatSource @default(WEB)
   userId    String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
 
   messages ChatMessage[]
 }
 
 model ChatMessage {
-  id        String   @id @default(cuid())
+  id        String      @id @default(cuid())
   sessionId String
   role      MessageRole
-  content   String   @db.Text
-  metadata  Json?    // domains used, chunks retrieved, confidence
-  createdAt DateTime @default(now())
+  content   String      @db.Text
+  metadata  Json? // domains used, chunks retrieved, confidence
+  createdAt DateTime    @default(now())
 
   session ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
@@ -354,12 +396,12 @@ enum MessageRole {
 // ============================================
 
 model User {
-  id           String   @id @default(cuid())
-  username     String   @unique
+  id           String    @id @default(cuid())
+  username     String    @unique
   passwordHash String
-  role         UserRole @default(ADMIN)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  role         UserRole  @default(ADMIN)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
   lastLoginAt  DateTime?
 
   @@index([username])
@@ -376,17 +418,17 @@ enum UserRole {
 // ============================================
 
 model StagedExtraction {
-  id           String   @id @default(cuid())
-  documentId   String
-  phase        ExtractionPhase
-  itemType     StagedItemType
-  data         Json
-  isVerified   Boolean  @default(false)
-  isRejected   Boolean  @default(false)
-  createdAt    DateTime @default(now())
-  verifiedAt   DateTime?
+  id         String          @id @default(cuid())
+  documentId String
+  phase      ExtractionPhase
+  itemType   StagedItemType
+  data       Json
+  isVerified Boolean         @default(false)
+  isRejected Boolean         @default(false)
+  createdAt  DateTime        @default(now())
+  verifiedAt DateTime?
 
-  document     Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   @@index([documentId, phase])
   @@index([documentId, isVerified])
@@ -408,20 +450,45 @@ enum StagedItemType {
 }
 
 // ============================================
+// TELEGRAM ACCESS CONTROL
+// ============================================
+
+enum TelegramUserRole {
+  SUPER_ADMIN // Can manage all users, full knowledge management
+  ADMIN // Can add/correct knowledge, upload docs, manage regular users
+  USER // Can only ask questions
+}
+
+model TelegramUser {
+  id         String           @id @default(cuid())
+  telegramId String           @unique // Telegram user ID (numeric string)
+  username   String? // @username, may change
+  firstName  String?
+  role       TelegramUserRole @default(USER)
+  grantedBy  String? // telegramId of who granted access
+  isActive   Boolean          @default(true)
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  @@index([telegramId])
+  @@index([role])
+}
+
+// ============================================
 // AI SETTINGS
 // ============================================
 
 model AISettings {
-  id           String   @id @default(cuid())
-  provider     String   @default("openai")
-  apiKey       String   // Зашифрованный ключ
-  model        String   @default("gpt-4o")
-  embeddingModel String @default("text-embedding-3-small")
-  isActive     Boolean  @default(true)
-  lastVerified DateTime?
-  lastError    String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id             String    @id @default(cuid())
+  provider       String    @default("openai")
+  apiKey         String // Зашифрованный ключ
+  model          String    @default("gpt-4o")
+  embeddingModel String    @default("text-embedding-3-small")
+  isActive       Boolean   @default(true)
+  lastVerified   DateTime?
+  lastError      String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 }
 
 // ============================================
@@ -429,20 +496,20 @@ model AISettings {
 // ============================================
 
 model AnswerFeedback {
-  id            String   @id @default(cuid())
-  messageId     String?  // Link to ChatMessage if available
-  question      String   @db.Text
-  answer        String   @db.Text
-  rating        FeedbackRating
-  feedbackType  FeedbackType?
-  comment       String?  @db.Text
-  suggestedAnswer String? @db.Text  // User's suggested correct answer
-  confidence    Float?   // Original answer confidence
-  domainsUsed   Json?    // Domains used for this answer
-  createdAt     DateTime @default(now())
-  reviewedAt    DateTime?
-  reviewedBy    String?
-  resolution    String?  @db.Text
+  id              String         @id @default(cuid())
+  messageId       String? // Link to ChatMessage if available
+  question        String         @db.Text
+  answer          String         @db.Text
+  rating          FeedbackRating
+  feedbackType    FeedbackType?
+  comment         String?        @db.Text
+  suggestedAnswer String?        @db.Text // User's suggested correct answer
+  confidence      Float? // Original answer confidence
+  domainsUsed     Json? // Domains used for this answer
+  createdAt       DateTime       @default(now())
+  reviewedAt      DateTime?
+  reviewedBy      String?
+  resolution      String?        @db.Text
 
   @@index([rating])
   @@index([feedbackType])
@@ -450,19 +517,39 @@ model AnswerFeedback {
 }
 
 enum FeedbackRating {
-  HELPFUL      // Answer was helpful
-  PARTIALLY    // Answer was partially helpful
-  NOT_HELPFUL  // Answer was not helpful
-  INCORRECT    // Answer was incorrect/wrong
+  HELPFUL // Answer was helpful
+  PARTIALLY // Answer was partially helpful
+  NOT_HELPFUL // Answer was not helpful
+  INCORRECT // Answer was incorrect/wrong
 }
 
 enum FeedbackType {
-  MISSING_INFO      // Answer lacked important information
-  WRONG_INFO        // Answer contained incorrect information
-  OUTDATED_INFO     // Information was outdated
-  UNCLEAR           // Answer was unclear or confusing
-  OFF_TOPIC         // Answer was about wrong topic
-  GREAT             // Answer was great (positive feedback)
+  MISSING_INFO // Answer lacked important information
+  WRONG_INFO // Answer contained incorrect information
+  OUTDATED_INFO // Information was outdated
+  UNCLEAR // Answer was unclear or confusing
+  OFF_TOPIC // Answer was about wrong topic
+  GREAT // Answer was great (positive feedback)
+}
+
+// Consistency-gate telemetry: every time the gate finds unsupported factual
+// claims in a synthesized answer, log it here. Lets us track which scenarios
+// produce the most hallucinations and whether regeneration actually fixes
+// them. See src/lib/ai/consistency-gate.ts.
+model HallucinationLog {
+  id                  String   @id @default(cuid())
+  sessionId           String?
+  question            String   @db.Text
+  scenarioKey         String?
+  initialAnswer       String   @db.Text
+  regeneratedAnswer   String?  @db.Text
+  unsupportedClaims   Json // Array<{ claim, reasoning?, supported: false }>
+  unsupportedCount    Int
+  regenerated         Boolean  @default(false)
+  createdAt           DateTime @default(now())
+
+  @@index([scenarioKey])
+  @@index([createdAt])
 }
 
 // ============================================
@@ -471,38 +558,38 @@ enum FeedbackType {
 
 // Verification lifecycle for knowledge entries
 enum VerificationStatus {
-  UNVERIFIED   // New entry, not yet reviewed
-  VERIFIED     // Reviewed and confirmed accurate
-  CANONICAL    // Authoritative source of truth
-  DISPUTED     // Conflicting information flagged
-  STALE        // Outdated, needs refresh
+  UNVERIFIED // New entry, not yet reviewed
+  VERIFIED // Reviewed and confirmed accurate
+  CANONICAL // Authoritative source of truth
+  DISPUTED // Conflicting information flagged
+  STALE // Outdated, needs refresh
 }
 
 // Types of knowledge entries
 enum LibrarianEntryType {
-  FACT         // Factual statement
-  PROCEDURE    // Process or workflow
-  RULE         // Business rule
-  DEFINITION   // Term definition
-  REFERENCE    // External reference
+  FACT // Factual statement
+  PROCEDURE // Process or workflow
+  RULE // Business rule
+  DEFINITION // Term definition
+  REFERENCE // External reference
 }
 
 // Source of knowledge entries
 enum LibrarianSourceType {
-  MANUAL       // Human-entered
+  MANUAL // Human-entered
   AI_EXTRACTED // Extracted by AI from documents
-  RULE_IMPORT  // Imported from Rule model
-  QA_IMPORT    // Imported from QAPair model
-  AGENT        // Created by an AI agent
+  RULE_IMPORT // Imported from Rule model
+  QA_IMPORT // Imported from QAPair model
+  AGENT // Created by an AI agent
 }
 
 // Agent activity types for compliance tracking
 enum AgentActivityType {
-  SEARCH       // Knowledge search
-  INGEST       // Knowledge creation
-  UPDATE       // Knowledge update
-  VERIFY       // Verification action
-  DISPUTE      // Dispute flagging
+  SEARCH // Knowledge search
+  INGEST // Knowledge creation
+  UPDATE // Knowledge update
+  VERIFY // Verification action
+  DISPUTE // Dispute flagging
 }
 
 // Librarian change types for audit log
@@ -527,13 +614,13 @@ model LibrarianEntry {
   freshnessScore     Float               @default(1.0) // 0.0 - 1.0, decays over time
   lastValidatedAt    DateTime            @default(now())
   expiresAt          DateTime?
-  evidence           Json?               // { commit_hash, files_changed, functions_affected, test_results }
+  evidence           Json? // { commit_hash, files_changed, functions_affected, test_results }
   sourceType         LibrarianSourceType @default(MANUAL)
-  sourceId           String?             // Reference to Rule.id, QAPair.id, etc.
-  embedding          Json?               // vector embeddings as JSON array
-  keywords           String[]            // Extracted keywords for filtering
-  entities           Json?               // { files: [], functions: [], tables: [], endpoints: [] }
-  createdBy          String?             // Agent ID or user ID
+  sourceId           String? // Reference to Rule.id, QAPair.id, etc.
+  embedding          Json? // vector embeddings as JSON array
+  keywords           String[] // Extracted keywords for filtering
+  entities           Json? // { files: [], functions: [], tables: [], endpoints: [] }
+  createdBy          String? // Agent ID or user ID
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
 
@@ -554,9 +641,9 @@ model LibrarianAgentActivity {
   agentId       String
   activityType  AgentActivityType
   entryId       String?
-  details       Json?             // { query, results, duration_ms, etc. }
-  rulesFollowed String[]          // List of rule IDs followed
-  rulesViolated String[]          // List of rule IDs violated
+  details       Json? // { query, results, duration_ms, etc. }
+  rulesFollowed String[] // List of rule IDs followed
+  rulesViolated String[] // List of rule IDs violated
   createdAt     DateTime          @default(now())
 
   @@index([agentId])
@@ -568,7 +655,7 @@ model LibrarianAgentActivity {
 model LibrarianSearchMetrics {
   id              String   @id @default(cuid())
   query           String   @db.Text
-  queryHash       String   // For aggregation
+  queryHash       String // For aggregation
   resultCount     Int
   avgRelevance    Float
   topResultId     String?
@@ -590,7 +677,7 @@ model LibrarianChange {
   oldValue   Json?
   newValue   Json?
   reason     String              @db.Text
-  changedBy  String              // Agent ID or user ID
+  changedBy  String // Agent ID or user ID
   createdAt  DateTime            @default(now())
 
   entry LibrarianEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
@@ -598,4 +685,106 @@ model LibrarianChange {
   @@index([entryId])
   @@index([changeType])
   @@index([createdAt])
+}
+
+// ============================================
+// MINI APP FEATURES (Favorites, Comments, Notifications)
+// ============================================
+
+// User favorites (bookmarked rules)
+model UserFavorite {
+  id         String   @id @default(cuid())
+  telegramId String
+  ruleId     String
+  createdAt  DateTime @default(now())
+  notes      String?  @db.Text // User's personal notes about this rule
+
+  rule Rule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  @@unique([telegramId, ruleId])
+  @@index([telegramId])
+  @@index([ruleId])
+}
+
+// Comments on rules (discussion)
+model RuleComment {
+  id         String   @id @default(cuid())
+  ruleId     String
+  telegramId String
+  content    String   @db.Text
+  parentId   String? // For threaded replies
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  isEdited   Boolean  @default(false)
+  isDeleted  Boolean  @default(false)
+
+  rule    Rule          @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  parent  RuleComment?  @relation("CommentReplies", fields: [parentId], references: [id])
+  replies RuleComment[] @relation("CommentReplies")
+
+  @@index([ruleId])
+  @@index([telegramId])
+  @@index([parentId])
+  @@index([createdAt])
+}
+
+// User notification preferences and subscriptions
+model UserNotification {
+  id             String           @id @default(cuid())
+  telegramId     String
+  type           NotificationType
+  domainId       String? // Subscribe to specific domain
+  ruleId         String? // Subscribe to specific rule updates
+  keywords       Json? // Array of keywords to watch
+  isActive       Boolean          @default(true)
+  lastNotifiedAt DateTime?
+  createdAt      DateTime         @default(now())
+
+  domain Domain? @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  rule   Rule?   @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  @@index([telegramId])
+  @@index([domainId])
+  @@index([ruleId])
+}
+
+enum NotificationType {
+  NEW_RULE
+  RULE_UPDATED
+  NEW_DOCUMENT
+  KEYWORD_MATCH
+}
+
+// User preferences for Mini App
+model UserPreference {
+  id           String   @id @default(cuid())
+  telegramId   String   @unique
+  theme        String   @default("system") // light, dark, system
+  fontSize     String   @default("medium") // small, medium, large
+  offlineCache Boolean  @default(true)
+  pushEnabled  Boolean  @default(true)
+  language     String   @default("ru")
+  lastSyncedAt DateTime @default(now())
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([telegramId])
+}
+
+// Notification log (sent notifications)
+model NotificationLog {
+  id         String           @id @default(cuid())
+  telegramId String
+  type       NotificationType
+  title      String
+  message    String           @db.Text
+  ruleId     String?
+  documentId String?
+  isRead     Boolean          @default(false)
+  sentAt     DateTime         @default(now())
+  readAt     DateTime?
+
+  @@index([telegramId])
+  @@index([isRead])
+  @@index([sentAt])
 }
