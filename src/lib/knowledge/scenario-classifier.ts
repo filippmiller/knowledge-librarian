@@ -251,5 +251,62 @@ function classifyScenarioDeterministically(question: string): ScenarioDecision |
     };
   }
 
+  // P5: apostille + a clearly-named document type → route straight to the right
+  // node so we never ask the user to re-pick a type they already named
+  // ("доверенность" → option "Нотариальный (доверенность,…)"). Reaches here only
+  // after the reference/catalog/country bypasses above, so справочные вопросы
+  // still go to open lookup. Education is excluded (no scenario node — handled
+  // by the bureau-topic open lookup downstream).
+  if (mentionsApostille && !mentionsEducation) {
+    const notaryDoc = /доверенност|нотариальн|нотариус|(?:^|[^а-я])копи|перевод|согласие|довер/.test(text);
+    const opekaDoc = /опек/.test(text);
+    const zagsDoc = /загс|свидетельств|(?:^|[^а-я])сор(?:[^а-я]|$)|рожден|брак|растор|смерт|перемен.{0,4}имен|отцовств/.test(text);
+    const mentionsLO = /ленинградск|лен\.?\s*обл/.test(text);
+
+    // ЗАГС document (but NOT a notarized copy/translation of one — that goes to
+    // МЮ as a notary doc). Region is the ONLY thing left to ask.
+    if (zagsDoc && !notaryDoc && !opekaDoc) {
+      if (mentionsSpb) {
+        return {
+          kind: 'scenario_clear',
+          scenarioKey: 'apostille.zags.spb',
+          scenarioLabel: getScenario('apostille.zags.spb')?.label ?? 'Апостиль в КЗАГС Санкт-Петербурга',
+          confidence: 0.9,
+          reasoning: 'Апостиль + ЗАГС-документ + Санкт-Петербург.',
+        };
+      }
+      if (mentionsLO) {
+        return {
+          kind: 'scenario_clear',
+          scenarioKey: 'apostille.zags.lo',
+          scenarioLabel: getScenario('apostille.zags.lo')?.label ?? 'Апостиль в Управлении ЗАГС Ленинградской области',
+          confidence: 0.9,
+          reasoning: 'Апостиль + ЗАГС-документ + Ленинградская область.',
+        };
+      }
+      const zagsNode = getScenario('apostille.zags');
+      if (zagsNode?.disambiguation) {
+        return {
+          kind: 'needs_clarification',
+          atNodeKey: 'apostille.zags',
+          disambiguation: zagsNode.disambiguation,
+          reasoning: 'Апостиль ЗАГС-документа; тип ясен, нужен только регион выдачи.',
+        };
+      }
+    }
+
+    // Notary or опека document → МинЮст (a leaf; accepts both СПб and ЛО, so no
+    // region question). Answer directly.
+    if (notaryDoc || opekaDoc) {
+      return {
+        kind: 'scenario_clear',
+        scenarioKey: 'apostille.min_justice',
+        scenarioLabel: getScenario('apostille.min_justice')?.label ?? 'Апостиль в МинЮсте',
+        confidence: 0.9,
+        reasoning: 'Апостиль нотариального/опекунского документа → МЮ, регион не требуется.',
+      };
+    }
+  }
+
   return null;
 }
