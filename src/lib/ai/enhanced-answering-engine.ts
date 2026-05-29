@@ -347,16 +347,31 @@ export async function answerQuestionEnhanced(
     return buildClarificationResult(question, scenarioDecision);
   }
 
-  // Short-circuit: out of scope → honest "no data" result, no LLM synthesis.
+  // out_of_scope handling. The classifier marks a question out_of_scope when
+  // it doesn't map to a concrete apostille scenario — but the scenario tree
+  // only covers apostille (ЗАГС/нотариалка/опека). Lots of legitimate bureau
+  // questions (education apostille, criminal-record certs, prices, translation)
+  // land here even though the KB DOES hold the answer. So:
+  //   1) deterministic region guardrail still wins (Moscow↔СПб);
+  //   2) if the question is about a bureau topic at all → reclassify to an
+  //      OPEN knowledge lookup over the whole KB (general_ai stays a last
+  //      resort, only if open retrieval finds nothing — handled downstream);
+  //   3) only genuinely off-topic questions (no bureau keyword: weather,
+  //      crypto, …) get the honest "no data" short-circuit, never general_ai.
   if (scenarioDecision.kind === 'out_of_scope') {
     const guardrail = buildDeterministicGuardrailResult(question);
     if (guardrail) return guardrail;
 
-    if (shouldUseGeneralKnowledgeFallback(question)) {
-      return answerFromGeneralKnowledgeFallback(question, scenarioDecision.reasoning);
+    if (!isBureauTopic(question)) {
+      return buildOutOfScopeResult(question, scenarioDecision);
     }
 
-    return buildOutOfScopeResult(question, scenarioDecision);
+    console.log('[enhanced-answering] out_of_scope but bureau topic → open knowledge lookup');
+    scenarioDecision = {
+      kind: 'knowledge_lookup',
+      label: 'Открытый поиск по базе знаний',
+      reasoning: `out_of_scope reclassified to open lookup (bureau topic): ${scenarioDecision.reasoning}`,
+    };
   }
 
   const openKnowledgeLookup = scenarioDecision.kind === 'knowledge_lookup';
@@ -807,6 +822,23 @@ function buildDeterministicGuardrailResult(question: string): EnhancedAnswerResu
     answerSource: 'deterministic_guardrail',
     requiresHumanReview: false,
   };
+}
+
+// Does the question concern a service/document the bureau actually deals with?
+// Used to decide whether an out_of_scope verdict should fall through to an
+// OPEN knowledge-base lookup (bureau topic) or be honestly refused (off-topic).
+//
+// IMPORTANT: the trigger is a SERVICE or DOCUMENT word — NOT a generic
+// price/time word. "сколько стоит биткоин" must stay off-topic, so "стоит"
+// alone must never qualify; it only counts when paired with a service below.
+//
+// Domain owner: extend this list as the bureau's services grow. Each entry is
+// a stem (matched case-insensitively, ё→е normalised).
+const BUREAU_TOPIC_PATTERN =
+  /апостил|легализац|нотари|загс|кзагс|минюст|(?:^|[^а-я])мвд(?:[^а-я]|$)|(?:^|[^а-я])мю(?:[^а-я]|$)|перевод|доверенност|свидетельств|справк|диплом|аттестат|образован|судим|паспорт|истреб|консульск|заверен|печат|штамп|загранпаспорт|гражданств|виз[аыуео]|опек|документ/;
+
+function isBureauTopic(question: string): boolean {
+  return BUREAU_TOPIC_PATTERN.test(normalizeRussianText(question));
 }
 
 function shouldUseGeneralKnowledgeFallback(question: string): boolean {
