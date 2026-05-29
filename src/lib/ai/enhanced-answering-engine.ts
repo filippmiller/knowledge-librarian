@@ -465,10 +465,15 @@ export async function answerQuestionEnhanced(
     existing.push(chunk);
     chunksByDoc.set(chunk.documentId, existing);
   }
+  // Rank documents by SEMANTIC similarity, not the RRF combinedScore. RRF
+  // scores are tiny and nearly flat (~0.015 across all results), so picking
+  // the "primary" doc by combinedScore was effectively random — it routinely
+  // surfaced an off-topic doc (e.g. the МВД instruction under a КЗАГС answer).
+  // semanticScore has real spread (0.4–0.6) and tracks topical relevance.
   let primaryDocId = '';
   let bestDocScore = 0;
   for (const [docId, docChunks] of chunksByDoc) {
-    const maxScore = Math.max(...docChunks.map(c => c.combinedScore));
+    const maxScore = Math.max(...docChunks.map(c => c.semanticScore));
     if (maxScore > bestDocScore) { bestDocScore = maxScore; primaryDocId = docId; }
   }
 
@@ -694,21 +699,22 @@ ${fixList}
     documentId: primaryDocId,
     documentTitle: docTitleMap.get(primaryDocId) ?? 'Документ',
     chunkContent: [...(chunksByDoc.get(primaryDocId) ?? [])]
-      .sort((a, b) => b.combinedScore - a.combinedScore)[0]?.content?.slice(0, 400) ?? '',
+      .sort((a, b) => b.semanticScore - a.semanticScore)[0]?.content?.slice(0, 400) ?? '',
     relevanceScore: bestDocScore,
   } : undefined;
 
   const supplementarySources = [...chunksByDoc.entries()]
     .filter(([docId]) => docId !== primaryDocId)
     .map(([docId, docChunks]) => {
-      const bestChunk = [...docChunks].sort((a, b) => b.combinedScore - a.combinedScore)[0];
+      const bestChunk = [...docChunks].sort((a, b) => b.semanticScore - a.semanticScore)[0];
       return {
         documentId: docId,
         documentTitle: docTitleMap.get(docId) ?? 'Документ',
         chunkContent: bestChunk?.content?.slice(0, 400) ?? '',
-        relevanceScore: bestChunk?.combinedScore ?? 0,
+        relevanceScore: bestChunk?.semanticScore ?? 0,
       };
-    });
+    })
+    .sort((a, b) => b.relevanceScore - a.relevanceScore);
 
   // Build citations with REAL relevance scores.
   // Rules don't come with their own retrieval score (they're fetched by domain
@@ -720,7 +726,7 @@ ${fixList}
   // was to the document this rule came from" — not an arbitrary rank decay.
   const docScoreByDocId = new Map<string, number>();
   for (const [docId, docChunks] of chunksByDoc) {
-    docScoreByDocId.set(docId, Math.max(...docChunks.map((c) => c.combinedScore)));
+    docScoreByDocId.set(docId, Math.max(...docChunks.map((c) => c.semanticScore)));
   }
   const citations = rules.slice(0, 5).map((r) => ({
     ruleCode: r.ruleCode,
@@ -916,7 +922,10 @@ async function answerFromGeneralKnowledgeFallback(
   const confidence = typeof parsed.confidence === 'number'
     ? Math.max(0, Math.min(parsed.confidence, 0.65))
     : 0.35;
-  const requiresHumanReview = parsed.requiresHumanReview !== false;
+  // Policy (2026-05-29): an answer drawn from the model's general knowledge
+  // (no KB grounding) ALWAYS requires human review and escalates — regardless
+  // of the model's own self-assessment. Never let the model clear its own flag.
+  const requiresHumanReview = true;
 
   if (!canAnswer || answer.length < 10) {
     return {
