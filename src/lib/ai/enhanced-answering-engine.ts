@@ -754,7 +754,18 @@ ${fixList}
   for (const [docId, docChunks] of chunksByDoc) {
     docScoreByDocId.set(docId, Math.max(...docChunks.map((c) => c.semanticScore)));
   }
-  const citations = rules.slice(0, 5).map((r) => ({
+  // PROVENANCE: cite only rules whose source document actually contributed a
+  // chunk to the synthesis context, ordered by that document's relevance. This
+  // makes "📚 Источники" match the answer instead of surfacing a high-ranked-
+  // but-unused rule from another topic (the education-rule-under-a-КЗАГС-answer
+  // bug). If no rule maps to a context document (rare), fall back to the top
+  // ranked rules so the source list is never empty.
+  const contextDocIds = new Set(chunksByDoc.keys());
+  const provenanceRules = rules
+    .filter((r) => r.documentId != null && contextDocIds.has(r.documentId))
+    .sort((a, b) => (docScoreByDocId.get(b.documentId ?? '') ?? 0) - (docScoreByDocId.get(a.documentId ?? '') ?? 0));
+  const citationRules = (provenanceRules.length > 0 ? provenanceRules : rules).slice(0, 5);
+  const citations = citationRules.map((r) => ({
     ruleCode: r.ruleCode,
     documentTitle: r.document?.title,
     quote: r.body.slice(0, 200) + (r.body.length > 200 ? '...' : ''),
