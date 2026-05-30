@@ -179,6 +179,10 @@ model QAPair {
 
   scenarioKey String?
 
+  // Provenance for AI-suggested, admin-approved pairs:
+  // { origin: 'ai-suggested', approvedBy, approvedAt }
+  metadata    Json?
+
   // Relations
   document     Document?         @relation(fields: [documentId], references: [id])
   rule         Rule?             @relation(fields: [ruleId], references: [id])
