@@ -15,6 +15,7 @@ import { hybridSearch, HybridSearchResult } from './vector-search';
 import { expandQuery, ExpandedQueries, ExtractedEntities, extractEntities } from './query-expansion';
 import { classifyScenario, type ScenarioDecision } from '@/lib/knowledge/scenario-classifier';
 import { ancestorsOf } from '@/lib/knowledge/scenarios';
+import { expandAbbreviations } from '@/lib/knowledge/glossary';
 import { verifyAnswer, type ConsistencyReport } from '@/lib/ai/consistency-gate';
 
 // Confidence thresholds
@@ -413,12 +414,16 @@ export async function answerQuestionEnhanced(
   console.log('[enhanced-answering] Step 1 completed. Intent:', intentResult.intent, 'Domains:', intentResult.domains);
   const relevanceText = [question, ...expandedQueries.variants, ...entities.documentTypes, ...entities.services].join(' ');
 
-  // Step 2: Build query list for multi-query retrieval
-  const allQueries = [
+  // Step 2: Build query list for multi-query retrieval.
+  // Include the abbreviation-expanded question so keyword search also matches
+  // the canonical term (e.g. user typed "СОР" → also search "свидетельство о
+  // рождении"). Deduped below via the Set.
+  const allQueries = [...new Set([
     question,
+    expandAbbreviations(question),
     ...expandedQueries.variants,
     ...getDeterministicQueryVariants(question),
-  ];
+  ])];
   console.log('[enhanced-answering] Step 2: Built', allQueries.length, 'query variants');
 
   // Step 3: Run hybrid multi-query search (scenario-filtered, no domain
@@ -749,7 +754,18 @@ ${fixList}
   for (const [docId, docChunks] of chunksByDoc) {
     docScoreByDocId.set(docId, Math.max(...docChunks.map((c) => c.semanticScore)));
   }
-  const citations = rules.slice(0, 5).map((r) => ({
+  // PROVENANCE: cite only rules whose source document actually contributed a
+  // chunk to the synthesis context, ordered by that document's relevance. This
+  // makes "📚 Источники" match the answer instead of surfacing a high-ranked-
+  // but-unused rule from another topic (the education-rule-under-a-КЗАГС-answer
+  // bug). If no rule maps to a context document (rare), fall back to the top
+  // ranked rules so the source list is never empty.
+  const contextDocIds = new Set(chunksByDoc.keys());
+  const provenanceRules = rules
+    .filter((r) => r.documentId != null && contextDocIds.has(r.documentId))
+    .sort((a, b) => (docScoreByDocId.get(b.documentId ?? '') ?? 0) - (docScoreByDocId.get(a.documentId ?? '') ?? 0));
+  const citationRules = (provenanceRules.length > 0 ? provenanceRules : rules).slice(0, 5);
+  const citations = citationRules.map((r) => ({
     ruleCode: r.ruleCode,
     documentTitle: r.document?.title,
     quote: r.body.slice(0, 200) + (r.body.length > 200 ? '...' : ''),

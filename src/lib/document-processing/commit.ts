@@ -1,5 +1,6 @@
 import prisma from '@/lib/db';
 import { generateEmbeddings } from '@/lib/openai';
+import { lintRules, type LintInput, type LintWarning } from './extraction-lint';
 
 export interface CommitResult {
   success: boolean;
@@ -12,6 +13,8 @@ export interface CommitResult {
     aiQuestionsCreated: number;
     chunksCreated: number;
   };
+  /** Quality-gate warnings on the extracted rules (non-blocking, for admin review). */
+  qualityWarnings?: LintWarning[];
 }
 
 export interface CommitOptions {
@@ -161,6 +164,7 @@ export async function commitDocumentKnowledge(documentId: string, options: Commi
 
   // Process rules
   const rules = verifiedItems.filter((i) => i.itemType === 'RULE');
+  const lintInputs: LintInput[] = [];
   for (const item of rules) {
     const data = item.data as {
       ruleCode: string;
@@ -169,6 +173,14 @@ export async function commitDocumentKnowledge(documentId: string, options: Commi
       confidence: number;
       sourceSpan: { quote: string; locationHint: string };
     };
+
+    // Quality gate (non-blocking): collect for anti-hallucination / junk checks.
+    lintInputs.push({
+      ruleCode: data.ruleCode,
+      title: data.title,
+      body: data.body,
+      sourceQuote: data.sourceSpan?.quote ?? '',
+    });
 
     const created = await prisma.rule.create({
       data: {
@@ -192,6 +204,21 @@ export async function commitDocumentKnowledge(documentId: string, options: Commi
     }
 
     results.rulesCreated++;
+  }
+
+  // Quality gate — surface (don't block) suspicious extractions for admin review.
+  const qualityWarnings = lintRules(lintInputs);
+  if (qualityWarnings.length > 0) {
+    console.warn(`[COMMIT] ${qualityWarnings.length} quality warning(s) on document ${documentId}:`,
+      qualityWarnings.map((w) => `${w.ruleCode}:${w.kind} (${w.detail})`).join(' | '));
+    // Persist a review item so the warnings aren't lost in logs.
+    await prisma.aIQuestion.create({
+      data: {
+        issueType: 'extraction_quality',
+        question: `Документ ${document.title}: ${qualityWarnings.length} предупреждений качества при извлечении (проверьте правила).`,
+        context: { documentId, warnings: qualityWarnings as unknown as object },
+      },
+    }).catch((e) => console.warn('[COMMIT] failed to persist quality warnings:', e));
   }
 
   // Process QA pairs
@@ -293,7 +320,10 @@ export async function commitDocumentKnowledge(documentId: string, options: Commi
 
   return {
     success: true,
-    message: 'Данные успешно сохранены',
+    message: qualityWarnings.length > 0
+      ? `Данные сохранены. ⚠ ${qualityWarnings.length} предупреждений качества — проверьте в разделе AI-вопросов.`
+      : 'Данные успешно сохранены',
     results,
+    qualityWarnings,
   };
 }
