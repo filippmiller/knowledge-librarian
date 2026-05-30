@@ -470,11 +470,23 @@ export async function answerQuestionEnhanced(
   // the "primary" doc by combinedScore was effectively random — it routinely
   // surfaced an off-topic doc (e.g. the МВД instruction under a КЗАГС answer).
   // semanticScore has real spread (0.4–0.6) and tracks topical relevance.
+  // Pick the primary document by AGGREGATE semantic relevance (sum of its
+  // retrieved chunks' semantic scores), not a single best chunk. A document
+  // that contributed several relevant chunks is far more likely the one the
+  // answer is actually built from than one with a single high-but-isolated
+  // chunk (the old max-chunk rule sometimes surfaced an off-topic doc whose
+  // one chunk happened to score high). `bestDocScore` stays the chosen doc's
+  // MAX semantic score (0..1) so the displayed relevanceScore stays sane.
   let primaryDocId = '';
+  let bestAggregate = 0;
   let bestDocScore = 0;
   for (const [docId, docChunks] of chunksByDoc) {
-    const maxScore = Math.max(...docChunks.map(c => c.semanticScore));
-    if (maxScore > bestDocScore) { bestDocScore = maxScore; primaryDocId = docId; }
+    const aggregate = docChunks.reduce((sum, c) => sum + c.semanticScore, 0);
+    if (aggregate > bestAggregate) {
+      bestAggregate = aggregate;
+      primaryDocId = docId;
+      bestDocScore = Math.max(...docChunks.map(c => c.semanticScore));
+    }
   }
 
   // Step 5: Get relevant active rules (scenario-filtered).
@@ -534,13 +546,21 @@ export async function answerQuestionEnhanced(
     throw error;
   }
 
-  // Step 7: Calculate overall confidence
-  // Use semantic similarity (not RRF rank score) for confidence, since RRF produces tiny values (0.01-0.02) by design
+  // Step 7: Calculate overall confidence.
+  // Primary signal: best SEMANTIC similarity of the retrieved chunks (RRF rank
+  // scores are tiny/flat ~0.01-0.02 by design, so they're useless here).
+  // Secondary signal: retrieval COVERAGE — more corroborating chunks ⇒ a bit
+  // more trustworthy. We deliberately DROPPED the old `intentResult.confidence`
+  // term: it was the intent classifier's self-assessment, which does not track
+  // whether the ANSWER is correct (pure noise). Calibrated to stay close to the
+  // old numbers (sem=0.5 → was ~0.59, now ~0.60) so the 0.7/0.5/0.3 thresholds
+  // keep meaning, but every term now reflects real retrieval quality.
   const bestSemanticScore = contextChunks.length > 0
     ? Math.max(...contextChunks.map(c => c.semanticScore))
     : 0;
+  const coverageScore = Math.min(contextChunks.length / 3, 1); // 0..1, full at ≥3 chunks
   const overallConfidence = Math.min(
-    (intentResult.confidence * 0.3) + (bestSemanticScore * 0.7),
+    bestSemanticScore + coverageScore * 0.1,
     1.0
   );
 
@@ -575,7 +595,8 @@ export async function answerQuestionEnhanced(
 
     return answerFromGeneralKnowledgeFallback(
       question,
-      `retrieval insufficient; scenario=${scenarioLabelForAnswer}; chunks=${contextChunks.length}; rules=${rules.length}; qa=${qaPairs.length}`
+      `retrieval insufficient; scenario=${scenarioLabelForAnswer}; chunks=${contextChunks.length}; rules=${rules.length}; qa=${qaPairs.length}`,
+      sessionId
     );
   }
 
@@ -886,7 +907,8 @@ function shouldUseGeneralKnowledgeFallback(question: string): boolean {
 
 async function answerFromGeneralKnowledgeFallback(
   question: string,
-  reason: string
+  reason: string,
+  sessionId?: string
 ): Promise<EnhancedAnswerResult> {
   let parsed: {
     canAnswer?: unknown;
@@ -896,13 +918,38 @@ async function answerFromGeneralKnowledgeFallback(
     reasoning?: unknown;
   } = {};
 
+  // general_ai has NO knowledge-base grounding, so the conversation so far is
+  // its only anchor for resolving abbreviations/references (e.g. "СОР" →
+  // свидетельство о рождении from an earlier turn). Without it the model guesses
+  // — that's how an earlier СОР question got misread as "справка о судимости".
+  // Best-effort: a failed history fetch must not break the answer.
+  let conversationContext = '';
+  if (sessionId) {
+    try {
+      const recent = await prisma.chatMessage.findMany({
+        where: { sessionId },
+        orderBy: { createdAt: 'desc' },
+        take: 6,
+        select: { role: true, content: true },
+      });
+      if (recent.length > 1) {
+        conversationContext = recent
+          .reverse()
+          .map((m) => `${m.role}: ${m.content}`)
+          .join('\n');
+      }
+    } catch (e) {
+      console.warn('[enhanced-answering] general_ai context fetch failed:', e);
+    }
+  }
+
   try {
     const raw = await createChatCompletion({
       messages: [
         { role: 'system', content: GENERAL_KNOWLEDGE_FALLBACK_PROMPT },
         {
           role: 'user',
-          content: `Вопрос пользователя: ${question}\n\nПочему база знаний не ответила уверенно: ${reason}`,
+          content: `${conversationContext ? `Контекст диалога:\n${conversationContext}\n\n` : ''}Вопрос пользователя: ${question}\n\nПочему база знаний не ответила уверенно: ${reason}`,
         },
       ],
       responseFormat: 'json_object',
