@@ -1,0 +1,54 @@
+[
+  {
+    "q": "Как поставить апостиль на свидетельство о рождении в СПб?",
+    "expect": { "scenarioKey": "apostille.zags.spb", "source": "knowledge_base", "mustInclude": ["Фурштатская", "2500"], "mustNotInclude": ["судимост"] }
+  },
+  {
+    "q": "как апостилировать СОР в спб",
+    "expect": { "scenarioKey": "apostille.zags.spb", "source": "knowledge_base", "mustInclude": ["Фурштатская", "2500"], "mustNotInclude": ["судимост"] }
+  },
+  {
+    "q": "как апостилировать СОР",
+    "expect": { "clarify": true, "mustInclude": ["Где был выдан"], "mustNotInclude": ["Какой документ"] }
+  },
+  {
+    "q": "какой реальный срок апостилирования СОБ",
+    "expect": { "clarify": true, "mustInclude": ["Где был выдан"], "mustNotInclude": ["Какой документ"] }
+  },
+  {
+    "q": "можно ли апостилировать СОР выданное в СПБ в москве?",
+    "expect": { "source": "deterministic_guardrail", "mustInclude": ["по месту выдачи", "выдан в Санкт-Петербурге", "нельзя"], "mustNotInclude": ["выдан в Москве", "судимост"] }
+  },
+  {
+    "q": "если документ выдан в Москве как его апостилировать в Санкт Петербурге?",
+    "expect": { "source": "deterministic_guardrail", "mustInclude": ["выдан в Москве", "нельзя"], "mustNotInclude": ["выдан в Санкт-Петербурге"] }
+  },
+  {
+    "q": "мжоно ли апостилировать СОР выданное в СПБ в москве?",
+    "expect": { "source": "knowledge_base", "mustInclude": ["Санкт-Петербург"], "mustNotInclude": ["судимост"] }
+  },
+  {
+    "q": "как апостилировать доверенность",
+    "expect": { "scenarioKey": "apostille.min_justice", "source": "knowledge_base", "mustNotInclude": ["Какой документ"] }
+  },
+  {
+    "q": "сколько стоит нотариальный перевод паспорта",
+    "expect": { "source": "knowledge_base", "mustNotInclude": ["нет данных по этому вопросу"] }
+  },
+  {
+    "q": "апостиль на справку о несудимости",
+    "expect": { "source": "knowledge_base", "mustNotInclude": ["нет данных по этому вопросу"] }
+  },
+  {
+    "q": "можно ли апостилировать диплом в спб",
+    "expect": { "source": "knowledge_base", "mustInclude": ["диплом"], "mustNotInclude": ["нет данных по этому вопросу"] }
+  },
+  {
+    "q": "как отправить готовый заказ почтой россии",
+    "expect": { "source": "knowledge_base", "mustInclude": ["почт"] }
+  },
+  {
+    "q": "сколько сейчас стоит биткоин",
+    "expect": { "source": "none", "clarify": false, "mustInclude": ["нет данных"] }
+  }
+]
