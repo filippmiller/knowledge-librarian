@@ -155,8 +155,15 @@ async function main() {
 
     const sources: string[] = [];
     for (let r = 0; r < runs; r++) {
-      const result = await diagnoseOnce(question, `прогон ${r + 1}/${runs}`);
-      sources.push(result.answerSource ?? 'none');
+      try {
+        const result = await diagnoseOnce(question, `прогон ${r + 1}/${runs}`);
+        sources.push(result.answerSource ?? 'none');
+      } catch (e) {
+        // A transient failure (e.g. dropped embedding API socket) must not abort
+        // the whole batch — report it and move on.
+        console.log(`  ⚠ прогон ${r + 1}/${runs} упал: ${(e as Error).message} — пропускаю`);
+        sources.push('error');
+      }
     }
 
     if (runs > 1) {
