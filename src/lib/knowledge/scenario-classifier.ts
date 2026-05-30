@@ -189,6 +189,14 @@ function classifyScenarioDeterministically(question: string): ScenarioDecision |
   const mentionsMoscow = /москв/.test(text);
   const mentionsEducation = /образован|диплом|аттестат|вуз|университет|колледж|школ/.test(text);
   const asksCountryRequirement = /нуж\w*|требу\w*|став\w*|простав\w*|не\s+нуж/.test(text);
+  // A GENERAL requirement that is the same across every apostille scenario
+  // (lamination, document condition, language, who submits). Such questions
+  // must NOT be bounced to "which document type?" — the answer is universal and
+  // lives in cross-scenario rules; route them to open knowledge lookup.
+  // NB: \w does NOT match Cyrillic in JS — use [а-я]* for word tails, else
+  // "юридическ\w*" fails on "юридическ-ого".
+  const asksGeneralRequirement =
+    /ламинир|заламинир|состояни[а-я]*\s+документ|поврежд|порван|ветх|на\s+каком\s+язык|язык[а-я]*\s+документ|сшит|многостранич|требовани[а-я]*\s+к\s+(?:документ|оригинал)|(?:^|[^а-я])юр[а-я]*\s*лиц|юридическ[а-я]*\s+лиц|(?:^|[^а-я])физ[а-я]*\s*лиц|физическ[а-я]*\s+лиц/.test(text);
   const mentionsTreatyCountry = /(азербайджан|албани|армени|белорус|болгари|босни|венгри|грузи|казахстан|киргиз|куб|латви|литв|молдов|монголи|польш|румын|серби|словени|таджикистан|узбекистан|украин|хорвати|черногори|чехи|эстони)/.test(text);
 
   if (mentionsApostille && mentionsSpb && mentionsMoscow && !mentionsEducation) {
@@ -253,6 +261,16 @@ function classifyScenarioDeterministically(question: string): ScenarioDecision |
       scenarioLabel: getScenario('apostille.min_justice')?.label ?? 'Апостиль в МинЮсте',
       confidence: 0.95,
       reasoning: 'Вопрос явно содержит апостиль и Минюст/МЮ.',
+    };
+  }
+
+  // General apostille requirement (lamination/condition/language/who-submits)
+  // with no specific authority chosen → open lookup, NOT a doc-type re-ask.
+  if (mentionsApostille && asksGeneralRequirement) {
+    return {
+      kind: 'knowledge_lookup',
+      label: 'Справочный поиск по общим требованиям апостиля',
+      reasoning: 'Общее требование к документу одинаково для всех сценариев апостиля; нужен открытый поиск по базе, а не выбор типа документа.',
     };
   }
 
