@@ -1,6 +1,7 @@
 import type { EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
 import prisma from '@/lib/db';
 import { sendMessage } from './telegram-api';
+import { createKnowledgeGapSuggestion } from '@/lib/ai/knowledge-feedback';
 
 const NOTIFICATION_THROTTLE_MS = 10 * 60 * 1000;
 const recentNotifications = new Map<string, number>();
@@ -12,6 +13,16 @@ export async function escalateUnconvincingAIAnswer(params: {
   userId?: string;
   sessionId?: string;
 }): Promise<void> {
+  // Self-improving loop: capture low-trust answers as draft Q→A pairs for admin
+  // approval. Independent of the escalation early-return below (a low-confidence
+  // answer should be captured even if it doesn't meet the notify threshold).
+  void createKnowledgeGapSuggestion({
+    question: params.question,
+    result: params.result,
+    source: params.source,
+    sessionId: params.sessionId,
+  });
+
   const reasons = getEscalationReasons(params.result);
   if (reasons.length === 0) return;
 
