@@ -20,6 +20,7 @@ import {
   type ScenarioNode,
   type Disambiguation,
 } from './scenarios';
+import { expandAbbreviations } from './glossary';
 
 export type ScenarioDecision =
   | { kind: 'scenario_clear'; scenarioKey: ScenarioKey; scenarioLabel: string; confidence: number; reasoning?: string }
@@ -71,13 +72,17 @@ const CLASSIFIER_PROMPT = `Ты — scenario-классификатор для �
 }`;
 
 export async function classifyScenario(question: string): Promise<ScenarioDecision> {
-  const deterministicDecision = classifyScenarioDeterministically(question);
+  // Expand bureau abbreviations (СОР→свидетельство о рождении, КЗАГС→…) so both
+  // the deterministic rules and the LLM see canonical terms instead of guessing.
+  const q = expandAbbreviations(question);
+
+  const deterministicDecision = classifyScenarioDeterministically(q);
   if (deterministicDecision) return deterministicDecision;
 
   const userPrompt = `Таксономия сценариев:
 ${taxonomySummary()}
 
-Вопрос пользователя: "${question}"
+Вопрос пользователя: "${q}"
 
 Определи узел в таксономии (или out_of_scope).`;
 
