@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/db';
 import { requireAdminAuth } from '@/lib/auth';
+import { approveKnowledgeGap, rejectKnowledgeGap } from '@/lib/ai/knowledge-feedback';
 
 export async function PATCH(
   request: NextRequest,
@@ -51,6 +52,22 @@ export async function PATCH(
       });
 
       return NextResponse.json({ message: 'Question dismissed' });
+    } else if (action === 'approve') {
+      // Approve a knowledge_gap draft → create an ACTIVE QAPair (answer may be
+      // edited) and mark this AIQuestion ANSWERED.
+      try {
+        const { qaPairId } = await approveKnowledgeGap(id, {
+          answer: body.answer,
+          scenarioKey: body.scenarioKey,
+          approvedBy: body.approvedBy ?? 'web-admin',
+        });
+        return NextResponse.json({ message: 'Approved and saved to knowledge base', qaPairId });
+      } catch (e) {
+        return NextResponse.json({ error: (e as Error).message }, { status: 400 });
+      }
+    } else if (action === 'reject') {
+      await rejectKnowledgeGap(id);
+      return NextResponse.json({ message: 'Draft rejected' });
     } else {
       return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
     }

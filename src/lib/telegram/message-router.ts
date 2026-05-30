@@ -1,6 +1,7 @@
 import { sendMessage, sendTypingIndicator, answerCallbackQuery } from './telegram-api';
 import type { TelegramUpdate, TelegramMessage, TelegramCallbackQuery } from './telegram-api';
 import { handleScenarioCallback } from './scenario-callback';
+import { handleKnowledgeGapCallback } from './knowledge-gap-callback';
 import { checkAccess, isAdmin, isSuperAdmin } from './access-control';
 import type { TelegramUserInfo } from './access-control';
 import {
@@ -54,6 +55,11 @@ async function handleCallback(cq: TelegramCallbackQuery): Promise<void> {
   const accessResult = await checkAccess(telegramId, cq.from.username, cq.from.first_name);
   if (!accessResult.allowed) {
     await sendMessage(chatId, 'Нет доступа к боту.');
+    return;
+  }
+
+  if (data.startsWith('kg:')) {
+    await handleKnowledgeGapCallback(chatId, telegramId, data.slice(3), accessResult.user);
     return;
   }
 

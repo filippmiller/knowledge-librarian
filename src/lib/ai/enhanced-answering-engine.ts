@@ -560,18 +560,44 @@ export async function answerQuestionEnhanced(
   }
 
   // Step 6: Get relevant Q&A pairs (scenario-filtered, no domain filter).
+  // Same keyword-prefilter as rules: without it, a freshly approved QAPair (or
+  // any specific one) can be dropped by the `take` cap when there are many
+  // active pairs — which would break the self-improving loop (approve a draft,
+  // ask again, still not answered from base).
   let qaPairs;
   try {
-    const qaCandidates = await prisma.qAPair.findMany({
-      where: {
-        status: 'ACTIVE',
-        ...scenarioWhere,
-      },
+    const qaKeyTerms = [...new Set(extractSearchTerms(relevanceText))]
+      .filter((t) => t.length >= 5)
+      .slice(0, 10);
+    const qaPerTerm = await Promise.all(
+      qaKeyTerms.map((t) =>
+        prisma.qAPair.findMany({
+          where: {
+            status: 'ACTIVE',
+            ...scenarioWhere,
+            OR: [
+              { question: { contains: t, mode: 'insensitive' as const } },
+              { answer: { contains: t, mode: 'insensitive' as const } },
+            ],
+          },
+          take: 25,
+        })
+      )
+    );
+    const qaRecent = await prisma.qAPair.findMany({
+      where: { status: 'ACTIVE', ...scenarioWhere },
       take: 100,
+      orderBy: { createdAt: 'desc' },
+    });
+    const seenQa = new Set<string>();
+    const qaCandidates = [...qaPerTerm.flat(), ...qaRecent].filter((q) => {
+      if (seenQa.has(q.id)) return false;
+      seenQa.add(q.id);
+      return true;
     });
     qaPairs = rankByQuestion(qaCandidates, relevanceText, (qa) => `${qa.question} ${qa.answer}`)
       .slice(0, 5);
-    console.log('[enhanced-answering] Found', qaPairs.length, 'QA pairs');
+    console.log('[enhanced-answering] Found', qaPairs.length, 'QA pairs from', qaCandidates.length, 'candidates');
   } catch (error) {
     console.error('[enhanced-answering] Step 6 (QA pairs fetch) failed:', error);
     throw error;

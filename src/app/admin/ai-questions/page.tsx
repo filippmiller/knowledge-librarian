@@ -27,7 +27,20 @@ export default function AIQuestionsPage() {
     try {
       const response = await fetch('/api/ai-questions');
       const data = await response.json();
-      setQuestions(Array.isArray(data) ? data : []);
+      const list: AIQuestion[] = Array.isArray(data) ? data : [];
+      setQuestions(list);
+      // Pre-fill the editable answer for knowledge-gap drafts with the AI draft,
+      // so the admin can approve as-is or tweak it.
+      setResponses((prev) => {
+        const next = { ...prev };
+        for (const q of list) {
+          const draft = (q.context as { draft?: { answer?: string } } | null)?.draft;
+          if (q.issueType === 'knowledge_gap' && draft?.answer && next[q.id] === undefined) {
+            next[q.id] = draft.answer;
+          }
+        }
+        return next;
+      });
     } catch (error) {
       console.error('Error fetching questions:', error);
     } finally {
@@ -39,7 +52,7 @@ export default function AIQuestionsPage() {
     fetchQuestions();
   }, []);
 
-  async function handleAction(id: string, action: 'answer' | 'dismiss') {
+  async function handleAction(id: string, action: 'answer' | 'dismiss' | 'approve' | 'reject') {
     setProcessing(id);
     try {
       const response = await fetch(`/api/ai-questions/${id}`, {
@@ -48,6 +61,10 @@ export default function AIQuestionsPage() {
         body: JSON.stringify({
           action,
           response: action === 'answer' ? responses[id] : undefined,
+          // For knowledge-gap approval, the (possibly edited) answer is saved as
+          // the QAPair answer.
+          answer: action === 'approve' ? responses[id] : undefined,
+          approvedBy: action === 'approve' ? 'web-admin' : undefined,
         }),
       });
 
@@ -72,6 +89,7 @@ export default function AIQuestionsPage() {
       conflicting: 'Конфликт',
       missing_context: 'Нет контекста',
       price_conflict: 'Конфликт цен',
+      knowledge_gap: '🆕 Черновик правила',
     };
     const colors: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
       ambiguous: 'secondary',
@@ -143,9 +161,18 @@ export default function AIQuestionsPage() {
                             </div>
                           </div>
                         )}
+                        {q.issueType === 'knowledge_gap' && (
+                          <p className="text-xs text-gray-600">
+                            Черновик ответа ИИ (проверьте и при необходимости поправьте перед сохранением).
+                            {(() => {
+                              const sk = (q.context as { draft?: { scenarioKey?: string | null } } | null)?.draft?.scenarioKey;
+                              return sk ? ` Сценарий: ${sk}.` : '';
+                            })()}
+                          </p>
+                        )}
                         <div>
                           <Textarea
-                            placeholder="Ваш ответ..."
+                            placeholder={q.issueType === 'knowledge_gap' ? 'Ответ для базы знаний...' : 'Ваш ответ...'}
                             value={responses[q.id] || ''}
                             onChange={(e) =>
                               setResponses((prev) => ({
@@ -153,25 +180,47 @@ export default function AIQuestionsPage() {
                                 [q.id]: e.target.value,
                               }))
                             }
-                            className="bg-white"
+                            className="bg-white min-h-[120px]"
                           />
                         </div>
                         <div className="flex gap-2">
-                          <Button
-                            size="sm"
-                            onClick={() => handleAction(q.id, 'answer')}
-                            disabled={processing === q.id || !responses[q.id]}
-                          >
-                            Отправить ответ
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => handleAction(q.id, 'dismiss')}
-                            disabled={processing === q.id}
-                          >
-                            Отклонить
-                          </Button>
+                          {q.issueType === 'knowledge_gap' ? (
+                            <>
+                              <Button
+                                size="sm"
+                                onClick={() => handleAction(q.id, 'approve')}
+                                disabled={processing === q.id || !responses[q.id]}
+                              >
+                                ✅ Утвердить (сохранить в базу)
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => handleAction(q.id, 'reject')}
+                                disabled={processing === q.id}
+                              >
+                                Отклонить
+                              </Button>
+                            </>
+                          ) : (
+                            <>
+                              <Button
+                                size="sm"
+                                onClick={() => handleAction(q.id, 'answer')}
+                                disabled={processing === q.id || !responses[q.id]}
+                              >
+                                Отправить ответ
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => handleAction(q.id, 'dismiss')}
+                                disabled={processing === q.id}
+                              >
+                                Отклонить
+                              </Button>
+                            </>
+                          )}
                         </div>
                       </div>
                     </CardContent>
