@@ -333,5 +333,22 @@ function classifyScenarioDeterministically(question: string): ScenarioDecision |
     }
   }
 
+  // Apostille question aimed at a DESTINATION COUNTRY ("апостиль для Китая",
+  // "нужен ли апостиль в Германию", "апостилировать документы для Италии").
+  // These are about country requirements (Hague convention / treaties / КЛ),
+  // NOT a document-submission scenario — route to open lookup over the country
+  // lists instead of bouncing through "какой документ? → какой регион? → нет
+  // данных". The negative lookahead excludes document nouns and domestic
+  // regions so "апостиль для свидетельства" / "в спб" don't trigger.
+  const mentionsDestinationCountry =
+    /(?:для|в(?:о)?)\s+(?!докум|свидетельств|справк|диплом|перевод|оригинал|копи|нотари|загс|опек|юр|физ|клиент|себя|сам|любо|каки|како|этого|того|росси|рф(?:[^а-я]|$)|спб|санкт|петербург|москв|ленинградск|област|город|регион|комитет|ведомств|учрежден|орган)[а-яё]{4,}/.test(text);
+  if (mentionsApostille && mentionsDestinationCountry) {
+    return {
+      kind: 'knowledge_lookup',
+      label: 'Справочный поиск по требованиям к апостилю для страны',
+      reasoning: 'Вопрос про апостиль для страны назначения; нужен открытый поиск по страновым спискам (Гаагская конвенция / КЛ / договоры), а не выбор типа документа.',
+    };
+  }
+
   return null;
 }

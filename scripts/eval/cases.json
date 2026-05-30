@@ -66,5 +66,9 @@
   {
     "q": "Нужен ли апостиль для документов в Казахстан?",
     "expect": { "source": "knowledge_base", "mustInclude": ["не требуется"], "mustNotInclude": ["не упоминается", "не могу дать"] }
+  },
+  {
+    "q": "Апостиль для Китая",
+    "expect": { "source": "knowledge_base", "clarify": false, "mustNotInclude": ["Какой документ нужно апостилировать"] }
   }
 ]
