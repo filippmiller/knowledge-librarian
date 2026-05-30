@@ -50,5 +50,21 @@
   {
     "q": "сколько сейчас стоит биткоин",
     "expect": { "source": "none", "clarify": false, "mustInclude": ["нет данных"] }
+  },
+  {
+    "q": "Сколько по времени делается апостиль свидетельства в ЗАГСе СПб?",
+    "expect": { "scenarioKey": "apostille.zags.spb", "source": "knowledge_base", "mustInclude": ["рабочих дн"] }
+  },
+  {
+    "q": "Можно ли апостилировать заламинированный документ?",
+    "expect": { "source": "knowledge_base", "clarify": false, "mustInclude": ["ламинир"], "mustNotInclude": ["Какой документ"] }
+  },
+  {
+    "q": "Какие документы нужны от юридического лица для апостиля?",
+    "expect": { "source": "knowledge_base", "clarify": false, "mustInclude": ["доверенность"], "mustNotInclude": ["Какой документ"] }
+  },
+  {
+    "q": "Нужен ли апостиль для документов в Казахстан?",
+    "expect": { "source": "knowledge_base", "mustInclude": ["не требуется"], "mustNotInclude": ["не упоминается", "не могу дать"] }
   }
 ]

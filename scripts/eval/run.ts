@@ -67,16 +67,27 @@ async function main() {
 
   for (const c of cases) {
     let answer = '', source = 'none', scenarioKey: string | undefined, clarify = false, level = '?';
-    try {
-      const r = await answerQuestionEnhanced(c.q);
-      answer = r.answer ?? '';
-      source = r.answerSource ?? 'none';
-      scenarioKey = r.scenarioKey;
-      clarify = !!r.scenarioClarification;
-      level = r.confidenceLevel;
-    } catch (err) {
-      failedCases.push({ q: c.q, fails: [`ENGINE THREW: ${(err as Error).message}`], answer: '' });
-      console.log(`✗ ${c.q}\n    ENGINE THREW`);
+    let lastErr: unknown;
+    let ok = false;
+    // Retry once: a transient infra blip (dropped embedding/DB socket, body
+    // timeout) must not be reported as an answer-quality failure.
+    for (let attempt = 0; attempt < 2 && !ok; attempt++) {
+      try {
+        if (attempt > 0) await new Promise((r) => setTimeout(r, 2000));
+        const r = await answerQuestionEnhanced(c.q);
+        answer = r.answer ?? '';
+        source = r.answerSource ?? 'none';
+        scenarioKey = r.scenarioKey;
+        clarify = !!r.scenarioClarification;
+        level = r.confidenceLevel;
+        ok = true;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (!ok) {
+      failedCases.push({ q: c.q, fails: [`ENGINE THREW: ${(lastErr as Error).message}`], answer: '' });
+      console.log(`✗ ${c.q}\n    ENGINE THREW (after retry)`);
       continue;
     }
     const fails = checkCase(answer, source, scenarioKey, clarify, level, c.expect);

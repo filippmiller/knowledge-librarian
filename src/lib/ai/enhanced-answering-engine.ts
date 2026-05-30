@@ -510,16 +510,42 @@ export async function answerQuestionEnhanced(
     : {};
   let rules;
   try {
-    const ruleCandidates = await prisma.rule.findMany({
-      where: {
-        status: 'ACTIVE',
-        ...scenarioWhere,
-      },
-      include: {
-        document: { select: { title: true } },
-      },
+    // Two candidate pools, merged: (a) keyword-prefiltered — rules whose body
+    // contains the question's significant terms, so a rare entity (e.g. a
+    // specific country buried in a 51-rule "не нужен апостиль" list) becomes a
+    // candidate instead of being dropped by the confidence cap; (b) top by
+    // confidence — the high-quality general rules. Without (a), a country-list
+    // rule competed against ALL ~600 active rules and lost.
+    const keyTerms = [...new Set(extractSearchTerms(relevanceText))]
+      .filter((t) => t.length >= 5)
+      .slice(0, 10);
+    // Fetch PER TERM (not one big OR with a confidence cap). A single OR fetch
+    // capped at N gets flooded by generic terms ("документ", "апостиль") that
+    // match hundreds of rules, so a rare entity ("Казахстан", matched by only a
+    // few rules) is cut by the cap. Per-term, each rare term's handful of rules
+    // is always included.
+    const perTerm = await Promise.all(
+      keyTerms.map((t) =>
+        prisma.rule.findMany({
+          where: { status: 'ACTIVE', ...scenarioWhere, body: { contains: t, mode: 'insensitive' as const } },
+          include: { document: { select: { title: true } } },
+          take: 25,
+          orderBy: { confidence: 'desc' },
+        })
+      )
+    );
+    const keywordMatched = perTerm.flat();
+    const byConfidence = await prisma.rule.findMany({
+      where: { status: 'ACTIVE', ...scenarioWhere },
+      include: { document: { select: { title: true } } },
       take: 100,
       orderBy: { confidence: 'desc' },
+    });
+    const seenRule = new Set<string>();
+    const ruleCandidates = [...keywordMatched, ...byConfidence].filter((r) => {
+      if (seenRule.has(r.id)) return false;
+      seenRule.add(r.id);
+      return true;
     });
     rules = rankByQuestion(
       ruleCandidates,
@@ -527,7 +553,7 @@ export async function answerQuestionEnhanced(
       (rule) => `${rule.ruleCode} ${rule.title} ${rule.body} ${rule.document?.title ?? ''}`,
       (rule) => rule.confidence >= 1 ? 2 : 0
     ).slice(0, 10);
-    console.log('[enhanced-answering] Found', rules.length, 'rules');
+    console.log('[enhanced-answering] Found', rules.length, 'rules from', ruleCandidates.length, 'candidates');
   } catch (error) {
     console.error('[enhanced-answering] Step 5 (rules fetch) failed:', error);
     throw error;
@@ -655,10 +681,19 @@ ${confidenceLevel === 'insufficient'
   let regenerated = false;
   if (contextChunks.length > 0 && confidenceLevel !== 'insufficient') {
     try {
-      consistency = await verifyAnswer(
-        answer,
-        contextChunks.map((c) => c.content)
-      );
+      // Verify against the FULL synthesis context — chunks AND rules AND Q&A —
+      // not just chunks. The synthesizer legitimately uses rules and Q&A as
+      // sources (see buildEnhancedContext), so checking against chunks alone
+      // falsely flags rule-sourced facts (e.g. the "5 рабочих дней" срок from a
+      // rule, or МЮ prices from R-352/R-353) as hallucinations — and the
+      // regeneration step can then strip a CORRECT fact, making the answer wrong
+      // ("срок не указан" when it IS specified in a rule).
+      const verificationSources = [
+        ...contextChunks.map((c) => c.content),
+        ...rules.map((r) => `[${r.ruleCode}] ${r.title}: ${r.body}`),
+        ...qaPairs.map((q) => `${q.question} ${q.answer}`),
+      ];
+      consistency = await verifyAnswer(answer, verificationSources);
       console.log(`[enhanced-answering] Consistency: ${consistency.claims.length} claims, ${consistency.unsupported.length} unsupported`);
       if (consistency.unsupported.length > 0) {
         console.warn('[enhanced-answering] Unsupported claims:',
