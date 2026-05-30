@@ -1,6 +1,6 @@
 import type { EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
 import prisma from '@/lib/db';
-import { sendMessage } from './telegram-api';
+import { sendMessage, sendInlineKeyboard } from './telegram-api';
 import { createKnowledgeGapSuggestion } from '@/lib/ai/knowledge-feedback';
 
 const NOTIFICATION_THROTTLE_MS = 10 * 60 * 1000;
@@ -14,14 +14,18 @@ export async function escalateUnconvincingAIAnswer(params: {
   sessionId?: string;
 }): Promise<void> {
   // Self-improving loop: capture low-trust answers as draft Q→A pairs for admin
-  // approval. Independent of the escalation early-return below (a low-confidence
-  // answer should be captured even if it doesn't meet the notify threshold).
-  void createKnowledgeGapSuggestion({
+  // approval. When a draft is created, send super-admins an actionable
+  // Approve/Reject message (it replaces the generic escalation notice).
+  const gapId = await createKnowledgeGapSuggestion({
     question: params.question,
     result: params.result,
     source: params.source,
     sessionId: params.sessionId,
   });
+  if (gapId) {
+    await sendKnowledgeGapForApproval(gapId, params.question, params.result.answer);
+    return;
+  }
 
   const reasons = getEscalationReasons(params.result);
   if (reasons.length === 0) return;
@@ -90,6 +94,32 @@ function getEscalationReasons(result: EnhancedAnswerResult): string[] {
     !!result.primarySource;
   if (!hasSource) reasons.push('нет убедительного источника');
   return reasons;
+}
+
+async function sendKnowledgeGapForApproval(
+  id: string,
+  question: string,
+  draftAnswer: string
+): Promise<void> {
+  const superAdminIds = await getSuperAdminTelegramIds();
+  if (superAdminIds.length === 0) return;
+  const appUrl = (process.env.NEXT_PUBLIC_APP_URL ?? '').replace(/\/$/, '');
+  const text = [
+    '🆕 Черновик правила на утверждение',
+    '',
+    `❓ Вопрос: ${question}`,
+    '',
+    '💬 Ответ (из общих знаний ИИ — проверьте!):',
+    draftAnswer.slice(0, 1500),
+    '',
+    appUrl ? `✏️ Поправить текст: ${appUrl}/admin/ai-questions` : '',
+    'Утвердить = сохранить в базу как пару «вопрос-ответ».',
+  ].filter(Boolean).join('\n');
+  const buttons = [
+    { text: '✅ Утвердить', callback_data: `kg:approve:${id}` },
+    { text: '✖️ Отклонить', callback_data: `kg:reject:${id}` },
+  ];
+  await Promise.all(superAdminIds.map((tid) => sendInlineKeyboard(Number(tid), text, buttons)));
 }
 
 async function getSuperAdminTelegramIds(): Promise<string[]> {

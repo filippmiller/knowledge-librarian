@@ -33,16 +33,16 @@ export async function createKnowledgeGapSuggestion(params: {
   result: EnhancedAnswerResult;
   source: 'WEB' | 'TELEGRAM' | 'API';
   sessionId?: string;
-}): Promise<void> {
+}): Promise<string | null> {
   try {
-    if (!isLowTrust(params.result)) return;
+    if (!isLowTrust(params.result)) return null;
 
     // Dedup: don't pile up identical OPEN drafts for the same question.
     const dupe = await prisma.aIQuestion.findFirst({
       where: { issueType: 'knowledge_gap', status: 'OPEN', question: params.question },
       select: { id: true },
     });
-    if (dupe) return;
+    if (dupe) return null;
 
     // Draft answer = the answer we already produced. For out_of_scope "нет
     // данных" (insufficient → low-trust) the draft answer is the no-data text,
@@ -57,7 +57,7 @@ export async function createKnowledgeGapSuggestion(params: {
       /* scenario tag is best-effort */
     }
 
-    await prisma.aIQuestion.create({
+    const created = await prisma.aIQuestion.create({
       data: {
         issueType: 'knowledge_gap',
         question: params.question,
@@ -70,10 +70,13 @@ export async function createKnowledgeGapSuggestion(params: {
           draft: { question: params.question, answer: draftAnswer, scenarioKey },
         },
       },
+      select: { id: true },
     });
     console.log('[knowledge-feedback] knowledge_gap draft created for:', params.question.slice(0, 80));
+    return created.id;
   } catch (e) {
     console.warn('[knowledge-feedback] createKnowledgeGapSuggestion failed:', e);
+    return null;
   }
 }
 
