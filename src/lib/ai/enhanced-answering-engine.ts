@@ -15,7 +15,7 @@ import { hybridSearch, HybridSearchResult } from './vector-search';
 import { expandQuery, ExpandedQueries, ExtractedEntities, extractEntities } from './query-expansion';
 import { classifyScenario, type ScenarioDecision } from '@/lib/knowledge/scenario-classifier';
 import { ancestorsOf } from '@/lib/knowledge/scenarios';
-import { expandAbbreviations } from '@/lib/knowledge/glossary';
+import { expandAbbreviations, selectKeyTerms } from '@/lib/knowledge/glossary';
 import { verifyAnswer, type ConsistencyReport } from '@/lib/ai/consistency-gate';
 
 // Confidence thresholds
@@ -45,6 +45,8 @@ export interface EnhancedAnswerResult {
   debug?: {
     chunks: { content: string; semanticScore: number; keywordScore: number; combinedScore: number }[];
     intentClassification: IntentClassification;
+    rules?: { ruleCode: string; documentTitle: string | null }[];
+    qaPairs?: { id: string; question: string }[];
     searchStats: {
       totalChunksSearched: number;
       avgSimilarity: number;
@@ -263,7 +265,7 @@ function selectContextChunks(
     .slice(0, maxChunks);
 }
 
-function extractSearchTerms(value: string): string[] {
+export function extractSearchTerms(value: string): string[] {
   const normalized = value
     .toLowerCase()
     .replace(/ё/g, 'е')
@@ -284,7 +286,7 @@ function extractSearchTerms(value: string): string[] {
   return [...new Set(expanded)];
 }
 
-function scoreText(value: string, terms: string[]): number {
+export function scoreText(value: string, terms: string[]): number {
   const text = value.toLowerCase().replace(/ё/g, 'е');
   let score = 0;
   for (const term of terms) {
@@ -301,13 +303,23 @@ function rankByQuestion<T>(
   items: T[],
   question: string,
   getText: (item: T) => string,
-  getBoost: (item: T) => number = () => 0
+  getBoost: (item: T) => number = () => 0,
+  // Optional "summary field" (a rule's title, a QAPair's question) scored AGAIN
+  // with the same terms — i.e. field boosting (title^2). The summary is the
+  // human-curated statement of what the unit is ABOUT, so matching it is a far
+  // stronger relevance signal than matching the verbose body. Without this, a
+  // concise on-point rule ("Апостиль на документы МВД в городе выдачи") loses to
+  // verbose rules that merely echo more query vocabulary.
+  getSummary: (item: T) => string = () => ''
 ): T[] {
   const terms = extractSearchTerms(question);
   if (terms.length === 0) return items;
 
   return items
-    .map((item) => ({ item, score: scoreText(getText(item), terms) + getBoost(item) }))
+    .map((item) => ({
+      item,
+      score: scoreText(getText(item), terms) + scoreText(getSummary(item), terms) + getBoost(item),
+    }))
     .filter(({ score }) => score > 0)
     .sort((a, b) => b.score - a.score)
     .map(({ item }) => item);
@@ -533,9 +545,11 @@ export async function answerQuestionEnhanced(
     // candidate instead of being dropped by the confidence cap; (b) top by
     // confidence — the high-quality general rules. Without (a), a country-list
     // rule competed against ALL ~600 active rules and lost.
-    const keyTerms = [...new Set(extractSearchTerms(relevanceText))]
-      .filter((t) => t.length >= 5)
-      .slice(0, 10);
+    // selectKeyTerms keeps long terms AND domain-critical short acronyms
+    // (МВД/ЗАГС/СОР/МЮ/...). The old `length >= 5` filter silently dropped those
+    // acronyms — the MOST discriminating tokens — so an acronym-keyed rule never
+    // entered this pool (e.g. R-963 "Апостиль на документы МВД в городе выдачи").
+    const keyTerms = selectKeyTerms(extractSearchTerms(relevanceText));
     // Fetch PER TERM (not one big OR with a confidence cap). A single OR fetch
     // capped at N gets flooded by generic terms ("документ", "апостиль") that
     // match hundreds of rules, so a rare entity ("Казахстан", matched by only a
@@ -568,7 +582,8 @@ export async function answerQuestionEnhanced(
       ruleCandidates,
       relevanceText,
       (rule) => `${rule.ruleCode} ${rule.title} ${rule.body} ${rule.document?.title ?? ''}`,
-      (rule) => rule.confidence >= 1 ? 2 : 0
+      (rule) => rule.confidence >= 1 ? 2 : 0,
+      (rule) => rule.title // title^2 field boost — curated summary of the rule
     ).slice(0, 10);
     console.log('[enhanced-answering] Found', rules.length, 'rules from', ruleCandidates.length, 'candidates');
   } catch (error) {
@@ -583,9 +598,7 @@ export async function answerQuestionEnhanced(
   // ask again, still not answered from base).
   let qaPairs;
   try {
-    const qaKeyTerms = [...new Set(extractSearchTerms(relevanceText))]
-      .filter((t) => t.length >= 5)
-      .slice(0, 10);
+    const qaKeyTerms = selectKeyTerms(extractSearchTerms(relevanceText));
     const qaPerTerm = await Promise.all(
       qaKeyTerms.map((t) =>
         prisma.qAPair.findMany({
@@ -612,8 +625,13 @@ export async function answerQuestionEnhanced(
       seenQa.add(q.id);
       return true;
     });
-    qaPairs = rankByQuestion(qaCandidates, relevanceText, (qa) => `${qa.question} ${qa.answer}`)
-      .slice(0, 5);
+    qaPairs = rankByQuestion(
+      qaCandidates,
+      relevanceText,
+      (qa) => `${qa.question} ${qa.answer}`,
+      () => 0,
+      (qa) => qa.question // question^2 field boost — the QAPair's curated summary
+    ).slice(0, 5);
     console.log('[enhanced-answering] Found', qaPairs.length, 'QA pairs from', qaCandidates.length, 'candidates');
   } catch (error) {
     console.error('[enhanced-answering] Step 6 (QA pairs fetch) failed:', error);
@@ -903,6 +921,11 @@ ${fixList}
         combinedScore: c.combinedScore,
       })),
       intentClassification: intentResult,
+      // Retrieved rules/QA (codes + source doc) — lets diagnostics confirm WHICH
+      // knowledge units reached the synthesizer, independent of what the LLM
+      // chose to quote in citations.
+      rules: rules.map((r) => ({ ruleCode: r.ruleCode, documentTitle: r.document?.title ?? null })),
+      qaPairs: qaPairs.map((qa) => ({ id: qa.id, question: qa.question.slice(0, 80) })),
       searchStats: {
         totalChunksSearched: chunks.length,
         avgSimilarity,
@@ -923,6 +946,50 @@ function buildDeterministicGuardrailResult(question: string): EnhancedAnswerResu
     /как|можн|нельзя|получится|сдела|постав|простав|подат|оформ/.test(text);
   const mentionsEducation =
     /образован|диплом|аттестат|вуз|университет|колледж|школ/.test(text);
+
+  // "Другой регион" path: a ЗАГС document issued OUTSIDE СПб/ЛО (the user picked
+  // the "Другой регион" option or named a non-local city). The bureau apostilles
+  // ЗАГС ORIGINALS only at the place of issue it serves (СПб/ЛО); an original
+  // from another region must be apostilled THERE. Explain that + offer the
+  // notarized-copy alternative. Fires only when it's NOT the mirror case (which
+  // mentions both СПб and Москва and has its own directional answer below).
+  const mentionsOtherRegion = /друг[а-я]*\s+регион|друг[а-я]*\s+город/.test(text);
+  const mentionsOtherCity =
+    /москв|перм|нижн|новосиб|екатеринбург|казан|самар|ростов|краснодар|воронеж|челябинск|волгоград|саратов|тюмен|иркутск|омск/.test(text);
+  const zagsContext =
+    /загс|свидетельств|(?:^|[^а-я])со[рбс](?:[^а-я]|$)|рожден|брак|растор|смерт|перемен.{0,4}имен|отцовств/.test(text);
+  const isLocalIssue = mentionsSpb || /ленинградск|лен\.?\s*обл/.test(text);
+  if (mentionsApostille && zagsContext && (mentionsOtherRegion || (mentionsOtherCity && !isLocalIssue))) {
+    const answer = [
+      'Апостиль на оригинал свидетельства ЗАГС ставится по месту выдачи документа — в том регионе, где он выдан. Наше бюро ставит апостиль на оригиналы ЗАГС только для документов, выданных в Санкт-Петербурге и Ленинградской области.',
+      '',
+      'Если документ выдан в другом регионе (например, в Москве), апостиль на оригинал нужно ставить там, по месту выдачи — мы этого сделать не можем.',
+      '',
+      'Что мы можем предложить: апостиль на НОТАРИАЛЬНУЮ КОПИЮ документа (если принимающая сторона за рубежом допускает апостиль на копию, а не на оригинал) — это отдельная процедура. Уточните требования принимающей страны/органа.',
+    ].join('\n');
+    return {
+      answer,
+      confidence: 0.9,
+      confidenceLevel: 'medium',
+      needsClarification: false,
+      citations: [
+        {
+          documentTitle: 'Операционный guardrail',
+          quote: 'Апостиль на оригинал ЗАГС ставится по месту выдачи; для документов из других регионов — только апостиль на нотариальную копию.',
+          relevanceScore: 0.9,
+        },
+      ],
+      domainsUsed: ['legal_compliance'],
+      queryAnalysis: {
+        originalQuery: question,
+        expandedQueries: [],
+        extractedEntities: { dates: [], prices: [], documentTypes: ['свидетельство'], services: ['апостиль'] },
+        isAmbiguous: false,
+      },
+      answerSource: 'deterministic_guardrail',
+      requiresHumanReview: false,
+    };
+  }
 
   if (!mentionsApostille || !mentionsSpb || !mentionsMoscow || !asksHowOrCan || mentionsEducation) {
     return null;

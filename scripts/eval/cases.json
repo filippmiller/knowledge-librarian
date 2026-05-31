@@ -70,5 +70,9 @@
   {
     "q": "Апостиль для Китая",
     "expect": { "source": "knowledge_base", "clarify": false, "mustNotInclude": ["Какой документ нужно апостилировать"] }
+  },
+  {
+    "q": "как апостилировать СОР выданное в Москве",
+    "expect": { "source": "deterministic_guardrail", "clarify": false, "mustInclude": ["по месту выдачи", "нотариальн"], "mustNotInclude": ["Фурштатская"] }
   }
 ]
