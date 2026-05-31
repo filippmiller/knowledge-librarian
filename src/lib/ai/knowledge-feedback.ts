@@ -13,6 +13,7 @@
 import prisma from '@/lib/db';
 import type { EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
 import { classifyScenario } from '@/lib/knowledge/scenario-classifier';
+import { isDraftableDraft } from '@/lib/ai/answer-policy';
 
 /** True when the answer is low-trust and worth capturing as a draft rule. */
 export function isLowTrust(result: EnhancedAnswerResult): boolean {
@@ -44,10 +45,13 @@ export async function createKnowledgeGapSuggestion(params: {
     });
     if (dupe) return null;
 
-    // Draft answer = the answer we already produced. For out_of_scope "нет
-    // данных" (insufficient → low-trust) the draft answer is the no-data text,
-    // which the admin replaces with the real answer when they edit & approve.
+    // Draft answer = the answer we already produced.
     const draftAnswer = params.result.answer;
+
+    // Quality gate: never file a draft for a context-less fragment or a
+    // "no data / please clarify" non-answer. These pollute the admin queue and,
+    // if approved, poison the KB.
+    if (!isDraftableDraft(params.question, draftAnswer)) return null;
 
     let scenarioKey: string | null = null;
     try {

@@ -103,22 +103,7 @@ export async function handleScenarioCallback(
     originalAt = new Date(0);
   }
 
-  // Chain = all USER messages strictly AFTER the original-question timestamp,
-  // chronologically. Covers any number of prior clarification steps.
-  const chainMsgs = await prisma.chatMessage.findMany({
-    where: {
-      sessionId: session.id,
-      role: 'USER',
-      createdAt: { gt: originalAt },
-    },
-    orderBy: { createdAt: 'asc' },
-    select: { content: true },
-  });
-  const chain = chainMsgs.map((m) => m.content).join(' → ');
-
-  const effectiveQuestion = chain
-    ? `${original}\n\nУточнение пользователя: ${chain}`
-    : original;
+  const effectiveQuestion = await buildClarificationQuery(session.id, original, originalAt);
 
   const result = await answerQuestionEnhanced(effectiveQuestion, session.id);
 
@@ -135,6 +120,59 @@ export async function handleScenarioCallback(
   });
 
   await sendClarificationOrAnswer(chatId, result);
+}
+
+/**
+ * Effective query for a clarification run = the original question + the chain of
+ * every USER message since the anchor (all accumulated clarification replies,
+ * whether tapped as buttons or typed as free text). Single source of truth for
+ * both the button path (handleScenarioCallback) and the typed-reply path
+ * (handleQuestion).
+ */
+export async function buildClarificationQuery(
+  sessionId: string,
+  original: string,
+  originalAt: Date
+): Promise<string> {
+  const chainMsgs = await prisma.chatMessage.findMany({
+    where: { sessionId, role: 'USER', createdAt: { gt: originalAt } },
+    orderBy: { createdAt: 'asc' },
+    select: { content: true },
+  });
+  const chain = chainMsgs.map((m) => m.content).join(' → ');
+  return chain ? `${original}\n\nУточнение пользователя: ${chain}` : original;
+}
+
+/**
+ * If the LATEST assistant turn in the session is an unanswered scenario
+ * clarification, return its anchor (original question + timestamp); else null.
+ * Used by the typed-reply path to detect "the user is answering my last
+ * clarification with text instead of tapping a button".
+ */
+export async function getPendingClarificationAnchor(
+  sessionId: string
+): Promise<{ original: string; originalAt: Date } | null> {
+  const lastAsst = await prisma.chatMessage.findFirst({
+    where: { sessionId, role: 'ASSISTANT' },
+    orderBy: { createdAt: 'desc' },
+  });
+  const meta = lastAsst?.metadata as AssistantMeta;
+  if (!meta?.scenarioClarification?.options?.length) return null;
+
+  let originalAt: Date | null = meta.originalQuestionAt ? new Date(meta.originalQuestionAt) : null;
+  let original: string | undefined = meta.originalQuestion;
+  if (!original || !originalAt) {
+    const firstUser = await prisma.chatMessage.findFirst({
+      where: { sessionId, role: 'USER' },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (firstUser) {
+      originalAt ??= firstUser.createdAt;
+      original ??= firstUser.content;
+    }
+  }
+  if (!original || !originalAt) return null;
+  return { original, originalAt };
 }
 
 /** Send a result to the chat: inline keyboard if clarification, plain
