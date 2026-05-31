@@ -4,6 +4,48 @@
 
 ---
 
+## 2026-05-29..31 — Answer-engine hardening + self-improving knowledge loop (PR #1–#7)
+
+**Status**: Completed & deployed (Railway `98a2cf44` = master `061b06c`). PAUSED for handoff.
+**Commits**: `0b872ba`, `07e4931`, `e3af4f5`, `76c456a`, `adaf347`, `c8302a2`, `061b06c` (+ merges)
+
+### What was done
+Two goals: (1) make the bot's answers honest about their source (документы vs общие знания ИИ)
+and more correct; (2) build a self-improving loop — when uncertain, the bot answers from general
+AI knowledge AND files a draft Q→A rule for super-admin approval; on approval it becomes an ACTIVE
+QAPair so the next identical question is answered from the KB.
+
+- **Source attribution + escalation** (PR#1): honest `answerSource`; every `general_ai` escalates.
+- **Abbreviations** (PR#2/#4): `СО[РБС]` ЗАГС family; data-driven glossary `expandAbbreviations()`.
+- **Tech debt + robustness** (PR#3/#4): honest confidence (`bestSemanticScore + coverageScore*0.1`),
+  golden eval harness (`scripts/eval/`, 18 cases, deterministic), ingest quality gate
+  (`extraction-lint.ts`), provenance-filtered citations.
+- **Answer-quality v2** (PR#5): consistency gate checks chunks+rules+QA; general-requirement routing.
+- **Country-destination** (PR#6): "апостиль для <страна>" → KB, fixed the "Китай" clarification loop.
+- **Self-improving loop** (PR#7): `knowledge-feedback.ts`, TG inline ✅/✖️ approval
+  (`knowledge-gap-callback.ts`), web review UI, `QAPair.metadata` provenance. Verified E2E on prod.
+
+### Key bugs fixed
+- `\w` doesn't match Cyrillic in JS → used `[а-я]*` (hit twice).
+- Loop didn't close: Step 6 qaPairs fetched `take:100` with no prefilter → fresh approved pair
+  dropped. Fixed with per-term keyword prefilter (mirrors Step 5 rules).
+- `prisma db push` wanted to DROP `DocumentRevision` (drift) → used raw `ALTER ... ADD COLUMN
+  IF NOT EXISTS` for `QAPair.metadata`. Drift still unreconciled (follow-up).
+
+### Files
+See `docs/reviews/2026-05-31-codex-review-request.md` for the full list + per-PR breakdown.
+New: `knowledge-feedback.ts`, `knowledge-gap-callback.ts`, `glossary.ts`, `extraction-lint.ts`,
+`scripts/eval/*`, `scripts/ask.ts`.
+
+### Handoff
+- **Continuation handoff**: `.claude/handoffs/2026-05-31-154600.md`
+- **Codex review request**: `docs/reviews/2026-05-31-codex-review-request.md`
+- Memory updated: `~/.claude/projects/C--dev-translation/memory/answer-source-routing.md`
+- Remaining: run Codex review; content gaps (China/Hague, МВД two-address, pricing — need domain
+  expert); reconcile schema drift; continue one-by-one question re-run via `scripts/ask.ts`.
+
+---
+
 ## 2026-02-19 — UX: Forgiving Bot — Keyword Detection, Direct Rule Lookup
 
 **Status**: Completed
