@@ -4,6 +4,95 @@
 
 ---
 
+## 2026-05-31 (cont.) — Clarification-flow fixes + Codex loop hardening (PR #9)
+
+**Status**: Completed, merged & deployed (Railway `a4978a34` = master `a29c04b`). Verified.
+**Commits**: `2b433f8`, `10957ee` (PR #9, merged `a29c04b`)
+
+> The "pause" never happened — user sent a live-bot screenshot and a Codex review, so we kept
+> going. This entry supersedes the "PAUSED" status of the entry below.
+
+### What was done
+**Batch 1 — clarification-flow bugs (from a live Telegram screenshot):**
+- **A** Clarification turns no longer escalate ("Требуется проверка ответа ИИ" spam). A clarification
+  is healthy behaviour → `isClarificationTurn()` early-return in `escalateUnconvincingAIAnswer`.
+- **B** Typed clarification replies (e.g. "Москва" instead of tapping the region button) no longer
+  lose context. `handleQuestion` detects a pending clarification (`getPendingClarificationAnchor`) +
+  a typed reply (`looksLikeClarificationReply`) and merges into the original question + chain.
+- **C** Loop no longer files junk drafts ("Москва" → "нет данных"). `isDraftableDraft()` rejects
+  context-less fragments and no-data/clarification non-answers.
+- All three predicates → one pure module `src/lib/ai/answer-policy.ts` (unit-tested, no heavy imports).
+
+**Batch 2 — Codex adversarial review (verdict FIX-FIRST), all 7 findings:**
+- **P1 security**: web approve/reject requires top web role (ADMIN) via `getAuthenticatedUser()`;
+  `approvedBy` from authenticated principal, not request body. (`auth.ts`, `api/ai-questions/[id]/route.ts`)
+- **P1 atomicity**: `approveKnowledgeGap` atomic `updateMany` claim in a `$transaction` — no duplicate
+  QAPair on concurrent approve.
+- **P1 recall (the big one)**: `overallConfidence` used ONLY chunks, so an approved QA-only pair scored
+  0 → general_ai → loop never truly closed. `questionTermOverlap()` + `hasStrongQaMatch` (≥0.7) now
+  treats a strong QA match as authoritative KB evidence. (`enhanced-answering-engine.ts`)
+- **P2**: normalized draft dedup; Cyrillic `\w`→`[а-яё]*` in scenario-classifier (`министерство юстиции`).
+- **P3**: consistency-gate strict `supported === true`; extraction-lint FILLER catches inflected forms.
+
+### Verification (all green)
+- `tsc --noEmit` clean · `npm run build` exit 0 · unit `scripts/eval/unit-guards.ts` 18/18 ·
+  regression `scripts/eval/run.ts` 18/18.
+- Functional on prod: **P1#3** QA-only → `knowledge_base`/high/100%; **P1#2** concurrent approve →
+  1 fulfilled / 1 rejected / 1 QAPair; **B** context merge → anchor preserved + negative control.
+
+### Recurring trap (now documented in memory)
+JS `\w`/`\b` are ASCII-only → silently fail on Cyrillic. Russian tails use `[а-яё]*`; word-boundary
+checks tokenize + Set-match instead of `\b`.
+
+### Follow-ups (in handoff)
+- Content gaps (China/Hague, МВД two-address, pricing) — need domain expert.
+- Reconcile `DocumentRevision` schema drift (db push still unsafe).
+- P2#4 dedup race: a partial-unique DB index is the robust version (normalized check ships now).
+
+---
+
+## 2026-05-29..31 — Answer-engine hardening + self-improving knowledge loop (PR #1–#7)
+
+**Status**: Completed & deployed (Railway `98a2cf44` = master `061b06c`). Superseded by the entry above.
+**Commits**: `0b872ba`, `07e4931`, `e3af4f5`, `76c456a`, `adaf347`, `c8302a2`, `061b06c` (+ merges)
+
+### What was done
+Two goals: (1) make the bot's answers honest about their source (документы vs общие знания ИИ)
+and more correct; (2) build a self-improving loop — when uncertain, the bot answers from general
+AI knowledge AND files a draft Q→A rule for super-admin approval; on approval it becomes an ACTIVE
+QAPair so the next identical question is answered from the KB.
+
+- **Source attribution + escalation** (PR#1): honest `answerSource`; every `general_ai` escalates.
+- **Abbreviations** (PR#2/#4): `СО[РБС]` ЗАГС family; data-driven glossary `expandAbbreviations()`.
+- **Tech debt + robustness** (PR#3/#4): honest confidence (`bestSemanticScore + coverageScore*0.1`),
+  golden eval harness (`scripts/eval/`, 18 cases, deterministic), ingest quality gate
+  (`extraction-lint.ts`), provenance-filtered citations.
+- **Answer-quality v2** (PR#5): consistency gate checks chunks+rules+QA; general-requirement routing.
+- **Country-destination** (PR#6): "апостиль для <страна>" → KB, fixed the "Китай" clarification loop.
+- **Self-improving loop** (PR#7): `knowledge-feedback.ts`, TG inline ✅/✖️ approval
+  (`knowledge-gap-callback.ts`), web review UI, `QAPair.metadata` provenance. Verified E2E on prod.
+
+### Key bugs fixed
+- `\w` doesn't match Cyrillic in JS → used `[а-я]*` (hit twice).
+- Loop didn't close: Step 6 qaPairs fetched `take:100` with no prefilter → fresh approved pair
+  dropped. Fixed with per-term keyword prefilter (mirrors Step 5 rules).
+- `prisma db push` wanted to DROP `DocumentRevision` (drift) → used raw `ALTER ... ADD COLUMN
+  IF NOT EXISTS` for `QAPair.metadata`. Drift still unreconciled (follow-up).
+
+### Files
+See `docs/reviews/2026-05-31-codex-review-request.md` for the full list + per-PR breakdown.
+New: `knowledge-feedback.ts`, `knowledge-gap-callback.ts`, `glossary.ts`, `extraction-lint.ts`,
+`scripts/eval/*`, `scripts/ask.ts`.
+
+### Handoff
+- **Continuation handoff**: `.claude/handoffs/2026-05-31-154600.md`
+- **Codex review request**: `docs/reviews/2026-05-31-codex-review-request.md`
+- Memory updated: `~/.claude/projects/C--dev-translation/memory/answer-source-routing.md`
+- Remaining: run Codex review; content gaps (China/Hague, МВД two-address, pricing — need domain
+  expert); reconcile schema drift; continue one-by-one question re-run via `scripts/ask.ts`.
+
+---
+
 ## 2026-02-19 — UX: Forgiving Bot — Keyword Detection, Direct Rule Lookup
 
 **Status**: Completed
