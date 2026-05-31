@@ -13,6 +13,7 @@
 import prisma from '@/lib/db';
 import type { EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
 import { classifyScenario } from '@/lib/knowledge/scenario-classifier';
+import { isDraftableDraft } from '@/lib/ai/answer-policy';
 
 /** True when the answer is low-trust and worth capturing as a draft rule. */
 export function isLowTrust(result: EnhancedAnswerResult): boolean {
@@ -37,17 +38,28 @@ export async function createKnowledgeGapSuggestion(params: {
   try {
     if (!isLowTrust(params.result)) return null;
 
-    // Dedup: don't pile up identical OPEN drafts for the same question.
-    const dupe = await prisma.aIQuestion.findFirst({
-      where: { issueType: 'knowledge_gap', status: 'OPEN', question: params.question },
-      select: { id: true },
+    // Dedup: don't pile up duplicate OPEN drafts. Compare on a NORMALIZED form
+    // (trim / lowercase / collapse whitespace) so "Как апостилировать СОР" and
+    // "как  апостилировать сор" don't both queue. (A tiny race window remains for
+    // truly simultaneous identical questions — harmless: worst case is two drafts
+    // the admin sees and rejects one. A partial-unique DB index is the robust
+    // follow-up.)
+    const target = normalizeQuestion(params.question);
+    const openGaps = await prisma.aIQuestion.findMany({
+      where: { issueType: 'knowledge_gap', status: 'OPEN' },
+      select: { question: true },
+      take: 300,
+      orderBy: { createdAt: 'desc' },
     });
-    if (dupe) return null;
+    if (openGaps.some((g) => normalizeQuestion(g.question) === target)) return null;
 
-    // Draft answer = the answer we already produced. For out_of_scope "нет
-    // данных" (insufficient → low-trust) the draft answer is the no-data text,
-    // which the admin replaces with the real answer when they edit & approve.
+    // Draft answer = the answer we already produced.
     const draftAnswer = params.result.answer;
+
+    // Quality gate: never file a draft for a context-less fragment or a
+    // "no data / please clarify" non-answer. These pollute the admin queue and,
+    // if approved, poison the KB.
+    if (!isDraftableDraft(params.question, draftAnswer)) return null;
 
     let scenarioKey: string | null = null;
     try {
@@ -86,6 +98,11 @@ interface Draft {
   scenarioKey?: string | null;
 }
 
+/** Canonical form for dedup comparison: trim, lowercase, collapse whitespace. */
+function normalizeQuestion(q: string): string {
+  return q.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
 /**
  * Approve a knowledge_gap draft → create an ACTIVE QAPair (the answer may be
  * edited by the admin) and mark the AIQuestion ANSWERED. Returns the QAPair id.
@@ -94,6 +111,7 @@ export async function approveKnowledgeGap(
   id: string,
   opts: { answer?: string; scenarioKey?: string | null; approvedBy: string }
 ): Promise<{ qaPairId: string }> {
+  // Read first to validate the draft (cheap, no mutation).
   const aq = await prisma.aIQuestion.findUnique({ where: { id } });
   if (!aq || aq.issueType !== 'knowledge_gap') throw new Error('not a knowledge_gap suggestion');
   if (aq.status !== 'OPEN') throw new Error('already resolved');
@@ -104,27 +122,40 @@ export async function approveKnowledgeGap(
   if (answer.length < 5) throw new Error('answer too short');
   const scenarioKey = opts.scenarioKey !== undefined ? opts.scenarioKey : draft.scenarioKey ?? null;
 
-  const qa = await prisma.qAPair.create({
-    data: {
-      question,
-      answer,
-      status: 'ACTIVE',
-      scenarioKey,
-      metadata: {
-        origin: 'ai-suggested',
-        approvedBy: opts.approvedBy,
-        approvedAt: new Date().toISOString(),
-        fromAIQuestion: id,
+  // Atomic claim + write. `updateMany` with a status guard is the lock: only ONE
+  // concurrent approval can flip OPEN→ANSWERED (count === 1); a loser sees
+  // count === 0 and aborts BEFORE creating a duplicate QAPair. The transaction
+  // rolls the claim back if QAPair.create fails, so we never leave an ANSWERED
+  // draft with no pair.
+  return await prisma.$transaction(async (tx) => {
+    const claim = await tx.aIQuestion.updateMany({
+      where: { id, issueType: 'knowledge_gap', status: 'OPEN' },
+      data: { status: 'ANSWERED', respondedAt: new Date() },
+    });
+    if (claim.count !== 1) throw new Error('already resolved');
+
+    const qa = await tx.qAPair.create({
+      data: {
+        question,
+        answer,
+        status: 'ACTIVE',
+        scenarioKey,
+        metadata: {
+          origin: 'ai-suggested',
+          approvedBy: opts.approvedBy,
+          approvedAt: new Date().toISOString(),
+          fromAIQuestion: id,
+        },
       },
-    },
-  });
+    });
 
-  await prisma.aIQuestion.update({
-    where: { id },
-    data: { status: 'ANSWERED', respondedAt: new Date(), response: `approved → QAPair ${qa.id}` },
-  });
+    await tx.aIQuestion.update({
+      where: { id },
+      data: { response: `approved → QAPair ${qa.id}` },
+    });
 
-  return { qaPairId: qa.id };
+    return { qaPairId: qa.id };
+  });
 }
 
 /** Reject a knowledge_gap draft → mark the AIQuestion DISMISSED. */

@@ -15,6 +15,7 @@ import {
 import { addKnowledge, correctKnowledge } from './knowledge-manager';
 import { answerQuestionEnhanced, type EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
 import { getCachedAnswer, storeCachedAnswer } from '@/lib/ai/answer-cache';
+import { looksLikeClarificationReply } from '@/lib/ai/answer-policy';
 import { escalateUnconvincingAIAnswer } from './ai-escalation';
 import { getOrCreateSession, saveChatMessage } from '@/lib/ai/answering-engine';
 import prisma from '@/lib/db';
@@ -557,11 +558,29 @@ export async function handleQuestion(message: TelegramMessage, user: TelegramUse
     const session = await getOrCreateSession('TELEGRAM', user.telegramId);
     const userMsg = await saveChatMessage(session.id, 'USER', question);
 
-    const cached = getCachedAnswer(question);
-    const result = cached?.result ?? await answerQuestionEnhanced(question, session.id);
-    if (!cached) storeCachedAnswer(question, result);
+    // If the bot's previous turn was a scenario clarification and THIS message
+    // looks like a typed answer to it (e.g. "Москва" instead of tapping the
+    // region button), merge it into the original question + chain so context is
+    // not lost. Mirrors the button path (handleScenarioCallback). A genuinely
+    // new question (interrogative / long) bypasses this and starts fresh.
+    const { getPendingClarificationAnchor, buildClarificationQuery } = await import(
+      './scenario-callback'
+    );
+    const anchor = looksLikeClarificationReply(question)
+      ? await getPendingClarificationAnchor(session.id)
+      : null;
+    const effectiveQuestion = anchor
+      ? await buildClarificationQuery(session.id, anchor.original, anchor.originalAt)
+      : question;
+    const resolvingClarification = anchor !== null;
+
+    // Caching is keyed on the raw text; a clarification reply ("Москва") means
+    // something different per conversation, so never cache or serve it.
+    const cached = resolvingClarification ? null : getCachedAnswer(question);
+    const result = cached?.result ?? await answerQuestionEnhanced(effectiveQuestion, session.id);
+    if (!cached && !resolvingClarification) storeCachedAnswer(question, result);
     void escalateUnconvincingAIAnswer({
-      question,
+      question: effectiveQuestion,
       result,
       source: 'TELEGRAM',
       userId: user.telegramId,
@@ -569,9 +588,10 @@ export async function handleQuestion(message: TelegramMessage, user: TelegramUse
     });
 
     // Persist scenarioClarification + the original question anchor (text +
-    // its timestamp) so the callback handler can reconstruct the full
-    // "original + chain" query deterministically across any number of
-    // clarification clicks. No reliance on LLM follow-up detection.
+    // its timestamp) so the next reply (button OR typed) can reconstruct the
+    // full "original + chain" query deterministically across any number of
+    // clarification steps. When resolving a clarification we thread the SAME
+    // anchor forward, not this reply, so multi-step typed clarification works.
     await saveChatMessage(session.id, 'ASSISTANT', result.answer, {
       confidence: result.confidence,
       confidenceLevel: result.confidenceLevel,
@@ -579,8 +599,8 @@ export async function handleQuestion(message: TelegramMessage, user: TelegramUse
       citationCount: result.citations.length,
       scenarioKey: result.scenarioKey,
       scenarioClarification: result.scenarioClarification,
-      originalQuestion: question,
-      originalQuestionAt: userMsg.createdAt.toISOString(),
+      originalQuestion: anchor ? anchor.original : question,
+      originalQuestionAt: anchor ? anchor.originalAt.toISOString() : userMsg.createdAt.toISOString(),
     });
 
     // Use the shared helper so text path and callback path format identically.

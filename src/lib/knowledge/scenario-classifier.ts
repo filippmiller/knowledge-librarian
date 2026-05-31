@@ -184,11 +184,14 @@ function classifyScenarioDeterministically(question: string): ScenarioDecision |
     && /документ|свидетельств|справк/.test(text);
   const asksReference =
     /(?:что\s+нужно\s+знать|как\s+заполн|как\s+делать|что\s+делать|процедур|порядок|инструкц|чек\s*-?\s*лист|можно\s+апостилир|нельзя\s+апостилир|для\s+каких\s+стран|какие\s+страны|нужна\s+ли)/.test(text);
-  const mentionsMinJustice = /мин\s*юст|минюст|(?:^|[^а-я])мю(?:[^а-я]|$)|министерств\w*\s+юстиц/.test(text);
+  // NB: Russian tails must be [а-яё]*, NOT \w* — JS \w is ASCII-only and cannot
+  // bridge a Cyrillic suffix to the next token, so "министерство юстиции" would
+  // silently fail to match with \w*.
+  const mentionsMinJustice = /мин\s*юст|минюст|(?:^|[^а-я])мю(?:[^а-я]|$)|министерств[а-яё]*\s+юстиц/.test(text);
   const mentionsSpb = /санкт\s*петербург|петербург|(?:^|[^а-я])спб(?:[^а-я]|$)/.test(text);
   const mentionsMoscow = /москв/.test(text);
   const mentionsEducation = /образован|диплом|аттестат|вуз|университет|колледж|школ/.test(text);
-  const asksCountryRequirement = /нуж\w*|требу\w*|став\w*|простав\w*|не\s+нуж/.test(text);
+  const asksCountryRequirement = /нуж[а-яё]*|требу[а-яё]*|став[а-яё]*|простав[а-яё]*|не\s+нуж/.test(text);
   // A GENERAL requirement that is the same across every apostille scenario
   // (lamination, document condition, language, who submits). Such questions
   // must NOT be bounced to "which document type?" — the answer is universal and

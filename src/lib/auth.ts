@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { compare, hash } from 'bcryptjs';
+import type { UserRole } from '@prisma/client';
 import { prisma } from './db';
+
+export interface AuthenticatedUser {
+  username: string;
+  role: UserRole;
+}
 
 export function getBasicAuthCredentials(request: NextRequest): { username: string; password: string } | null {
   const authHeader = request.headers.get('authorization');
@@ -57,6 +63,31 @@ export async function requireAdminAuth(request: NextRequest): Promise<NextRespon
   }
 
   return null;
+}
+
+/**
+ * Validate Basic-Auth credentials and return the authenticated principal
+ * (username + role) WITHOUT mutating lastLoginAt. Use for authorization
+ * decisions where the role matters or the acting user must be recorded — e.g.
+ * who may write to the knowledge base, and whose name to stamp as approver.
+ * Returns null when the header is missing or the credentials are invalid.
+ */
+export async function getAuthenticatedUser(
+  request: NextRequest
+): Promise<AuthenticatedUser | null> {
+  const credentials = getBasicAuthCredentials(request);
+  if (!credentials) return null;
+  try {
+    const user = await prisma.user.findUnique({
+      where: { username: credentials.username.toLowerCase() },
+    });
+    if (!user) return null;
+    const ok = await compare(credentials.password, user.passwordHash);
+    return ok ? { username: user.username, role: user.role } : null;
+  } catch (error) {
+    console.error('Auth principal lookup error:', error);
+    return null;
+  }
 }
 
 export function createAuthResponse(): NextResponse {

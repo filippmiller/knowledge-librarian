@@ -114,11 +114,21 @@ ${answer}
     .filter((c): c is { claim: unknown; supported: unknown; reasoning?: unknown } =>
       typeof c === 'object' && c !== null
     )
-    .map((c) => ({
-      claim: String(c.claim ?? '').trim(),
-      supported: c.supported !== false,
-      reasoning: typeof c.reasoning === 'string' ? c.reasoning : undefined,
-    }))
+    .map((c) => {
+      // Be conservative: a claim counts as supported ONLY on a strict boolean
+      // `true`. A missing / non-boolean / malformed verifier value must NOT pass
+      // as supported — otherwise a hallucinated claim slips through whenever the
+      // verifier output is sloppy. When unsure, treat it as unsupported (the
+      // claim is then stripped/regenerated) rather than trusting it.
+      if (typeof c.supported !== 'boolean') {
+        console.warn('[consistency-gate] non-boolean "supported" from verifier, treating as unsupported:', JSON.stringify(c.supported));
+      }
+      return {
+        claim: String(c.claim ?? '').trim(),
+        supported: c.supported === true,
+        reasoning: typeof c.reasoning === 'string' ? c.reasoning : undefined,
+      };
+    })
     .filter((c) => c.claim.length > 0);
 
   const unsupported = claims.filter((c) => !c.supported);

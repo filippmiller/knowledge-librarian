@@ -2,6 +2,7 @@ import type { EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
 import prisma from '@/lib/db';
 import { sendMessage, sendInlineKeyboard } from './telegram-api';
 import { createKnowledgeGapSuggestion } from '@/lib/ai/knowledge-feedback';
+import { isClarificationTurn } from '@/lib/ai/answer-policy';
 
 const NOTIFICATION_THROTTLE_MS = 10 * 60 * 1000;
 const recentNotifications = new Map<string, number>();
@@ -13,6 +14,9 @@ export async function escalateUnconvincingAIAnswer(params: {
   userId?: string;
   sessionId?: string;
 }): Promise<void> {
+  // The bot asking a clarifying question is healthy behaviour, not an escalation.
+  if (isClarificationTurn(params.result)) return;
+
   // Self-improving loop: capture low-trust answers as draft Q→A pairs for admin
   // approval. When a draft is created, send super-admins an actionable
   // Approve/Reject message (it replaces the generic escalation notice).
@@ -76,12 +80,12 @@ export async function escalateUnconvincingAIAnswer(params: {
 }
 
 function getEscalationReasons(result: EnhancedAnswerResult): string[] {
+  // Clarification turns are filtered out before we get here (see
+  // isClarificationTurn early-return), so "ИИ запросил уточнение" is no longer a
+  // reason to escalate — a clarification is healthy behaviour, not a failure.
   const reasons: string[] = [];
   if (result.confidenceLevel === 'low' || result.confidenceLevel === 'insufficient') {
     reasons.push(`низкая уверенность: ${result.confidenceLevel}`);
-  }
-  if (result.needsClarification || result.clarificationQuestion || result.scenarioClarification) {
-    reasons.push('ИИ запросил уточнение');
   }
   if (result.answerSource === 'general_ai') {
     reasons.push('ответ из общего знания ИИ');
