@@ -1,3 +1,19 @@
+> ## ✅ RESOLVED (2026-05-31) — Codex returned verdict FIX-FIRST; all 7 findings fixed in PR #9 (`a29c04b`), deployed `a4978a34`.
+> | # | Sev | Status |
+> |---|-----|--------|
+> | 1 web approve authz + body-spoofed approvedBy | P1 | ✅ ADMIN-gated via `getAuthenticatedUser`, approver from principal |
+> | 2 non-atomic approveKnowledgeGap | P1 | ✅ atomic `updateMany` claim in `$transaction` (verified: 1 of 2 concurrent wins) |
+> | 3 QA/rules not in confidence → loop didn't close | P1 | ✅ `questionTermOverlap` + `hasStrongQaMatch` (verified: QA-only → knowledge_base) |
+> | 4 exact-string draft dedup | P2 | ✅ normalized dedup (DB unique index = follow-up) |
+> | 5 Cyrillic `\w` in scenario-classifier | P2 | ✅ `[а-яё]*` |
+> | 6 soft `supported !== false` | P3 | ✅ strict `=== true` + log malformed |
+> | 7 Cyrillic `\w` in extraction-lint FILLER | P3 | ✅ `[а-яё]*` (unit-tested) |
+> | schema drift `DocumentRevision` | — | ⏳ still open (handoff follow-up) |
+>
+> Original request preserved below for the record.
+
+---
+
 # Codex Review Request — Knowledge Librarian answering engine + self-improving loop
 
 **Date**: 2026-05-31

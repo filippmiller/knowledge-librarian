@@ -4,9 +4,56 @@
 
 ---
 
+## 2026-05-31 (cont.) — Clarification-flow fixes + Codex loop hardening (PR #9)
+
+**Status**: Completed, merged & deployed (Railway `a4978a34` = master `a29c04b`). Verified.
+**Commits**: `2b433f8`, `10957ee` (PR #9, merged `a29c04b`)
+
+> The "pause" never happened — user sent a live-bot screenshot and a Codex review, so we kept
+> going. This entry supersedes the "PAUSED" status of the entry below.
+
+### What was done
+**Batch 1 — clarification-flow bugs (from a live Telegram screenshot):**
+- **A** Clarification turns no longer escalate ("Требуется проверка ответа ИИ" spam). A clarification
+  is healthy behaviour → `isClarificationTurn()` early-return in `escalateUnconvincingAIAnswer`.
+- **B** Typed clarification replies (e.g. "Москва" instead of tapping the region button) no longer
+  lose context. `handleQuestion` detects a pending clarification (`getPendingClarificationAnchor`) +
+  a typed reply (`looksLikeClarificationReply`) and merges into the original question + chain.
+- **C** Loop no longer files junk drafts ("Москва" → "нет данных"). `isDraftableDraft()` rejects
+  context-less fragments and no-data/clarification non-answers.
+- All three predicates → one pure module `src/lib/ai/answer-policy.ts` (unit-tested, no heavy imports).
+
+**Batch 2 — Codex adversarial review (verdict FIX-FIRST), all 7 findings:**
+- **P1 security**: web approve/reject requires top web role (ADMIN) via `getAuthenticatedUser()`;
+  `approvedBy` from authenticated principal, not request body. (`auth.ts`, `api/ai-questions/[id]/route.ts`)
+- **P1 atomicity**: `approveKnowledgeGap` atomic `updateMany` claim in a `$transaction` — no duplicate
+  QAPair on concurrent approve.
+- **P1 recall (the big one)**: `overallConfidence` used ONLY chunks, so an approved QA-only pair scored
+  0 → general_ai → loop never truly closed. `questionTermOverlap()` + `hasStrongQaMatch` (≥0.7) now
+  treats a strong QA match as authoritative KB evidence. (`enhanced-answering-engine.ts`)
+- **P2**: normalized draft dedup; Cyrillic `\w`→`[а-яё]*` in scenario-classifier (`министерство юстиции`).
+- **P3**: consistency-gate strict `supported === true`; extraction-lint FILLER catches inflected forms.
+
+### Verification (all green)
+- `tsc --noEmit` clean · `npm run build` exit 0 · unit `scripts/eval/unit-guards.ts` 18/18 ·
+  regression `scripts/eval/run.ts` 18/18.
+- Functional on prod: **P1#3** QA-only → `knowledge_base`/high/100%; **P1#2** concurrent approve →
+  1 fulfilled / 1 rejected / 1 QAPair; **B** context merge → anchor preserved + negative control.
+
+### Recurring trap (now documented in memory)
+JS `\w`/`\b` are ASCII-only → silently fail on Cyrillic. Russian tails use `[а-яё]*`; word-boundary
+checks tokenize + Set-match instead of `\b`.
+
+### Follow-ups (in handoff)
+- Content gaps (China/Hague, МВД two-address, pricing) — need domain expert.
+- Reconcile `DocumentRevision` schema drift (db push still unsafe).
+- P2#4 dedup race: a partial-unique DB index is the robust version (normalized check ships now).
+
+---
+
 ## 2026-05-29..31 — Answer-engine hardening + self-improving knowledge loop (PR #1–#7)
 
-**Status**: Completed & deployed (Railway `98a2cf44` = master `061b06c`). PAUSED for handoff.
+**Status**: Completed & deployed (Railway `98a2cf44` = master `061b06c`). Superseded by the entry above.
 **Commits**: `0b872ba`, `07e4931`, `e3af4f5`, `76c456a`, `adaf347`, `c8302a2`, `061b06c` (+ merges)
 
 ### What was done
