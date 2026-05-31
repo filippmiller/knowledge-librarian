@@ -16,6 +16,7 @@ import {
   looksLikeClarificationReply,
   isDraftableDraft,
 } from '../../src/lib/ai/answer-policy';
+import { lintRule } from '../../src/lib/document-processing/extraction-lint';
 
 let failures = 0;
 function check(name: string, got: boolean, want: boolean): void {
@@ -45,6 +46,12 @@ check('C draft: non-answer "нет данных" → reject', isDraftableDraft('
 check('C draft: non-answer "уточните" → reject', isDraftableDraft('какой-то реальный вопрос', 'Пожалуйста, уточните о какой услуге речь.'), false);
 check('C draft: real Q + real content → accept', isDraftableDraft('как апостилировать диплом о высшем образовании', 'Апостиль на диплом ставится в Министерстве образования по месту выдачи; госпошлина 2500 руб.'), true);
 check('C draft: fragment even with real content → reject', isDraftableDraft('Москва', 'Апостиль ставится в Минюсте по адресу ...'), false);
+
+// ── P3#7: extraction-lint FILLER catches inflected Cyrillic (the \w trap) ─────
+const fillerCaught = lintRule({ ruleCode: 'R-T', title: 'x', body: 'Документы принимаются в волшебной атмосфере уюта.', sourceQuote: '' }).some((w) => w.kind === 'filler');
+check('P3#7 filler: inflected "волшебной/атмосфере" caught', fillerCaught, true);
+const operationalClean = lintRule({ ruleCode: 'R-T', title: 'x', body: 'Апостиль ставится в Минюсте, госпошлина 2500 рублей.', sourceQuote: 'Апостиль ставится в Минюсте, госпошлина 2500 рублей.' }).some((w) => w.kind === 'filler');
+check('P3#7 filler: operational text not flagged', operationalClean, false);
 
 console.log(`\n${failures === 0 ? '✅ ALL PASS' : `❌ ${failures} FAILURE(S)`}`);
 process.exit(failures === 0 ? 0 : 1);

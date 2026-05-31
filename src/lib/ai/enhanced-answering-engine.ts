@@ -314,6 +314,23 @@ function rankByQuestion<T>(
 }
 
 /**
+ * Search-term overlap between a question and a candidate, as the fraction of the
+ * SHORTER side's terms that are shared (1.0 = the salient terms all match). Used
+ * to recognise that a closely-matching approved QAPair IS the knowledge-base
+ * answer even when no document chunks were retrieved — without this a QA-only
+ * answer scores confidence 0 from chunks alone and wrongly falls through to
+ * general_ai, defeating the self-improving loop.
+ */
+function questionTermOverlap(question: string, candidate: string): number {
+  const qTerms = new Set(extractSearchTerms(question));
+  const cTerms = new Set(extractSearchTerms(candidate));
+  if (qTerms.size === 0 || cTerms.size === 0) return 0;
+  let shared = 0;
+  for (const t of qTerms) if (cTerms.has(t)) shared++;
+  return shared / Math.min(qTerms.size, cTerms.size);
+}
+
+/**
  * Main enhanced answering function
  */
 export async function answerQuestionEnhanced(
@@ -603,6 +620,16 @@ export async function answerQuestionEnhanced(
     throw error;
   }
 
+  // Strong QA support: how closely does the best retrieved QAPair's QUESTION
+  // match the user's question? A high overlap means an admin-approved pair
+  // already answers this — treat it as authoritative KB evidence so the answer
+  // is given confidently from the base and never bounced to general_ai. This is
+  // what actually closes the self-improving loop for QA-only answers (no chunks).
+  const bestQaMatch = qaPairs.length > 0
+    ? Math.max(...qaPairs.map((qa) => questionTermOverlap(question, qa.question)))
+    : 0;
+  const hasStrongQaMatch = bestQaMatch >= 0.7;
+
   // Step 7: Calculate overall confidence.
   // Primary signal: best SEMANTIC similarity of the retrieved chunks (RRF rank
   // scores are tiny/flat ~0.01-0.02 by design, so they're useless here).
@@ -617,7 +644,9 @@ export async function answerQuestionEnhanced(
     : 0;
   const coverageScore = Math.min(contextChunks.length / 3, 1); // 0..1, full at ≥3 chunks
   const overallConfidence = Math.min(
-    bestSemanticScore + coverageScore * 0.1,
+    // A strong QA match contributes its own confidence floor so the reported
+    // number stays honest when the answer rests on a QAPair, not doc chunks.
+    Math.max(bestSemanticScore + coverageScore * 0.1, hasStrongQaMatch ? bestQaMatch : 0),
     1.0
   );
 
@@ -626,7 +655,13 @@ export async function answerQuestionEnhanced(
   let needsClarification = false;
   let suggestedClarification: string | undefined;
 
-  if (overallConfidence >= CONFIDENCE_THRESHOLD_HIGH && contextChunks.length >= 2) {
+  if (hasStrongQaMatch) {
+    // An admin-approved, closely-matching QAPair is authoritative KB content —
+    // answer confidently from it. With corroborating chunks it's 'high', on the
+    // QA pair alone it's 'medium' (enough to skip clarification and the general
+    // fallback, so the loop closes).
+    confidenceLevel = contextChunks.length >= 2 ? 'high' : 'medium';
+  } else if (overallConfidence >= CONFIDENCE_THRESHOLD_HIGH && contextChunks.length >= 2) {
     confidenceLevel = 'high';
   } else if (overallConfidence >= CONFIDENCE_THRESHOLD_MEDIUM && contextChunks.length >= 1) {
     confidenceLevel = 'medium';
@@ -646,7 +681,7 @@ export async function answerQuestionEnhanced(
   console.log('[enhanced-answering] Step 9: Generating answer with confidence level:', confidenceLevel);
   const context = buildEnhancedContext(contextChunks, rules, qaPairs);
 
-  if (confidenceLevel === 'insufficient' && shouldUseGeneralKnowledgeFallback(question)) {
+  if (confidenceLevel === 'insufficient' && !hasStrongQaMatch && shouldUseGeneralKnowledgeFallback(question)) {
     const guardrail = buildDeterministicGuardrailResult(question);
     if (guardrail) return guardrail;
 

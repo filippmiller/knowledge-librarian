@@ -28,7 +28,9 @@ export interface LintWarning {
 const PLACEHOLDER = /\b(lorem ipsum|todo|tbd|placeholder|xxxx+|\.\.\.\.\.+|пример текста|заполнить)\b/i;
 
 // Generic marketing/atmospheric filler that has no place in an operational rule.
-const FILLER = /(незабываем|атмосфер[ауеоы]|погрузитесь|уютн\w*\s+атмосфер|тёплая\s+атмосфер|волшебн\w|восхитительн\w)/i;
+// Russian tails use [а-яё]*, NOT \w* — JS \w is ASCII-only, so "волшебная" /
+// "восхитительное" / "уютной атмосфере" would slip past a \w pattern.
+const FILLER = /(незабываем|атмосфер[ауеоы]|погрузитесь|уютн[а-яё]*\s+атмосфер|тёплая\s+атмосфер|волшебн[а-яё]*|восхитительн[а-яё]*)/i;
 
 const MIN_BODY = 12;     // chars — shorter than this carries no operational content
 const MAX_BODY = 4000;   // chars — a single rule this long is really many rules
