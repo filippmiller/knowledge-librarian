@@ -121,8 +121,14 @@ export const SCENARIOS: Record<string, ScenarioNode> = {
     disambiguation: {
       prompt: 'Где был выдан документ?',
       options: [
-        { id: 'spb', label: 'Санкт-Петербург',        targetScenarioKey: 'apostille.zags.spb' },
-        { id: 'lo',  label: 'Ленинградская область',  targetScenarioKey: 'apostille.zags.lo' },
+        { id: 'spb',   label: 'Санкт-Петербург',            targetScenarioKey: 'apostille.zags.spb' },
+        { id: 'lo',    label: 'Ленинградская область',      targetScenarioKey: 'apostille.zags.lo' },
+        // The bureau serves apostille on ЗАГС ORIGINALS only for documents issued
+        // in СПб/ЛО (an original is apostilled at its place of issue). Documents
+        // from other regions need this third path — the answer is a deterministic
+        // explanation (see buildDeterministicGuardrailResult), not a retrieval
+        // scenario, but the target must be a real leaf for taxonomy consistency.
+        { id: 'other', label: 'Другой регион (Москва, Пермь и т.д.)', targetScenarioKey: 'apostille.zags.other' },
       ],
     },
   },
@@ -147,6 +153,21 @@ export const SCENARIOS: Record<string, ScenarioNode> = {
       taxonomy: 'apostille',
       authority: 'ЗАГС_ЛО',
       region: 'ЛО',
+      docTypes: ['zags'] as const,
+    },
+  },
+
+  // Document issued OUTSIDE СПб/ЛО (Москва, Пермь, …). The bureau cannot apostille
+  // such an original (apostille is done at the place of issue, in that region).
+  // Resolved by a deterministic explanation, not retrieval — no documents are
+  // tagged here; the node exists so the "Другой регион" option has a valid target.
+  'apostille.zags.other': {
+    key: 'apostille.zags.other',
+    parentKey: 'apostille.zags',
+    label: 'Документ ЗАГС, выданный в другом регионе',
+    facets: {
+      taxonomy: 'apostille',
+      region: 'вне_спб_ло',
       docTypes: ['zags'] as const,
     },
   },
