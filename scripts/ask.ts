@@ -20,7 +20,10 @@ async function main() {
     console.error('usage: npx tsx scripts/ask.ts "<question>"');
     process.exit(1);
   }
-  const r = await answerQuestionEnhanced(q, { source: 'API' } as any);
+  // sessionId is intentionally omitted — a one-shot diagnostic needs no chat
+  // session. (Passing a non-string here is a bug: it flows into Prisma writes on
+  // the regeneration path and fails with "sessionId: Expected String or Null".)
+  const r = await answerQuestionEnhanced(q);
   console.log('\n========== РЕЗУЛЬТАТ ==========');
   console.log('ВОПРОС:', q);
   console.log('ИСТОЧНИК:', r.answerSource, '| УВЕРЕННОСТЬ:', Math.round((r.confidence ?? 0) * 100) + '%', '(' + r.confidenceLevel + ')');
