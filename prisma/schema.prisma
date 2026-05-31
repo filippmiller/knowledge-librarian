@@ -39,9 +39,33 @@ model Document {
   domainSuggestions  DomainSuggestion[]
   stagedExtractions  StagedExtraction[]
   processingAttempts ProcessingAttempt[]
+  revisions          DocumentRevision[]
 
   @@index([parseStatus])
   @@index([scenarioKey])
+}
+
+// Audit trail of document/rule edits. Pre-existing table (created out-of-band);
+// added to the schema 2026-05-31 to reconcile drift so `prisma db push` is safe
+// again. Types mirror the live DB exactly (introspected) — db push is a no-op.
+model DocumentRevision {
+  id              String   @id @default(cuid())
+  documentId      String
+  source          String
+  ruleId          String?
+  actor           String?
+  previousRawText String?
+  nextRawText     String?
+  previousExcerpt String?
+  nextExcerpt     String?
+  metadata        Json?
+  createdAt       DateTime @default(now())
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId])
+  @@index([ruleId])
+  @@index([createdAt])
 }
 
 enum ParseStatus {
