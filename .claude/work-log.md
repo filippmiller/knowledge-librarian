@@ -4,6 +4,25 @@
 
 ---
 
+## 2026-06-04 — Bitrix24 access + Security hardening + Email-bot knowledge mining
+
+**Status**: Security shipped (PR #13, merged & deployed). Mining: May 2026 done (180 rules), awaiting review. Handoff created.
+**Handoff**: `.claude/handoffs/2026-06-04-210028.md` (full detail — read this to continue).
+
+### What was done
+1. **Bitrix24 inbound webhook** set up (portal `aurora-piter`, 11 scopes). Secrets in `.env` (gitignored). Memory: `bitrix24-integration.md`. Note: `mailservice` scope unavailable in UI → emails read via `crm.activity TYPE_ID=4`.
+2. **Security audit + fixes (PR #13, merged to master, deployed)** — 12 findings. Telegram webhook secret-token verify; removed hardcoded `ENCRYPTION_KEY` fallback (fail-fast); `getDocument` no longer public; rate-limit all mini-app POSTs; constant-time HMAC; feedback caps; generic errors. `scripts/set-telegram-webhook.mjs` added; `TELEGRAM_WEBHOOK_SECRET` set on Railway. Report: `security-scan-report.md`. Memory: `security-posture.md`. ⚠ live API keys printed to transcript via `railway variables` — suggested rotation.
+3. **Email/chat knowledge-mining pipeline** — `scripts/email-mining/*`. Mines reusable company knowledge (not transactional pairs) from CRM emails (Deals+Leads) + open-line chats (Telegram/WhatsApp/VK) via Sonnet subagents, reconciles prices with `crm.product.list`. May 2026: 406 raw → **180 canonical rules**. Deliverables in `docs/email-bot/`.
+
+### Key lessons / problems
+- First extraction paired adjacent emails → transactional slag (user: "это шлак"). Fixed: full-thread + strong rules + Leads/chats (user: "почему только треды"). Prices from catalog, not memorized (user: "живой расчёт"). Extraction via Sonnet subagents, not API (user: "используй свою модель SONNET").
+- Bash PATH glitches → use PowerShell for node. Bitrix socket timeouts → retry/backoff. Subagent timeouts on big tasks → split small. `scratchpad/` gitignored → deliverables copied to `docs/email-bot/`.
+
+### Channel visibility
+Can read incoming from Telegram, WhatsApp, VK, Avito. **MAX not connected** to Bitrix — can't train/answer there yet.
+
+---
+
 ## 2026-05-31 (cont.) — Clarification-flow fixes + Codex loop hardening (PR #9)
 
 **Status**: Completed, merged & deployed (Railway `a4978a34` = master `a29c04b`). Verified.
