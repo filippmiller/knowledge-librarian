@@ -81,7 +81,30 @@ Bitrix CRM (2026 emails)
 - Worker-to-worker chats (private, excluded).
 - A bespoke draft-review UI (use Bitrix Deal timeline first).
 
+## Pilot results (2026-06-04) — validated + refined
+
+Ran `scripts/email-mining/pilot.mjs` (script-only) + `scripts/email-mining/classify.mjs` (gpt-4o-mini) on 400 recent 2026 emails:
+
+- **Quality funnel:** 400 emails → 114 raw pairs (script) → 18 clean canonical pairs (LLM) ≈ **4.5% "gold"**. Extrapolated to full 2026: ~**500–700 clean pairs**. Small but dense core of real answers.
+- **Thread reconstruction by Deal timeline works.** Pairing rule hardened: answer = the *immediately next* message only if outgoing (prevents one reply mapping to several questions).
+- **Cleaner hardened** to cut Russian date-quote headers ("Четверг, 28 мая 2026 …"), `From:/Кому:/Sent:` blocks, external-server banners, signatures.
+- **LLM classifier is mandatory** (confirmed): script alone yields ~20% usable; the cheap classifier filters logistics/acks/broken extraction and canonicalizes Q + A. Full-2026 classify ≈ $3–6.
+- Kept-pair topics in sample: payment, price, process, notary.
+
+### CRITICAL refinement — two knowledge layers (prices are NOT facts)
+
+The most "keepable" pairs are **prices/sums** (8809 ₽, 34504 ₽…), but each was computed for a specific order (char count, urgency, notarization). Teaching them verbatim would make the bot quote **wrong prices** — violates single-source-of-truth and is the worst business hallucination. Therefore mine **two layers**:
+
+| Layer | Examples | Use |
+|---|---|---|
+| **Policy/process** (reusable) | "цена считается по знакам готового перевода", "предоплата 70%", "оплата 9–19", "фин→нем идёт через русский", scan/notary/apostille requirements | ✅ Store as **facts** in KB |
+| **Transactional specifics** (one-off) | "this order = 8809 ₽", "ready 02.06" | ⚠️ Use only as **phrasing templates**; the bot must NOT invent numbers |
+
+**Decision (confirmed):** prices/deadlines come from a **live price source** (price list / calculator), never from memorized email numbers. The classifier must split policy vs transactional and strip concrete sums from the factual layer.
+
 ## Open items to confirm during planning
+
+- **Price source of truth (NEW, blocking for the price path):** is there an existing price list / calculator / API to wire in? If not, the bot escalates all price/deadline questions to the operator (policy-layer answers still work).
 
 - Exact Bitrix write-back method for the draft (timeline comment vs draft activity vs CRM "open" email draft).
 - Trigger for new incoming email (Bitrix outbound webhook `ONCRMACTIVITYADD` vs polling `crm.activity.list`).
