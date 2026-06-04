@@ -27,7 +27,7 @@ function check(name: string, got: boolean, want: boolean): void {
 }
 
 // ── A: isClarificationTurn ───────────────────────────────────────────────────
-check('A clarif: scenarioClarification → escalate? no', isClarificationTurn({ scenarioClarification: { prompt: 'Где выдан?', options: [] } as any, needsClarification: false, clarificationQuestion: undefined }), true);
+check('A clarif: scenarioClarification → escalate? no', isClarificationTurn({ scenarioClarification: { prompt: 'Где выдан?', options: [] } as unknown as Parameters<typeof isClarificationTurn>[0]['scenarioClarification'], needsClarification: false, clarificationQuestion: undefined }), true);
 check('A clarif: needsClarification flag', isClarificationTurn({ scenarioClarification: undefined, needsClarification: true, clarificationQuestion: undefined }), true);
 check('A clarif: clarificationQuestion present', isClarificationTurn({ scenarioClarification: undefined, needsClarification: false, clarificationQuestion: { question: 'Какой документ?', options: ['СОР', 'диплом'] } }), true);
 check('A clarif: a real answer is NOT a clarification', isClarificationTurn({ scenarioClarification: undefined, needsClarification: false, clarificationQuestion: undefined }), false);

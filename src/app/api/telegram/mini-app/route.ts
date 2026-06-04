@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import type { Prisma } from '@prisma/client';
 import { verifyTelegramWebAppData } from '@/lib/telegram/mini-app-auth';
 import { createProcessingToken } from '@/lib/crypto';
+import { checkRateLimit, getClientKey, RATE_LIMITS } from '@/lib/rate-limiter';
 import prisma from '@/lib/db';
 
 /**
@@ -170,10 +171,27 @@ export async function GET(request: NextRequest) {
   }
 }
 
+// Actions that hit paid LLM / Whisper APIs or run heavy FTS — keep these on a
+// tight bucket so an unauthenticated caller can't amplify cost or load.
+const EXPENSIVE_ACTIONS = new Set(['ask', 'voiceSearch', 'search']);
+
 // POST - Handle all actions
 export async function POST(request: NextRequest) {
   const body = await request.json();
   const { initData, action } = body;
+
+  // Rate limit every POST before doing any work. Expensive actions get the
+  // strict ask bucket (20/min); everything else the more generous admin bucket.
+  const rate = checkRateLimit(
+    getClientKey(request),
+    EXPENSIVE_ACTIONS.has(action) ? RATE_LIMITS.askQuestion : RATE_LIMITS.adminApi
+  );
+  if (!rate.allowed) {
+    return NextResponse.json(
+      { error: 'Rate limit exceeded', retryAfterMs: rate.retryAfterMs },
+      { status: 429, headers: { 'Retry-After': String(Math.ceil((rate.retryAfterMs || 0) / 1000)) } }
+    );
+  }
 
   // Try to authenticate but allow public actions
   let telegramId: string | null = null;
@@ -192,9 +210,11 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // Define public actions that don't require auth
-  const publicActions = ['search', 'getRule', 'getStats', 'voiceSearch', 'getDocument'];
-  
+  // Public actions don't require auth. `getDocument` is intentionally NOT here:
+  // it returns full source `rawText`, so it requires a verified Telegram user.
+  // (To restrict source docs to admins only, gate it on `isAdmin` below.)
+  const publicActions = ['search', 'getRule', 'getStats', 'voiceSearch'];
+
   if (!publicActions.includes(action) && !telegramId) {
     return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
   }
@@ -918,8 +938,10 @@ export async function POST(request: NextRequest) {
         try {
           rawText = await parseDocument(buffer, mimeType, filename);
         } catch (parseError) {
+          // Log internals server-side; return a generic message to the client.
+          console.error('[mini-app] Document parse failed:', parseError);
           return NextResponse.json({
-            error: `Не удалось прочитать документ: ${parseError instanceof Error ? parseError.message : 'Неизвестная ошибка'}`,
+            error: 'Не удалось прочитать документ. Проверьте формат файла.',
           }, { status: 400 });
         }
 
