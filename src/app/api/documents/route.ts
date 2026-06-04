@@ -180,8 +180,8 @@ export async function POST(request: NextRequest): Promise<Response> {
       console.log(`[Upload] Parsed ${rawText.length} characters from ${filename}`);
     } catch (parseError) {
       console.error(`[Upload] Failed to parse ${filename}:`, parseError);
-      return NextResponse.json({ 
-        error: `Failed to parse document: ${parseError instanceof Error ? parseError.message : 'Unknown error'}` 
+      return NextResponse.json({
+        error: 'Failed to parse document. Check the file format.'
       }, { status: 400 });
     }
 

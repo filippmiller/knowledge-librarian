@@ -1,18 +1,22 @@
 import crypto from 'crypto';
 
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'default-key-change-in-production-32';
 const ALGORITHM = 'aes-256-gcm';
 
-// Ensure key is exactly 32 bytes
+// Fail fast: never fall back to a hardcoded key. A weak/known key would let an
+// attacker decrypt stored AI API keys and forge SSE processing tokens (bearer
+// auth on the expensive process-stream endpoint). Require ≥32 bytes of entropy.
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
+if (!ENCRYPTION_KEY || Buffer.from(ENCRYPTION_KEY).length < 32) {
+  throw new Error(
+    'ENCRYPTION_KEY is missing or shorter than 32 bytes. Set a strong key (e.g. `openssl rand -hex 32`) in the environment.'
+  );
+}
+
+// Derive a 32-byte AES-256 key. Derivation is intentionally unchanged from the
+// original (first 32 bytes of the UTF-8 key material) so data encrypted with the
+// existing production key still decrypts.
 function getKey(): Buffer {
-  const key = Buffer.from(ENCRYPTION_KEY);
-  if (key.length >= 32) {
-    return key.subarray(0, 32);
-  }
-  // Pad if too short
-  const padded = Buffer.alloc(32);
-  key.copy(padded);
-  return padded;
+  return Buffer.from(ENCRYPTION_KEY as string).subarray(0, 32);
 }
 
 // URL-safe base64 encoding helpers
@@ -63,7 +67,9 @@ export function decrypt(encryptedData: string): string {
 
     return decrypted.toString('utf8');
   } catch (error) {
-    throw new Error(`Decryption failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    // Log details server-side only; do not leak crypto internals to callers.
+    console.error('[crypto] Decryption failed:', error);
+    throw new Error('Decryption failed');
   }
 }
 

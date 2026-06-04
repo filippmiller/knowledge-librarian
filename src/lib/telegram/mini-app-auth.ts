@@ -37,10 +37,16 @@ export function verifyTelegramWebAppData(initData: string): {
     // Create secret key from bot token
     const secretKey = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
 
-    // Verify hash
+    // Verify hash (constant-time — this gate authenticates every privileged
+    // mini-app write: editRule, deleteRule, commitDocument, uploadDocument…)
     const computedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
 
-    if (computedHash !== hash) {
+    const computedBuf = Buffer.from(computedHash, 'hex');
+    const providedBuf = Buffer.from(hash, 'hex');
+    if (
+      computedBuf.length !== providedBuf.length ||
+      !crypto.timingSafeEqual(computedBuf, providedBuf)
+    ) {
       return { valid: false };
     }
 
@@ -64,22 +70,5 @@ export function verifyTelegramWebAppData(initData: string): {
   } catch (error) {
     console.error('[mini-app-auth] Verification error:', error);
     return { valid: false };
-  }
-}
-
-/**
- * Parse init data without verification (for development only)
- */
-export function parseInitData(initData: string) {
-  try {
-    const params = new URLSearchParams(initData);
-    const userJson = params.get('user');
-    return {
-      user: userJson ? JSON.parse(userJson) : null,
-      authDate: parseInt(params.get('auth_date') || '0'),
-      queryId: params.get('query_id'),
-    };
-  } catch {
-    return null;
   }
 }

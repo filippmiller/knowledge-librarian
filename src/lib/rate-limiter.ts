@@ -95,17 +95,18 @@ export function checkRateLimit(
  * Get client identifier from request
  */
 export function getClientKey(request: Request): string {
-  // Try various headers for client identification
-  const forwarded = request.headers.get('x-forwarded-for');
-  const realIp = request.headers.get('x-real-ip');
+  // Prefer headers set by the trusted edge/proxy, which a client cannot forge.
+  // `x-forwarded-for` is client-spoofable (a caller can rotate it to evade the
+  // limiter), so it is the last resort, not the first choice.
   const cfIp = request.headers.get('cf-connecting-ip');
+  const realIp = request.headers.get('x-real-ip');
+  if (cfIp) return cfIp.trim();
+  if (realIp) return realIp.trim();
 
-  // Use first IP from forwarded header
-  if (forwarded) {
-    return forwarded.split(',')[0].trim();
-  }
+  const forwarded = request.headers.get('x-forwarded-for');
+  if (forwarded) return forwarded.split(',')[0].trim();
 
-  return cfIp || realIp || 'unknown';
+  return 'unknown';
 }
 
 /**

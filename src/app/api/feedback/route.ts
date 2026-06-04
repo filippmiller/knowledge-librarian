@@ -58,6 +58,20 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Cap field lengths — this endpoint is public, so bound stored-content size
+    // to prevent spam/storage abuse. Treat stored feedback as untrusted on render.
+    const LIMITS: Record<string, number> = {
+      question: 4000, answer: 8000, comment: 2000, suggestedAnswer: 8000,
+    };
+    for (const [field, value] of Object.entries({ question, answer, comment, suggestedAnswer })) {
+      if (typeof value === 'string' && value.length > LIMITS[field]) {
+        return NextResponse.json(
+          { error: `Field "${field}" exceeds maximum length of ${LIMITS[field]} characters` },
+          { status: 400 }
+        );
+      }
+    }
+
     // Create feedback record
     const feedback = await prisma.answerFeedback.create({
       data: {
