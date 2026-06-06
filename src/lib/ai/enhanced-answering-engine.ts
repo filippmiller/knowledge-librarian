@@ -1070,15 +1070,27 @@ function buildDeterministicGuardrailResult(question: string): EnhancedAnswerResu
 const BUREAU_TOPIC_PATTERN =
   /апостил|легализац|нотари|загс|кзагс|минюст|(?:^|[^а-я])мвд(?:[^а-я]|$)|(?:^|[^а-я])мю(?:[^а-я]|$)|перевод|доверенност|свидетельств|справк|диплом|аттестат|образован|судим|паспорт|истреб|консульск|заверен|печат|штамп|загранпаспорт|гражданств|виз[аыуео]|опек|документ|миграц|(?:^|[^а-я])внж(?:[^а-я]|$)|вид[уаео]? на жительств|(?:^|[^а-я])рвп(?:[^а-я]|$)|вид на временн|содействи/;
 
+// Case-insensitive Unicode pattern — matches the ORIGINAL question (no normalization needed).
+// This is the authoritative check; the normalised form is used only when the bureau test fails.
+// We use the /iu flag so uppercase ВНЖ / РВП are handled without a toLower() step that may
+// silently corrupt Cyrillic in some server environments.
+const BUREAU_TOPIC_PATTERN_CI = new RegExp(
+  'апостил|легализац|нотари|загс|кзагс|минюст|' +
+  'мвд|мю|' +  // мвд | мю  (Unicode escapes — immune to source encoding)
+  'перевод|доверенност|свидетельств|справк|диплом|аттестат|образован|судим|паспорт|' +
+  'истреб|консульск|заверен|печат|штамп|загранпаспорт|гражданств|виз|опек|документ|' +
+  'миграц|' +
+  'внж|' +                    // внж  (ВНЖ lowercase)
+  'вид[уаео]? на жительств|' + // вид[уаео]? на жительств
+  'рвп|' +                    // рвп  (РВП lowercase)
+  'вид на временн|' + // вид на временн
+  'содействи',                       // содействи
+  'iu'
+);
+
 function isBureauTopic(question: string): boolean {
-  // Diagnose normalization step by step
-  const rawCodes = [...question.slice(0, 10)].map(c => c.charCodeAt(0).toString(16)).join(',');
-  const afterLower = question.toLowerCase();
-  const lowerCodes = [...afterLower.slice(0, 10)].map(c => c.charCodeAt(0).toString(16)).join(',');
-  const afterReplace = afterLower.replace(/ё/g, 'е'); // ё→е via codepoints
-  const norm = afterReplace.replace(/\s+/g, ' ').trim();
-  const result = BUREAU_TOPIC_PATTERN.test(norm);
-  console.log('[isBureauTopic] raw=' + rawCodes + ' lower=' + lowerCodes + ' result=' + result);
+  const result = BUREAU_TOPIC_PATTERN_CI.test(question);
+  console.log('[isBureauTopic] result=' + result + ' q=' + question.slice(0, 30));
   return result;
 }
 
