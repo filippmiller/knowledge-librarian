@@ -61,25 +61,25 @@ function formatSSE(event: SSEEvent): string {
   return `data: ${JSON.stringify(event)}\n\n`;
 }
 
-// Check if error is fatal (should not be retried)
+// Check if error is fatal (document becomes DEAD — requires manual admin reset).
+// Only mark fatal when the error is PERMANENTLY unrecoverable regardless of retries:
+//   • Wrong API key / forbidden — will never work until config is changed
+//   • Hard quota exhaustion with explicit "quota" message — same
+// Do NOT mark fatal:
+//   • HTTP 400 — often temporary (e.g. Anthropic credit balance depleted, then topped up)
+//   • HTTP 5xx — transient server errors; the provider retry loop handles them, but if all
+//     retries are exhausted we still want the document to stay FAILED (retryable) not DEAD
 function isFatalError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   const lowerMessage = message.toLowerCase();
 
-  // AI provider quota/billing errors
-  if (lowerMessage.includes('429') || lowerMessage.includes('quota')) return true;
-  if (lowerMessage.includes('rate limit')) return true;
-
-  // Auth errors
+  // Hard auth failures — will never work until API keys are fixed
   if (lowerMessage.includes('401') || lowerMessage.includes('unauthorized')) return true;
   if (lowerMessage.includes('403') || lowerMessage.includes('forbidden')) return true;
   if (lowerMessage.includes('invalid api key')) return true;
 
-  // Bad request (usually means invalid input, won't fix itself)
-  if (lowerMessage.includes('400') || lowerMessage.includes('bad request')) return true;
-
-  // Server errors from AI provider
-  if (lowerMessage.includes('500') || lowerMessage.includes('502') || lowerMessage.includes('503')) return true;
+  // Explicit quota exhaustion (distinct from transient 429 rate-limit bursts)
+  if (lowerMessage.includes('quota exceeded') || lowerMessage.includes('quota_exceeded')) return true;
 
   return false;
 }
@@ -485,6 +485,12 @@ export async function GET(
                 data: `\n[Batch ${progressData.current}/${progressData.total}]\n`,
               });
               console.log(`[process-stream] Knowledge extraction batch ${progressData.current}/${progressData.total}`);
+            } else if (event.type === 'batch_skipped') {
+              // A batch failed to parse even after retry — log a warning to the stream but keep going
+              const skipData = event.data as { batchIndex: number; total: number; reason: string };
+              const msg = `\n⚠ Батч ${skipData.batchIndex}/${skipData.total} пропущен (не удалось распарсить JSON): ${skipData.reason.slice(0, 120)}\n`;
+              send({ type: 'token', phase: 'KNOWLEDGE_EXTRACTION', data: msg });
+              console.warn(`[process-stream] Batch ${skipData.batchIndex}/${skipData.total} skipped: ${skipData.reason}`);
             } else if (event.type === 'result') {
               knowledgeResult = event.data as KnowledgeExtractionStreamResult;
             }

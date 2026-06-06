@@ -168,7 +168,7 @@ async function retryBatchExtraction(messages: ChatMessage[]) {
 export async function* streamKnowledgeExtraction(
   documentText: string,
   existingRuleCodes: string[] = []
-): AsyncGenerator<{ type: 'token' | 'result' | 'batch_progress'; data: string | KnowledgeExtractionStreamResult | { current: number; total: number } }> {
+): AsyncGenerator<{ type: 'token' | 'result' | 'batch_progress' | 'batch_skipped'; data: string | KnowledgeExtractionStreamResult | { current: number; total: number } | { batchIndex: number; total: number; reason: string } }> {
   const startCode =
     existingRuleCodes.length > 0
       ? Math.max(...existingRuleCodes.map((c) => parseInt(c.replace('R-', '')))) + 1
@@ -315,8 +315,23 @@ ${batch}
 
       console.log(`[Knowledge Extraction] Batch ${batchIndex + 1} complete: ${rules.length} rules, ${qaPairs.length} QAs`);
     } catch (error) {
-      console.error(`[Knowledge Extraction] Failed to parse batch ${batchIndex + 1}:`, error);
-      throw new Error(`Не удалось распарсить ответ батча ${batchIndex + 1}: ${fullContent.slice(0, 200)}... Ошибка: ${error instanceof Error ? error.message : String(error)}`);
+      // Both the streaming parse and the non-streaming retry failed for this batch.
+      // Log a warning and skip the batch rather than aborting the entire document —
+      // a single unparseable batch is much less damaging than a FAILED document.
+      const preview = typeof fullContent === 'string' ? fullContent.slice(0, 200) : '(no content)';
+      console.warn(
+        `[Knowledge Extraction] Batch ${batchIndex + 1}/${batches.length} failed to parse after retry — skipping batch. Preview: ${preview}`,
+        error
+      );
+      yield {
+        type: 'batch_skipped',
+        data: {
+          batchIndex: batchIndex + 1,
+          total: batches.length,
+          reason: error instanceof Error ? error.message : String(error),
+        }
+      };
+      // Continue with remaining batches rather than failing the document
     }
 
     // Clear batch from memory
