@@ -19,6 +19,12 @@ export interface CommitResult {
 
 export interface CommitOptions {
   replaceExisting?: boolean;
+  /**
+   * When true, treat all non-rejected staged items as verified.
+   * Use this when calling from an automated flow that doesn't require
+   * human review (e.g. direct admin API commit without the UI review step).
+   */
+  autoVerifyPending?: boolean;
 }
 
 async function resetCommittedDocumentKnowledge(documentId: string) {
@@ -64,23 +70,39 @@ export async function commitDocumentKnowledge(documentId: string, options: Commi
     throw new Error('Документ не найден');
   }
 
+  // Auto-verify pending items if requested (used by admin commit without UI review)
+  if (options.autoVerifyPending) {
+    await prisma.stagedExtraction.updateMany({
+      where: { documentId, isVerified: false, isRejected: false },
+      data: { isVerified: true, verifiedAt: new Date() },
+    });
+  }
+
   const verifiedItems = await prisma.stagedExtraction.findMany({
     where: { documentId, isVerified: true },
   });
 
   if (verifiedItems.length === 0) {
-    console.log('[COMMIT] No verified items found - likely already saved');
+    // Check if there are any staged items at all
+    const totalStaged = await prisma.stagedExtraction.count({ where: { documentId } });
+    if (totalStaged === 0) {
+      console.log('[COMMIT] No staged items found - document may already be fully committed');
+      // Mark document COMPLETED if it has rules/QA in the permanent tables
+      const ruleCount = await prisma.rule.count({ where: { documentId } });
+      if (ruleCount > 0) {
+        await prisma.document.update({ where: { id: documentId }, data: { parseStatus: 'COMPLETED' } });
+      }
+      return {
+        success: true,
+        message: 'Документ уже сохранён в базу знаний',
+        results: { domainsLinked: 0, domainSuggestionsCreated: 0, rulesCreated: 0, qaPairsCreated: 0, aiQuestionsCreated: 0, chunksCreated: 0 },
+      };
+    }
+    console.log('[COMMIT] No verified items found - use autoVerifyPending:true or review items in the admin panel first');
     return {
-      success: true,
-      message: 'Все элементы уже сохранены',
-      results: {
-        domainsLinked: 0,
-        domainSuggestionsCreated: 0,
-        rulesCreated: 0,
-        qaPairsCreated: 0,
-        aiQuestionsCreated: 0,
-        chunksCreated: 0,
-      },
+      success: false,
+      message: 'Нет подтверждённых элементов. Проверьте и подтвердите элементы в панели управления, или используйте параметр autoVerifyPending.',
+      results: { domainsLinked: 0, domainSuggestionsCreated: 0, rulesCreated: 0, qaPairsCreated: 0, aiQuestionsCreated: 0, chunksCreated: 0 },
     };
   }
 

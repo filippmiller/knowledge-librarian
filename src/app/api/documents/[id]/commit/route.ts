@@ -13,7 +13,9 @@ export async function POST(
   const { id: documentId } = await params;
 
   try {
-    const result = await commitDocumentKnowledge(documentId);
+    const body = await request.json().catch(() => ({}));
+    const { autoVerifyPending = false, replaceExisting = false } = body as { autoVerifyPending?: boolean; replaceExisting?: boolean };
+    const result = await commitDocumentKnowledge(documentId, { autoVerifyPending, replaceExisting });
     return NextResponse.json(result);
   } catch (error) {
     console.error('[COMMIT ERROR]', error);
