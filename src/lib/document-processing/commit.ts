@@ -142,7 +142,7 @@ export async function commitDocumentKnowledge(documentId: string, options: Commi
       results.domainsLinked++;
     }
 
-    for (const secondarySlug of data.secondaryDomainSlugs) {
+    for (const secondarySlug of (data.secondaryDomainSlugs ?? [])) {
       const secondaryDomain = await prisma.domain.findUnique({ where: { slug: secondarySlug } });
       if (secondaryDomain) {
         await prisma.documentDomain.upsert({
