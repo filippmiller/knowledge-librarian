@@ -2,21 +2,22 @@ import crypto from 'crypto';
 
 const ALGORITHM = 'aes-256-gcm';
 
-// Fail fast: never fall back to a hardcoded key. A weak/known key would let an
-// attacker decrypt stored AI API keys and forge SSE processing tokens (bearer
-// auth on the expensive process-stream endpoint). Require ≥32 bytes of entropy.
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
-if (!ENCRYPTION_KEY || Buffer.from(ENCRYPTION_KEY).length < 32) {
-  throw new Error(
-    'ENCRYPTION_KEY is missing or shorter than 32 bytes. Set a strong key (e.g. `openssl rand -hex 32`) in the environment.'
-  );
-}
-
-// Derive a 32-byte AES-256 key. Derivation is intentionally unchanged from the
-// original (first 32 bytes of the UTF-8 key material) so data encrypted with the
-// existing production key still decrypts.
+// Derive a 32-byte AES-256 key and validate the environment at call time.
+// Validation is intentionally deferred to function-call time (not module load)
+// so that `next build` can statically evaluate route files inside Docker, where
+// env vars are NOT injected during the build step.
+// Security guarantee is preserved: any actual encrypt/decrypt call at runtime
+// will throw immediately if the key is missing or too short.
+// Derivation is intentionally unchanged from the original (first 32 bytes of the
+// UTF-8 key material) so data encrypted with the existing production key still decrypts.
 function getKey(): Buffer {
-  return Buffer.from(ENCRYPTION_KEY as string).subarray(0, 32);
+  const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
+  if (!ENCRYPTION_KEY || Buffer.from(ENCRYPTION_KEY).length < 32) {
+    throw new Error(
+      'ENCRYPTION_KEY is missing or shorter than 32 bytes. Set a strong key (e.g. `openssl rand -hex 32`) in the environment.'
+    );
+  }
+  return Buffer.from(ENCRYPTION_KEY).subarray(0, 32);
 }
 
 // URL-safe base64 encoding helpers
