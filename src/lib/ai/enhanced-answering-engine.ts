@@ -1089,9 +1089,7 @@ const BUREAU_TOPIC_PATTERN_CI = new RegExp(
 );
 
 function isBureauTopic(question: string): boolean {
-  const result = BUREAU_TOPIC_PATTERN_CI.test(question);
-  console.log('[isBureauTopic] result=' + result + ' q=' + question.slice(0, 30));
-  return result;
+  return BUREAU_TOPIC_PATTERN_CI.test(question);
 }
 
 function shouldUseGeneralKnowledgeFallback(question: string): boolean {
