@@ -1071,8 +1071,11 @@ const BUREAU_TOPIC_PATTERN =
   /апостил|легализац|нотари|загс|кзагс|минюст|(?:^|[^а-я])мвд(?:[^а-я]|$)|(?:^|[^а-я])мю(?:[^а-я]|$)|перевод|доверенност|свидетельств|справк|диплом|аттестат|образован|судим|паспорт|истреб|консульск|заверен|печат|штамп|загранпаспорт|гражданств|виз[аыуео]|опек|документ|миграц|(?:^|[^а-я])внж(?:[^а-я]|$)|вид[уаео]? на жительств|(?:^|[^а-я])рвп(?:[^а-я]|$)|вид на временн|содействи/;
 
 function isBureauTopic(question: string): boolean {
-  const result = BUREAU_TOPIC_PATTERN.test(normalizeRussianText(question));
-  console.log('[isBureauTopic]', normalizeRussianText(question).slice(0, 60), '→', result);
+  const norm = normalizeRussianText(question);
+  const result = BUREAU_TOPIC_PATTERN.test(norm);
+  // Debug: log char codes of first 20 chars to diagnose encoding issues
+  const codes = [...norm.slice(0, 20)].map(c => c.charCodeAt(0).toString(16)).join(',');
+  console.log('[isBureauTopic] codes=' + codes + ' result=' + result);
   return result;
 }
 
