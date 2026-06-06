@@ -252,6 +252,12 @@ export async function commitDocumentKnowledge(documentId: string, options: Commi
       linkedRuleCode: string | null;
     };
 
+    // Skip degenerate QA pairs emitted by the LLM (empty question or answer)
+    if (!data.question?.trim() || !data.answer?.trim()) {
+      console.warn(`[COMMIT] Skipping QA pair with empty question/answer for document ${documentId}`);
+      continue;
+    }
+
     const ruleId = data.linkedRuleCode ? ruleCodeToId.get(data.linkedRuleCode) : null;
 
     const created = await prisma.qAPair.create({
