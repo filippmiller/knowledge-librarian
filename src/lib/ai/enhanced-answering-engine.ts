@@ -938,14 +938,16 @@ ${fixList}
 }
 
 function buildDeterministicGuardrailResult(question: string): EnhancedAnswerResult | null {
-  const text = normalizeRussianText(question);
-  const mentionsApostille = /апостил/.test(text);
-  const mentionsSpb = /санкт\s*петербург|петербург|(?:^|[^а-я])спб(?:[^а-я]|$)/.test(text);
-  const mentionsMoscow = /москв/.test(text);
+  // All regexes use /iu flags and test the ORIGINAL question directly.
+  // Never call normalizeRussianText() here — its toLowerCase() silently corrupts
+  // Cyrillic to U+FFFD on some Alpine Linux / Node 20 (small-icu) deployments.
+  const mentionsApostille = /апостил/iu.test(question);
+  const mentionsSpb = /санкт\s*петербург|петербург|(?:^|[^а-яё])спб(?:[^а-яё]|$)/iu.test(question);
+  const mentionsMoscow = /москв/iu.test(question);
   const asksHowOrCan =
-    /как|можн|нельзя|получится|сдела|постав|простав|подат|оформ/.test(text);
+    /как|можн|нельзя|получится|сдела|постав|простав|подат|оформ/iu.test(question);
   const mentionsEducation =
-    /образован|диплом|аттестат|вуз|университет|колледж|школ/.test(text);
+    /образован|диплом|аттестат|вуз|университет|колледж|школ/iu.test(question);
 
   // "Другой регион" path: a ЗАГС document issued OUTSIDE СПб/ЛО (the user picked
   // the "Другой регион" option or named a non-local city). The bureau apostilles
@@ -953,12 +955,12 @@ function buildDeterministicGuardrailResult(question: string): EnhancedAnswerResu
   // from another region must be apostilled THERE. Explain that + offer the
   // notarized-copy alternative. Fires only when it's NOT the mirror case (which
   // mentions both СПб and Москва and has its own directional answer below).
-  const mentionsOtherRegion = /друг[а-я]*\s+регион|друг[а-я]*\s+город/.test(text);
+  const mentionsOtherRegion = /друг[а-яё]*\s+регион|друг[а-яё]*\s+город/iu.test(question);
   const mentionsOtherCity =
-    /москв|перм|нижн|новосиб|екатеринбург|казан|самар|ростов|краснодар|воронеж|челябинск|волгоград|саратов|тюмен|иркутск|омск/.test(text);
+    /москв|перм|нижн|новосиб|екатеринбург|казан|самар|ростов|краснодар|воронеж|челябинск|волгоград|саратов|тюмен|иркутск|омск/iu.test(question);
   const zagsContext =
-    /загс|свидетельств|(?:^|[^а-я])со[рбс](?:[^а-я]|$)|рожден|брак|растор|смерт|перемен.{0,4}имен|отцовств/.test(text);
-  const isLocalIssue = mentionsSpb || /ленинградск|лен\.?\s*обл/.test(text);
+    /загс|свидетельств|(?:^|[^а-яё])со[рбс](?:[^а-яё]|$)|рожден|брак|растор|смерт|перемен.{0,4}имен|отцовств/iu.test(question);
+  const isLocalIssue = mentionsSpb || /ленинградск|лен\.?\s*обл/iu.test(question);
   if (mentionsApostille && zagsContext && (mentionsOtherRegion || (mentionsOtherCity && !isLocalIssue))) {
     const answer = [
       'Апостиль на оригинал свидетельства ЗАГС ставится по месту выдачи документа — в том регионе, где он выдан. Наше бюро ставит апостиль на оригиналы ЗАГС только для документов, выданных в Санкт-Петербурге и Ленинградской области.',
@@ -1002,11 +1004,11 @@ function buildDeterministicGuardrailResult(question: string): EnhancedAnswerResu
   // issue verb (выдан/составлен/…); the other city is the requested target.
   // NB: \w does NOT match Cyrillic in JS, so use [а-я]* for word tails
   // (text is already lowercased + ё→е by normalizeRussianText).
-  const issueMatch = text.match(
-    /(?:выдан[а-я]*|составлен[а-я]*|получен[а-я]*|оформлен[а-я]*|выписан[а-я]*|выдал[а-я]*)\s+(?:в\s+|во\s+)?(москв[а-я]*|санкт[-\s]?петербург[а-я]*|петербург[а-я]*|спб)/
+  const issueMatch = question.match(
+    /(?:выдан[а-яё]*|составлен[а-яё]*|получен[а-яё]*|оформлен[а-яё]*|выписан[а-яё]*|выдал[а-яё]*)\s+(?:в\s+|во\s+)?(москв[а-яё]*|санкт[-\s]?петербург[а-яё]*|петербург[а-яё]*|спб)/iu
   );
   const issuePlace: 'Москве' | 'Санкт-Петербурге' | null = issueMatch
-    ? (/москв/.test(issueMatch[1]) ? 'Москве' : 'Санкт-Петербурге')
+    ? (/москв/i.test(issueMatch[1]) ? 'Москве' : 'Санкт-Петербурге')
     : null;
   const targetPlace = issuePlace === 'Москве' ? 'Санкт-Петербурге' : 'Москве';
 
@@ -1066,14 +1068,8 @@ function buildDeterministicGuardrailResult(question: string): EnhancedAnswerResu
 // alone must never qualify; it only counts when paired with a service below.
 //
 // Domain owner: extend this list as the bureau's services grow. Each entry is
-// a stem (matched case-insensitively, ё→е normalised).
-const BUREAU_TOPIC_PATTERN =
-  /апостил|легализац|нотари|загс|кзагс|минюст|(?:^|[^а-я])мвд(?:[^а-я]|$)|(?:^|[^а-я])мю(?:[^а-я]|$)|перевод|доверенност|свидетельств|справк|диплом|аттестат|образован|судим|паспорт|истреб|консульск|заверен|печат|штамп|загранпаспорт|гражданств|виз[аыуео]|опек|документ|миграц|(?:^|[^а-я])внж(?:[^а-я]|$)|вид[уаео]? на жительств|(?:^|[^а-я])рвп(?:[^а-я]|$)|вид на временн|содействи/;
-
-// Case-insensitive Unicode pattern — matches the ORIGINAL question (no normalization needed).
-// This is the authoritative check; the normalised form is used only when the bureau test fails.
-// We use the /iu flag so uppercase ВНЖ / РВП are handled without a toLower() step that may
-// silently corrupt Cyrillic in some server environments.
+// a stem. /iu flags are used so uppercase ВНЖ/РВП/etc. match without calling
+// toLowerCase(), which silently corrupts Cyrillic on some Alpine/Node environments.
 const BUREAU_TOPIC_PATTERN_CI = new RegExp(
   'апостил|легализац|нотари|загс|кзагс|минюст|' +
   'мвд|мю|' +  // мвд | мю  (Unicode escapes — immune to source encoding)
@@ -1093,11 +1089,11 @@ function isBureauTopic(question: string): boolean {
 }
 
 function shouldUseGeneralKnowledgeFallback(question: string): boolean {
-  const text = normalizeRussianText(question);
+  // /iu flags on original question — same reason as buildDeterministicGuardrailResult.
   const mentionsKnownService =
-    /апостил|легализац|нотари|загс|мвд|минюст|перевод|доверенност|свидетельств|справк|документ/.test(text);
+    /апостил|легализац|нотари|загс|мвд|минюст|перевод|доверенност|свидетельств|справк|документ/iu.test(question);
   const asksPracticalQuestion =
-    /как|где|можн|нужн|нельзя|надо|что\s+делать|подат|оформ|постав|простав|апостилир|легализ/.test(text);
+    /как|где|можн|нужн|нельзя|надо|что\s+делать|подат|оформ|постав|простав|апостилир|легализ/iu.test(question);
 
   return mentionsKnownService && asksPracticalQuestion;
 }
@@ -1220,12 +1216,11 @@ function normalizeRussianText(value: string): string {
 }
 
 function getDeterministicQueryVariants(question: string): string[] {
-  const text = question.toLowerCase().replace(/ё/g, 'е');
   const variants: string[] = [];
 
   if (
-    /консульск[а-яa-z]*\s+легализац|легализац[а-яa-z]*\s+.*консульск|(?:^|[^а-я])кл(?:[^а-я]|$)/.test(text) &&
-    /для\s+каких\s+стран|какие\s+страны|список\s+стран/.test(text)
+    /консульск[а-яёa-z]*\s+легализац|легализац[а-яёa-z]*\s+.*консульск|(?:^|[^а-яё])кл(?:[^а-яё]|$)/iu.test(question) &&
+    /для\s+каких\s+стран|какие\s+страны|список\s+стран/iu.test(question)
   ) {
     variants.push(
       'СПИСОК СТРАН, ДЛЯ КОТОРЫХ НУЖНА КОНСУЛЬСКАЯ ЛЕГАЛИЗАЦИЯ ДОКУМЕНТОВ'

@@ -170,37 +170,40 @@ ${taxonomySummary()}
 }
 
 function classifyScenarioDeterministically(question: string): ScenarioDecision | null {
-  const text = question.toLowerCase().replace(/ё/g, 'е');
-  const mentionsApostille = /апостил/.test(text);
-  const mentionsZags = /загс/.test(text);
+  // All regexes use /iu flags and test the ORIGINAL question directly.
+  // Do NOT call toLowerCase() or replace(/ё/г, 'е') — on Alpine Linux Node 20
+  // (small-icu) those calls silently corrupt Cyrillic to U+FFFD, causing every
+  // pattern to fail. The /i flag handles case, /u enables proper Unicode semantics.
+  const mentionsApostille = /апостил/iu.test(question);
+  const mentionsZags = /загс/iu.test(question);
   const mentionsConsularLegalization =
-    /консульск[а-яa-z]*\s+легализац|легализац[а-яa-z]*\s+.*консульск|(?:^|[^а-я])кл(?:[^а-я]|$)/.test(text);
+    /консульск[а-яёa-z]*\s+легализац|легализац[а-яёa-z]*\s+.*консульск|(?:^|[^а-яё])кл(?:[^а-яё]|$)/iu.test(question);
   const mentionsOperationalChecklist =
-    /(?:^|[^а-я])лид(?:а|е|ом|ы|ов)?(?:[^а-я]|$)|сделк|бланк|битрикс|bitrix|карточк[а-яa-z]*\s+(?:лид|сделк)/.test(text);
+    /(?:^|[^а-яё])лид(?:а|е|ом|ы|ов)?(?:[^а-яё]|$)|сделк|бланк|битрикс|bitrix|карточк[а-яёa-z]*\s+(?:лид|сделк)/iu.test(question);
   const mentionsInternalOperations =
-    /почт[а-яa-z]*\s+росси|отправк[а-яa-z]*\s+почт|наливайк|шушар|хранен|выдач[а-яa-z]*\s+заказ|готов[а-яa-z]*\s+заказ|машинн[а-яa-z]*\s+перевод|молдавск|молдавск[а-яa-z]*\s+язык|исходник|скан|маршрутн[а-яa-z]*\s+лист|упд|эдо|фиксац[а-яa-z]*\s+ошиб/.test(text);
+    /почт[а-яёa-z]*\s+росси|отправк[а-яёa-z]*\s+почт|наливайк|шушар|хранен|выдач[а-яёa-z]*\s+заказ|готов[а-яёa-z]*\s+заказ|машинн[а-яёa-z]*\s+перевод|молдавск|молдавск[а-яёa-z]*\s+язык|исходник|скан|маршрутн[а-яёa-z]*\s+лист|упд|эдо|фиксац[а-яёa-z]*\s+ошиб/iu.test(question);
   const asksCatalog =
-    /(?:какие|какой|назов|перечисл|список|виды|типы|можешь\s+.*назвать|что\s+есть)/.test(text)
-    && /документ|свидетельств|справк/.test(text);
+    /(?:какие|какой|назов|перечисл|список|виды|типы|можешь\s+.*назвать|что\s+есть)/iu.test(question)
+    && /документ|свидетельств|справк/iu.test(question);
   const asksReference =
-    /(?:что\s+нужно\s+знать|как\s+заполн|как\s+делать|что\s+делать|процедур|порядок|инструкц|чек\s*-?\s*лист|можно\s+апостилир|нельзя\s+апостилир|для\s+каких\s+стран|какие\s+страны|нужна\s+ли)/.test(text);
+    /(?:что\s+нужно\s+знать|как\s+заполн|как\s+делать|что\s+делать|процедур|порядок|инструкц|чек\s*-?\s*лист|можно\s+апостилир|нельзя\s+апостилир|для\s+каких\s+стран|какие\s+страны|нужна\s+ли)/iu.test(question);
   // NB: Russian tails must be [а-яё]*, NOT \w* — JS \w is ASCII-only and cannot
   // bridge a Cyrillic suffix to the next token, so "министерство юстиции" would
   // silently fail to match with \w*.
-  const mentionsMinJustice = /мин\s*юст|минюст|(?:^|[^а-я])мю(?:[^а-я]|$)|министерств[а-яё]*\s+юстиц/.test(text);
-  const mentionsSpb = /санкт\s*петербург|петербург|(?:^|[^а-я])спб(?:[^а-я]|$)/.test(text);
-  const mentionsMoscow = /москв/.test(text);
-  const mentionsEducation = /образован|диплом|аттестат|вуз|университет|колледж|школ/.test(text);
-  const asksCountryRequirement = /нуж[а-яё]*|требу[а-яё]*|став[а-яё]*|простав[а-яё]*|не\s+нуж/.test(text);
+  const mentionsMinJustice = /мин\s*юст|минюст|(?:^|[^а-яё])мю(?:[^а-яё]|$)|министерств[а-яё]*\s+юстиц/iu.test(question);
+  const mentionsSpb = /санкт\s*петербург|петербург|(?:^|[^а-яё])спб(?:[^а-яё]|$)/iu.test(question);
+  const mentionsMoscow = /москв/iu.test(question);
+  const mentionsEducation = /образован|диплом|аттестат|вуз|университет|колледж|школ/iu.test(question);
+  const asksCountryRequirement = /нуж[а-яё]*|требу[а-яё]*|став[а-яё]*|простав[а-яё]*|не\s+нуж/iu.test(question);
   // A GENERAL requirement that is the same across every apostille scenario
   // (lamination, document condition, language, who submits). Such questions
   // must NOT be bounced to "which document type?" — the answer is universal and
   // lives in cross-scenario rules; route them to open knowledge lookup.
-  // NB: \w does NOT match Cyrillic in JS — use [а-я]* for word tails, else
+  // NB: \w does NOT match Cyrillic in JS — use [а-яё]* for word tails, else
   // "юридическ\w*" fails on "юридическ-ого".
   const asksGeneralRequirement =
-    /ламинир|заламинир|состояни[а-я]*\s+документ|поврежд|порван|ветх|на\s+каком\s+язык|язык[а-я]*\s+документ|сшит|многостранич|требовани[а-я]*\s+к\s+(?:документ|оригинал)|(?:^|[^а-я])юр[а-я]*\s*лиц|юридическ[а-я]*\s+лиц|(?:^|[^а-я])физ[а-я]*\s*лиц|физическ[а-я]*\s+лиц/.test(text);
-  const mentionsTreatyCountry = /(азербайджан|албани|армени|белорус|болгари|босни|венгри|грузи|казахстан|киргиз|куб|латви|литв|молдов|монголи|польш|румын|серби|словени|таджикистан|узбекистан|украин|хорвати|черногори|чехи|эстони)/.test(text);
+    /ламинир|заламинир|состояни[а-яё]*\s+документ|поврежд|порван|ветх|на\s+каком\s+язык|язык[а-яё]*\s+документ|сшит|многостранич|требовани[а-яё]*\s+к\s+(?:документ|оригинал)|(?:^|[^а-яё])юр[а-яё]*\s*лиц|юридическ[а-яё]*\s+лиц|(?:^|[^а-яё])физ[а-яё]*\s*лиц|физическ[а-яё]*\s+лиц/iu.test(question);
+  const mentionsTreatyCountry = /(азербайджан|албани|армени|белорус|болгари|босни|венгри|грузи|казахстан|киргиз|куб|латви|литв|молдов|монголи|польш|румын|серби|словени|таджикистан|узбекистан|украин|хорвати|черногори|чехи|эстони)/iu.test(question);
 
   if (mentionsApostille && mentionsSpb && mentionsMoscow && !mentionsEducation) {
     return {
@@ -284,12 +287,12 @@ function classifyScenarioDeterministically(question: string): ScenarioDecision |
   // still go to open lookup. Education is excluded (no scenario node — handled
   // by the bureau-topic open lookup downstream).
   if (mentionsApostille && !mentionsEducation) {
-    const notaryDoc = /доверенност|нотариальн|нотариус|(?:^|[^а-я])копи|перевод|согласие|довер/.test(text);
-    const opekaDoc = /опек/.test(text);
+    const notaryDoc = /доверенност|нотариальн|нотариус|(?:^|[^а-яё])копи|перевод|согласие|довер/iu.test(question);
+    const opekaDoc = /опек/iu.test(question);
     // СО[РБС] = abbreviations the bureau uses for ЗАГС certificates:
     // СОР (о рождении), СОБ (о браке), СОС (о смерти).
-    const zagsDoc = /загс|свидетельств|(?:^|[^а-я])со[рбс](?:[^а-я]|$)|рожден|брак|растор|смерт|перемен.{0,4}имен|отцовств/.test(text);
-    const mentionsLO = /ленинградск|лен\.?\s*обл/.test(text);
+    const zagsDoc = /загс|свидетельств|(?:^|[^а-яё])со[рбс](?:[^а-яё]|$)|рожден|брак|растор|смерт|перемен.{0,4}имен|отцовств/iu.test(question);
+    const mentionsLO = /ленинградск|лен\.?\s*обл/iu.test(question);
 
     // ЗАГС document (but NOT a notarized copy/translation of one — that goes to
     // МЮ as a notary doc). Region is the ONLY thing left to ask.
@@ -344,7 +347,7 @@ function classifyScenarioDeterministically(question: string): ScenarioDecision |
   // данных". The negative lookahead excludes document nouns and domestic
   // regions so "апостиль для свидетельства" / "в спб" don't trigger.
   const mentionsDestinationCountry =
-    /(?:для|в(?:о)?)\s+(?!докум|свидетельств|справк|диплом|перевод|оригинал|копи|нотари|загс|опек|юр|физ|клиент|себя|сам|любо|каки|како|этого|того|росси|рф(?:[^а-я]|$)|спб|санкт|петербург|москв|ленинградск|област|город|регион|комитет|ведомств|учрежден|орган)[а-яё]{4,}/.test(text);
+    /(?:для|в(?:о)?)\s+(?!докум|свидетельств|справк|диплом|перевод|оригинал|копи|нотари|загс|опек|юр|физ|клиент|себя|сам|любо|каки|како|этого|того|росси|рф(?:[^а-яё]|$)|спб|санкт|петербург|москв|ленинградск|област|город|регион|комитет|ведомств|учрежден|орган)[а-яё]{4,}/iu.test(question);
   if (mentionsApostille && mentionsDestinationCountry) {
     return {
       kind: 'knowledge_lookup',
