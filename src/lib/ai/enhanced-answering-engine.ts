@@ -1071,11 +1071,14 @@ const BUREAU_TOPIC_PATTERN =
   /апостил|легализац|нотари|загс|кзагс|минюст|(?:^|[^а-я])мвд(?:[^а-я]|$)|(?:^|[^а-я])мю(?:[^а-я]|$)|перевод|доверенност|свидетельств|справк|диплом|аттестат|образован|судим|паспорт|истреб|консульск|заверен|печат|штамп|загранпаспорт|гражданств|виз[аыуео]|опек|документ|миграц|(?:^|[^а-я])внж(?:[^а-я]|$)|вид[уаео]? на жительств|(?:^|[^а-я])рвп(?:[^а-я]|$)|вид на временн|содействи/;
 
 function isBureauTopic(question: string): boolean {
-  const norm = normalizeRussianText(question);
+  // Diagnose normalization step by step
+  const rawCodes = [...question.slice(0, 10)].map(c => c.charCodeAt(0).toString(16)).join(',');
+  const afterLower = question.toLowerCase();
+  const lowerCodes = [...afterLower.slice(0, 10)].map(c => c.charCodeAt(0).toString(16)).join(',');
+  const afterReplace = afterLower.replace(/ё/g, 'е'); // ё→е via codepoints
+  const norm = afterReplace.replace(/\s+/g, ' ').trim();
   const result = BUREAU_TOPIC_PATTERN.test(norm);
-  // Debug: log char codes of first 20 chars to diagnose encoding issues
-  const codes = [...norm.slice(0, 20)].map(c => c.charCodeAt(0).toString(16)).join(',');
-  console.log('[isBureauTopic] codes=' + codes + ' result=' + result);
+  console.log('[isBureauTopic] raw=' + rawCodes + ' lower=' + lowerCodes + ' result=' + result);
   return result;
 }
 
