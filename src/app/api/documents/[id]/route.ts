@@ -109,13 +109,14 @@ export async function PATCH(
 
     switch (action) {
       case 'reset': {
-        // Reset to PENDING, clear staged data
+        // Reset to PENDING, clear staged data AND retry counter
         await prisma.stagedExtraction.deleteMany({ where: { documentId: id } });
         await prisma.document.update({
           where: { id },
           data: {
             parseStatus: 'PENDING',
             parseError: null,
+            retryCount: 0,
           },
         });
         return NextResponse.json({ message: 'Document reset to pending' });
@@ -135,13 +136,14 @@ export async function PATCH(
       }
 
       case 'retry': {
-        // Reset for retry - same as reset but mark for reprocessing
+        // Reset for retry — clears staged data AND retry counter so DEAD docs get a fresh start
         await prisma.stagedExtraction.deleteMany({ where: { documentId: id } });
         await prisma.document.update({
           where: { id },
           data: {
             parseStatus: 'PENDING',
             parseError: null,
+            retryCount: 0,
           },
         });
         return NextResponse.json({ message: 'Document ready for retry' });

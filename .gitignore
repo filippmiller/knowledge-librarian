@@ -62,3 +62,6 @@ logs/
 # local agent/tool state and upload diagnostics
 .serena/
 tmp-upload/
+
+# mined email data (real customer content — never commit)
+scratchpad/
