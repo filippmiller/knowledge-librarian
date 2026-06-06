@@ -1068,10 +1068,12 @@ function buildDeterministicGuardrailResult(question: string): EnhancedAnswerResu
 // Domain owner: extend this list as the bureau's services grow. Each entry is
 // a stem (matched case-insensitively, ё→е normalised).
 const BUREAU_TOPIC_PATTERN =
-  /апостил|легализац|нотари|загс|кзагс|минюст|(?:^|[^а-я])мвд(?:[^а-я]|$)|(?:^|[^а-я])мю(?:[^а-я]|$)|перевод|доверенност|свидетельств|справк|диплом|аттестат|образован|судим|паспорт|истреб|консульск|заверен|печат|штамп|загранпаспорт|гражданств|виз[аыуео]|опек|документ|миграц|(?:^|[^а-я])внж(?:[^а-я]|$)|вид на жительств|(?:^|[^а-я])рвп(?:[^а-я]|$)|вид на временн|содействи/;
+  /апостил|легализац|нотари|загс|кзагс|минюст|(?:^|[^а-я])мвд(?:[^а-я]|$)|(?:^|[^а-я])мю(?:[^а-я]|$)|перевод|доверенност|свидетельств|справк|диплом|аттестат|образован|судим|паспорт|истреб|консульск|заверен|печат|штамп|загранпаспорт|гражданств|виз[аыуео]|опек|документ|миграц|(?:^|[^а-я])внж(?:[^а-я]|$)|вид[уаео]? на жительств|(?:^|[^а-я])рвп(?:[^а-я]|$)|вид на временн|содействи/;
 
 function isBureauTopic(question: string): boolean {
-  return BUREAU_TOPIC_PATTERN.test(normalizeRussianText(question));
+  const result = BUREAU_TOPIC_PATTERN.test(normalizeRussianText(question));
+  console.log('[isBureauTopic]', normalizeRussianText(question).slice(0, 60), '→', result);
+  return result;
 }
 
 function shouldUseGeneralKnowledgeFallback(question: string): boolean {
