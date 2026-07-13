@@ -20,6 +20,7 @@ export function isLowTrust(result: EnhancedAnswerResult): boolean {
   // A clarification prompt is not an answer — nothing to capture.
   if (result.scenarioClarification) return false;
   if (result.answerSource === 'general_ai') return true;
+  if (result.requiresHumanReview) return true;
   if (result.confidenceLevel === 'low' || result.confidenceLevel === 'insufficient') return true;
   return false;
 }
@@ -134,11 +135,33 @@ export async function approveKnowledgeGap(
     });
     if (claim.count !== 1) throw new Error('already resolved');
 
+    const existingQa = await tx.qAPair.findFirst({
+      where: { question, status: 'ACTIVE' },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    if (existingQa && existingQa.answer.trim() === answer) {
+      await tx.aIQuestion.update({
+        where: { id },
+        data: { response: `approved → existing QAPair ${existingQa.id}` },
+      });
+      return { qaPairId: existingQa.id };
+    }
+
+    if (existingQa) {
+      await tx.qAPair.update({
+        where: { id: existingQa.id },
+        data: { status: 'SUPERSEDED' },
+      });
+    }
+
     const qa = await tx.qAPair.create({
       data: {
         question,
         answer,
         status: 'ACTIVE',
+        version: existingQa ? existingQa.version + 1 : 1,
+        supersedesQaId: existingQa?.id,
         scenarioKey,
         metadata: {
           origin: 'ai-suggested',
@@ -146,6 +169,21 @@ export async function approveKnowledgeGap(
           approvedAt: new Date().toISOString(),
           fromAIQuestion: id,
         },
+      },
+    });
+
+    await tx.knowledgeChange.create({
+      data: {
+        targetType: 'QA_PAIR',
+        targetId: qa.id,
+        changeType: existingQa ? 'SUPERSEDE' : 'CREATE',
+        oldValue: existingQa ? { question: existingQa.question, answer: existingQa.answer, version: existingQa.version } : undefined,
+        newValue: { question: qa.question, answer: qa.answer, version: qa.version, scenarioKey: qa.scenarioKey },
+        reason: existingQa ? 'Утверждена новая версия ответа через human review' : 'Утверждён новый ответ через human review',
+        initiatedBy: 'ADMIN',
+        approvedBy: opts.approvedBy,
+        status: 'APPROVED',
+        reviewedAt: new Date(),
       },
     });
 

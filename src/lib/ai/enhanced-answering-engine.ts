@@ -82,6 +82,12 @@ export interface EnhancedAnswerResult {
   };
   answerSource?: 'knowledge_base' | 'general_ai' | 'deterministic_guardrail';
   requiresHumanReview?: boolean;
+  consistency?: {
+    allSupported: boolean;
+    unsupportedCount: number;
+    verificationFailed: boolean;
+    regenerated: boolean;
+  };
 }
 
 interface IntentClassification {
@@ -138,6 +144,10 @@ const ENHANCED_ANSWERING_PROMPT = `Ты — ИИ-библиотекарь зна
 
 2. **ПРИ ОТСУТСТВИИ ДАННЫХ** — не придумывай, а напиши "в источнике не указано" или просто не упоминай.
 
+2а. **ПРОВЕРЯЙ ГЛАВНОЕ БИЗНЕС-УТВЕРЖДЕНИЕ**: прежде чем писать "мы делаем", "можно заказать" или "услуга доступна", найди прямое подтверждение именно этой возможности в цитатах. Похожая услуга, общая редактура или общий регламент не являются подтверждением.
+
+2б. **НЕ ДОБАВЛЯЙ ЦЕНЫ И СРОКИ, ЕСЛИ ПОЛЬЗОВАТЕЛЬ ИХ НЕ СПРАШИВАЛ**. Даже если они случайно присутствуют в найденном фрагменте, они не относятся к ответу и могут быть динамическими.
+
 3. **НЕ ОБОБЩАЙ И НЕ ЭКСТРАПОЛИРУЙ**: если в источнике написано "2500₽ за документ" — не добавляй "значит 5000₽ за два"; если написано "нотариус СПб" — не расширяй до "нотариус СПб или ЛО".
 
 4. **НЕ СМЕШИВАЙ** факты из разных цитат в один: если цитата 1 говорит "Вторник 10-12", а цитата 2 "Четверг 14-16", пиши их раздельно с указанием источника, не склеивай в "Вторник-четверг 10-16".
@@ -149,6 +159,7 @@ const ENHANCED_ANSWERING_PROMPT = `Ты — ИИ-библиотекарь зна
 ═══ ФОРМАТ ОТВЕТА ═══
 
 - Язык ответа: русский, кратко и по делу.
+- Пиши обычным текстом без Markdown-заголовков и символов **, ##, ---.
 - Ссылайся на правила формата [R-123] если они есть в цитатах.
 - Если в цитатах есть **адрес/телефон/график/цена** — процитируй их дословно, не пересказывай.
 - Структурируй длинные ответы подзаголовками, но не раздувай пустыми секциями.
@@ -253,14 +264,22 @@ function selectContextChunks(
 ): HybridSearchResult[] {
   if (chunks.length === 0) return [];
 
+  // RRF is a rank-fusion score, not an absolute relevance measurement. First
+  // require real semantic support or a strong keyword match; otherwise "the
+  // best five bad results" would still be sent to the synthesizer.
+  const eligible = chunks.filter(
+    (chunk) => chunk.semanticScore >= 0.4 || chunk.keywordScore >= 0.65
+  );
+  if (eligible.length === 0) return [];
+
   // Find the "elbow" in similarity scores
-  const scores = chunks.map(c => c.combinedScore);
+  const scores = eligible.map(c => c.combinedScore);
   const maxScore = scores[0];
 
   // Include chunks with score >= 60% of max score, up to maxChunks
   const threshold = maxScore * 0.6;
 
-  return chunks
+  return eligible
     .filter(c => c.combinedScore >= threshold)
     .slice(0, maxChunks);
 }
@@ -651,20 +670,18 @@ export async function answerQuestionEnhanced(
   // Step 7: Calculate overall confidence.
   // Primary signal: best SEMANTIC similarity of the retrieved chunks (RRF rank
   // scores are tiny/flat ~0.01-0.02 by design, so they're useless here).
-  // Secondary signal: retrieval COVERAGE — more corroborating chunks ⇒ a bit
-  // more trustworthy. We deliberately DROPPED the old `intentResult.confidence`
+  // We deliberately DROPPED the old `intentResult.confidence`
   // term: it was the intent classifier's self-assessment, which does not track
   // whether the ANSWER is correct (pure noise). Calibrated to stay close to the
-  // old numbers (sem=0.5 → was ~0.59, now ~0.60) so the 0.7/0.5/0.3 thresholds
-  // keep meaning, but every term now reflects real retrieval quality.
+  // Confidence is intentionally not increased just because several chunks were
+  // returned: correlated or off-topic chunks are not independent evidence.
   const bestSemanticScore = contextChunks.length > 0
     ? Math.max(...contextChunks.map(c => c.semanticScore))
     : 0;
-  const coverageScore = Math.min(contextChunks.length / 3, 1); // 0..1, full at ≥3 chunks
   const overallConfidence = Math.min(
     // A strong QA match contributes its own confidence floor so the reported
     // number stays honest when the answer rests on a QAPair, not doc chunks.
-    Math.max(bestSemanticScore + coverageScore * 0.1, hasStrongQaMatch ? bestQaMatch : 0),
+    Math.max(bestSemanticScore, hasStrongQaMatch ? bestQaMatch : 0),
     1.0
   );
 
@@ -774,10 +791,11 @@ ${confidenceLevel === 'insufficient'
       ];
       consistency = await verifyAnswer(answer, verificationSources);
       console.log(`[enhanced-answering] Consistency: ${consistency.claims.length} claims, ${consistency.unsupported.length} unsupported`);
-      if (consistency.unsupported.length > 0) {
+      const detectedUnsupported = consistency.unsupported;
+      if (detectedUnsupported.length > 0) {
         console.warn('[enhanced-answering] Unsupported claims:',
-          consistency.unsupported.map((c) => `"${c.claim}" (${c.reasoning ?? '?'})`).join(' | '));
-        const fixList = consistency.unsupported
+          detectedUnsupported.map((c) => `"${c.claim}" (${c.reasoning ?? '?'})`).join(' | '));
+        const fixList = detectedUnsupported
           .map((c, i) => `${i + 1}. "${c.claim}" — ${c.reasoning ?? 'not in sources'}`)
           .join('\n');
         try {
@@ -807,6 +825,10 @@ ${fixList}
             console.log('[enhanced-answering] Regenerated after consistency flag, new length:', revised.length);
             answer = revised;
             regenerated = true;
+            // The revised answer is a new artifact. It must pass the same gate;
+            // otherwise one regeneration could silently replace a detected
+            // hallucination with a different unsupported claim.
+            consistency = await verifyAnswer(answer, verificationSources);
           }
         } catch (e) {
           console.warn('[enhanced-answering] Regeneration failed, keeping original answer:', e);
@@ -820,19 +842,29 @@ ${fixList}
             scenarioKey: scenarioKeyForAnswer ?? null,
             initialAnswer: initialAnswerForLog,
             regeneratedAnswer: regenerated ? answer : null,
-            unsupportedClaims: consistency.unsupported as unknown as object,
-            unsupportedCount: consistency.unsupported.length,
+            unsupportedClaims: detectedUnsupported as unknown as object,
+            unsupportedCount: detectedUnsupported.length,
             regenerated,
           },
         }).catch((e) => console.warn('[enhanced-answering] HallucinationLog write failed:', e));
       }
     } catch (e) {
-      console.warn('[enhanced-answering] Consistency gate failed (fail-open):', e);
+      console.warn('[enhanced-answering] Consistency gate failed; requiring human review:', e);
+      consistency = {
+        allSupported: false,
+        claims: [],
+        unsupported: [],
+        verificationFailed: true,
+        raw: String(e),
+      };
     }
   }
 
   // Clarification is handled by the scenario decision gate upstream.
   const clarificationQuestion: { question: string; options: string[] } | undefined = undefined;
+  const requiresHumanReview = Boolean(
+    consistency?.verificationFailed || consistency?.unsupported.length
+  );
 
   // Build source references from context chunks
   const primarySource = primaryDocId ? {
@@ -906,6 +938,13 @@ ${fixList}
     scenarioKey: scenarioKeyForAnswer,
     scenarioLabel: scenarioLabelForAnswer,
     answerSource: 'knowledge_base',
+    requiresHumanReview,
+    consistency: consistency ? {
+      allSupported: consistency.allSupported,
+      unsupportedCount: consistency.unsupported.length,
+      verificationFailed: consistency.verificationFailed === true,
+      regenerated,
+    } : undefined,
   };
 
   if (includeDebug) {
@@ -1209,10 +1248,6 @@ async function answerFromGeneralKnowledgeFallback(
     answerSource: 'general_ai',
     requiresHumanReview,
   };
-}
-
-function normalizeRussianText(value: string): string {
-  return value.toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim();
 }
 
 function getDeterministicQueryVariants(question: string): string[] {

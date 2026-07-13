@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
 import {
   Activity,
   BarChart3,
@@ -59,6 +60,12 @@ interface BotResult {
   suggestedClarification?: string;
   answerSource?: 'knowledge_base' | 'general_ai' | 'deterministic_guardrail';
   requiresHumanReview?: boolean;
+  consistency?: {
+    allSupported: boolean;
+    unsupportedCount: number;
+    verificationFailed: boolean;
+    regenerated: boolean;
+  };
   scenarioKey?: string;
   scenarioLabel?: string;
   domainsUsed: string[];
@@ -123,6 +130,21 @@ function deriveDecision(result: BotResult | null, selectedCase: BotCase | null) 
       icon: Activity,
     };
   }
+  if (
+    result.requiresHumanReview ||
+    result.consistency?.verificationFailed ||
+    (result.consistency?.unsupportedCount ?? 0) > 0
+  ) {
+    return {
+      code: 'REVIEW_REQUIRED',
+      title: 'Требуется проверка оператором',
+      description: result.consistency?.verificationFailed
+        ? 'Автоматическая проверка доказательств не завершилась. Ответ нельзя считать подтверждённым.'
+        : 'Одно или несколько утверждений ответа не подтверждены источниками.',
+      tone: 'rose',
+      icon: ShieldAlert,
+    };
+  }
   if (selectedCase?.price_dependent) {
     return {
       code: 'LIVE_DATA_REQUIRED',
@@ -141,7 +163,7 @@ function deriveDecision(result: BotResult | null, selectedCase: BotCase | null) 
       icon: MessageSquareText,
     };
   }
-  if (result.requiresHumanReview || result.confidence < 0.5) {
+  if (result.confidence < 0.5) {
     return {
       code: 'ESCALATE',
       title: 'Передать оператору',
@@ -166,6 +188,16 @@ function deriveDecision(result: BotResult | null, selectedCase: BotCase | null) 
     tone: 'emerald',
     icon: CheckCircle2,
   };
+}
+
+function cleanMarkdown(value: string): string {
+  return value
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/__(.*?)__/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/^---+$/gm, '')
+    .trim();
 }
 
 function entitySummary(entities?: Record<string, unknown>) {
@@ -197,6 +229,10 @@ export default function BotLabPage() {
   const [comment, setComment] = useState('');
   const [feedbackLoading, setFeedbackLoading] = useState(false);
   const [feedbackSaved, setFeedbackSaved] = useState(false);
+  const [canonicalAnswer, setCanonicalAnswer] = useState('');
+  const [candidateLoading, setCandidateLoading] = useState(false);
+  const [candidateId, setCandidateId] = useState<string | null>(null);
+  const [candidateError, setCandidateError] = useState<string | null>(null);
 
   useEffect(() => {
     async function loadCases() {
@@ -209,6 +245,7 @@ export default function BotLabPage() {
         if (data.cases[0]) {
           setSelectedId(data.cases[0].id);
           setQuestion(data.cases[0].question);
+          setCanonicalAnswer(data.cases[0].answer);
         }
       } catch (error) {
         setLoadError(error instanceof Error ? error.message : 'Не удалось загрузить данные');
@@ -260,6 +297,9 @@ export default function BotLabPage() {
     setRating(null);
     setComment('');
     setFeedbackSaved(false);
+    setCanonicalAnswer(item.answer);
+    setCandidateId(null);
+    setCandidateError(null);
   }
 
   function updateQuestion(value: string) {
@@ -325,6 +365,30 @@ export default function BotLabPage() {
     }
   }
 
+  async function createKnowledgeCandidate() {
+    if (!selectedCase || candidateLoading || canonicalAnswer.trim().length < 10) return;
+    setCandidateLoading(true);
+    setCandidateError(null);
+    try {
+      const response = await fetch('/api/admin/bot-lab/knowledge-candidates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          caseId: selectedCase.id,
+          answer: canonicalAnswer.trim(),
+          note: comment.trim() || undefined,
+        }),
+      });
+      const data = await response.json() as { candidateId?: string; error?: string };
+      if (!response.ok || !data.candidateId) throw new Error(data.error || 'Не удалось создать кандидат знания');
+      setCandidateId(data.candidateId);
+    } catch (error) {
+      setCandidateError(error instanceof Error ? error.message : 'Не удалось создать кандидат знания');
+    } finally {
+      setCandidateLoading(false);
+    }
+  }
+
   if (loadingCases) {
     return (
       <div className="grid min-h-[60vh] place-items-center">
@@ -342,7 +406,7 @@ export default function BotLabPage() {
       <section className="flex flex-col justify-between gap-4 lg:flex-row lg:items-end">
         <div>
           <div className="mb-2 flex flex-wrap items-center gap-2">
-            <Badge className="bg-cyan-100 text-cyan-900"><FlaskConical className="size-3" /> Sandbox · Phase 1</Badge>
+            <Badge className="bg-cyan-100 text-cyan-900"><FlaskConical className="size-3" /> Песочница · обучение</Badge>
             <Badge variant="outline" className="bg-white/70 text-slate-600">Никаких отправок в Bitrix</Badge>
           </div>
           <h1 className="font-display text-3xl font-semibold tracking-tight text-slate-950">Bot Decision Lab</h1>
@@ -373,7 +437,7 @@ export default function BotLabPage() {
       <section className="grid min-h-[780px] gap-4 xl:grid-cols-[320px_minmax(0,1fr)_350px]">
         <Card className="glass-panel min-h-0 gap-0 overflow-hidden rounded-3xl border-white/70 py-0">
           <CardHeader className="border-b border-slate-200/70 px-4 py-4">
-            <div className="flex items-center justify-between"><CardTitle className="text-sm">Case Inbox</CardTitle><Badge variant="outline" className="bg-white text-[10px]">{filteredCases.length}</Badge></div>
+            <div className="flex items-center justify-between"><CardTitle className="text-sm">Кейсы клиентов</CardTitle><Badge variant="outline" className="bg-white text-[10px]">{filteredCases.length}</Badge></div>
             <div className="relative mt-2"><Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" /><Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Вопрос или ответ…" className="rounded-xl bg-white/80 pl-9" /></div>
             <div className="grid grid-cols-2 gap-2">
               <select value={category} onChange={(event) => setCategory(event.target.value)} className="h-9 rounded-xl border border-slate-200 bg-white/80 px-2 text-xs text-slate-700 outline-none focus:border-cyan-500">
@@ -410,14 +474,31 @@ export default function BotLabPage() {
 
           <div className="grid gap-4 lg:grid-cols-2">
             <Card className="rounded-3xl border-slate-200/80 bg-white/80 py-0 shadow-sm">
-              <CardHeader className="border-b border-slate-100 pb-4"><div className="flex items-center gap-2"><ThumbsUp className="size-4 text-emerald-600" /><CardTitle className="text-sm">Эталон оператора</CardTitle></div></CardHeader>
+              <CardHeader className="border-b border-slate-100 pb-4"><div className="flex items-center gap-2"><ThumbsUp className="size-4 text-emerald-600" /><CardTitle className="text-sm">Исторический ответ сотрудника</CardTitle></div></CardHeader>
               <CardContent className="max-h-[430px] overflow-y-auto pb-5 pt-5"><p className="whitespace-pre-wrap text-sm leading-6 text-slate-700">{selectedCase?.answer ?? 'Для собственного вопроса эталон отсутствует.'}</p></CardContent>
             </Card>
             <Card className="rounded-3xl border-slate-800 bg-slate-950 py-0 text-white shadow-elevated">
-              <CardHeader className="border-b border-white/10 pb-4"><div className="flex items-center gap-2"><Bot className="size-4 text-cyan-300" /><CardTitle className="text-sm text-white">Live-ответ бота</CardTitle>{latencyMs !== null ? <span className="ml-auto flex items-center gap-1 text-[10px] text-slate-400"><Clock3 className="size-3" /> {(latencyMs / 1000).toFixed(1)}с</span> : null}</div></CardHeader>
-              <CardContent className="max-h-[430px] overflow-y-auto pb-5 pt-5">{runLoading ? <div className="flex items-center gap-2 text-sm text-slate-400"><LoaderCircle className="size-4 animate-spin text-cyan-300" /> Строю решение и проверяю источники…</div> : result ? <p className="whitespace-pre-wrap text-sm leading-6 text-slate-200">{result.answer}</p> : <div className="rounded-2xl border border-dashed border-white/15 p-5 text-sm leading-6 text-slate-500">Здесь появится текущий ответ production engine.</div>}</CardContent>
+              <CardHeader className="border-b border-white/10 pb-4"><div className="flex items-center gap-2"><Bot className="size-4 text-cyan-300" /><CardTitle className="text-sm text-white">Текущий ответ бота</CardTitle>{latencyMs !== null ? <span className="ml-auto flex items-center gap-1 text-[10px] text-slate-400"><Clock3 className="size-3" /> {(latencyMs / 1000).toFixed(1)}с</span> : null}</div></CardHeader>
+              <CardContent className="max-h-[430px] overflow-y-auto pb-5 pt-5">{runLoading ? <div className="flex items-center gap-2 text-sm text-slate-400"><LoaderCircle className="size-4 animate-spin text-cyan-300" /> Строю решение и проверяю источники…</div> : result ? <p className="whitespace-pre-wrap text-sm leading-6 text-slate-200">{cleanMarkdown(result.answer)}</p> : <div className="rounded-2xl border border-dashed border-white/15 p-5 text-sm leading-6 text-slate-500">Здесь появится текущий ответ production engine.</div>}</CardContent>
             </Card>
           </div>
+
+          {selectedCase ? (
+            <Card className="glass-panel rounded-3xl border-cyan-200/70 py-0">
+              <CardHeader className="border-b border-slate-200/70 pb-4">
+                <CardTitle className="text-sm">Обучение через проверку человеком</CardTitle>
+                <p className="text-xs leading-5 text-slate-500">Исправьте исторический ответ. Он попадёт в очередь редактора и станет активным знанием только после отдельного утверждения.</p>
+              </CardHeader>
+              <CardContent className="space-y-3 pb-5 pt-5">
+                <Textarea value={canonicalAnswer} onChange={(event) => { setCanonicalAnswer(event.target.value); setCandidateId(null); }} className="min-h-32 rounded-2xl bg-white/85 text-sm leading-6" aria-label="Канонический ответ для базы знаний" />
+                {candidateError ? <p className="text-xs text-rose-700" role="alert">{candidateError}</p> : null}
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="text-[11px] text-slate-500">Эталон не передаётся боту во время live-run — это защищает качество проверки.</p>
+                  {candidateId ? <Button asChild size="sm" variant="outline" className="rounded-full bg-white"><Link href="/admin/ai-questions">Открыть очередь и утвердить</Link></Button> : <Button size="sm" onClick={createKnowledgeCandidate} disabled={candidateLoading || canonicalAnswer.trim().length < 10} className="rounded-full bg-cyan-800 text-white hover:bg-cyan-900">{candidateLoading ? <LoaderCircle className="animate-spin" /> : null}Отправить на проверку</Button>}
+                </div>
+              </CardContent>
+            </Card>
+          ) : null}
 
           {result ? (
             <Card className="glass-panel rounded-3xl border-white/70 py-0">
@@ -455,7 +536,7 @@ export default function BotLabPage() {
           </Card>
 
           <Card className="glass-panel rounded-3xl border-white/70 py-0">
-            <CardHeader className="border-b border-slate-200/70 pb-4"><div className="flex items-center gap-2"><GitBranch className="size-4 text-cyan-700" /><CardTitle className="text-sm">Decision trace</CardTitle></div></CardHeader>
+            <CardHeader className="border-b border-slate-200/70 pb-4"><div className="flex items-center gap-2"><GitBranch className="size-4 text-cyan-700" /><CardTitle className="text-sm">Как бот принял решение</CardTitle></div></CardHeader>
             <CardContent className="space-y-1 pb-5 pt-5">
               {[
                 { label: 'Входной вопрос', value: result?.queryAnalysis?.originalQuery || (result ? question : 'Не запущено'), actual: Boolean(result) },
@@ -477,11 +558,11 @@ export default function BotLabPage() {
           </Card>
 
           {result?.citations.length ? (
-            <Card className="glass-panel rounded-3xl border-white/70 py-0"><CardHeader className="border-b border-slate-200/70 pb-4"><CardTitle className="text-sm">Evidence · {result.citations.length}</CardTitle></CardHeader><CardContent className="max-h-80 space-y-2 overflow-y-auto pb-5 pt-5">{result.citations.map((citation, index) => <div key={`${citation.ruleCode ?? 'citation'}-${index}`} className="rounded-2xl border border-slate-200 bg-white/75 p-3"><div className="flex items-center gap-2">{citation.ruleCode ? <Badge variant="outline" className="bg-white text-[9px]">{citation.ruleCode}</Badge> : null}<span className="line-clamp-1 text-[10px] text-slate-400">{citation.documentTitle}</span></div><p className="mt-2 line-clamp-5 text-xs italic leading-5 text-slate-600">“{citation.quote}”</p></div>)}</CardContent></Card>
+            <Card className="glass-panel rounded-3xl border-white/70 py-0"><CardHeader className="border-b border-slate-200/70 pb-4"><CardTitle className="text-sm">Источники ответа · {result.citations.length}</CardTitle></CardHeader><CardContent className="max-h-80 space-y-2 overflow-y-auto pb-5 pt-5">{result.citations.map((citation, index) => <div key={`${citation.ruleCode ?? 'citation'}-${index}`} className="rounded-2xl border border-slate-200 bg-white/75 p-3"><div className="flex items-center gap-2">{citation.ruleCode ? <Badge variant="outline" className="bg-white text-[9px]">{citation.ruleCode}</Badge> : null}<span className="line-clamp-1 text-[10px] text-slate-400">{citation.documentTitle}</span></div><p className="mt-2 line-clamp-5 text-xs italic leading-5 text-slate-600">“{citation.quote}”</p></div>)}</CardContent></Card>
           ) : null}
 
           {chunks.length ? (
-            <Card className="glass-panel rounded-3xl border-white/70 py-0"><CardHeader className="border-b border-slate-200/70 pb-4"><CardTitle className="text-sm">Retrieved chunks</CardTitle></CardHeader><CardContent className="max-h-80 space-y-2 overflow-y-auto pb-5 pt-5">{chunks.slice(0, 6).map((chunk, index) => { const score = chunk.combinedScore ?? chunk.similarity ?? chunk.semanticScore ?? 0; return <div key={`chunk-${index}`} className="rounded-2xl bg-slate-950 p-3 text-white"><div className="mb-2 flex items-center justify-between font-mono text-[9px] text-cyan-300"><span>CHUNK {index + 1}</span><span>{Math.round(score * 100)}%</span></div><p className="line-clamp-5 text-xs leading-5 text-slate-300">{chunk.content}</p></div>; })}</CardContent></Card>
+            <Card className="glass-panel rounded-3xl border-white/70 py-0"><CardHeader className="border-b border-slate-200/70 pb-4"><CardTitle className="text-sm">Найденные фрагменты базы знаний</CardTitle></CardHeader><CardContent className="max-h-80 space-y-2 overflow-y-auto pb-5 pt-5">{chunks.slice(0, 6).map((chunk, index) => <div key={`chunk-${index}`} className="rounded-2xl bg-slate-950 p-3 text-white"><div className="mb-2 flex flex-wrap items-center justify-between gap-2 font-mono text-[9px] text-cyan-300"><span>ФРАГМЕНТ {index + 1}</span><span>semantic {Math.round((chunk.semanticScore ?? chunk.similarity ?? 0) * 100)}% · keyword {Math.round((chunk.keywordScore ?? 0) * 100)}% · RRF {(chunk.combinedScore ?? 0).toFixed(4)}</span></div><p className="line-clamp-5 text-xs leading-5 text-slate-300">{chunk.content}</p></div>)}</CardContent></Card>
           ) : null}
         </aside>
       </section>

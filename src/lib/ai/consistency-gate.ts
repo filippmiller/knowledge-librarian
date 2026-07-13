@@ -28,6 +28,7 @@ export interface ConsistencyReport {
   allSupported: boolean;
   claims: ClaimCheck[];
   unsupported: ClaimCheck[];
+  verificationFailed?: boolean;
   /** Raw verifier response, for debugging. */
   raw?: string;
 }
@@ -35,6 +36,9 @@ export interface ConsistencyReport {
 const VERIFIER_SYSTEM_PROMPT = `Ты — верификатор фактов. Твоя задача: проверить, что каждое конкретное утверждение в ответе подтверждено цитатами из источников.
 
 ЧТО ПРОВЕРЯТЬ (факты-кандидаты):
+- утверждения о наличии или отсутствии услуги ("мы делаем", "можно заказать", "доступно")
+- обещания возможностей компании и обязательств перед клиентом
+- условия применимости услуги (тип документа, язык, объём, формат, регион)
 - адреса, номера домов, станции метро
 - телефоны, email, URL
 - цены и числа (рубли, проценты, количества)
@@ -43,7 +47,7 @@ const VERIFIER_SYSTEM_PROMPT = `Ты — верификатор фактов. Т
 - специфические требования ("не заламинирован", "на русском", "с печатью")
 
 ЧТО НЕ ПРОВЕРЯТЬ:
-- общие формулировки без конкретики ("нужно прийти лично")
+- только вежливые вводные и нейтральные связки без бизнес-смысла
 - вопросы пользователю ("уточните у клиента")
 - логические связки и объяснения
 
@@ -63,8 +67,11 @@ export async function verifyAnswer(
   answer: string,
   sourceChunks: string[]
 ): Promise<ConsistencyReport> {
-  if (!answer.trim() || sourceChunks.length === 0) {
+  if (!answer.trim()) {
     return { allSupported: true, claims: [], unsupported: [] };
+  }
+  if (sourceChunks.length === 0) {
+    return { allSupported: false, claims: [], unsupported: [], verificationFailed: true };
   }
 
   const sourcesBlock = sourceChunks
@@ -92,22 +99,23 @@ ${answer}
     })) ?? undefined;
   } catch (err) {
     console.error('[consistency-gate] verifier LLM call failed:', err);
-    // Fail open: don't block answer on verifier failure.
-    return { allSupported: true, claims: [], unsupported: [], raw: String(err) };
+    // Business answers fail closed: the draft can still be shown, but the
+    // caller must require human review when evidence verification is unavailable.
+    return { allSupported: false, claims: [], unsupported: [], verificationFailed: true, raw: String(err) };
   }
 
-  if (!raw) return { allSupported: true, claims: [], unsupported: [], raw: '(empty)' };
+  if (!raw) return { allSupported: false, claims: [], unsupported: [], verificationFailed: true, raw: '(empty)' };
 
   let parsed: { claims?: unknown };
   try {
     parsed = JSON.parse(normalizeJsonResponse(raw));
   } catch (err) {
     console.error('[consistency-gate] failed to parse verifier output:', err, 'raw:', raw.slice(0, 300));
-    return { allSupported: true, claims: [], unsupported: [], raw };
+    return { allSupported: false, claims: [], unsupported: [], verificationFailed: true, raw };
   }
 
   if (!Array.isArray(parsed.claims)) {
-    return { allSupported: true, claims: [], unsupported: [], raw };
+    return { allSupported: false, claims: [], unsupported: [], verificationFailed: true, raw };
   }
 
   const claims: ClaimCheck[] = parsed.claims
@@ -130,6 +138,10 @@ ${answer}
       };
     })
     .filter((c) => c.claim.length > 0);
+
+  if (claims.length === 0) {
+    return { allSupported: false, claims: [], unsupported: [], verificationFailed: true, raw };
+  }
 
   const unsupported = claims.filter((c) => !c.supported);
   return {
