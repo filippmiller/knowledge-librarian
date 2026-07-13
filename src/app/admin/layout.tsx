@@ -11,6 +11,7 @@ const navigation = [
   { name: 'Правила', href: '/admin/rules' },
   { name: 'Вопросы и ответы', href: '/admin/qa' },
   { name: 'Лаборатория бота', href: '/admin/bot-lab' },
+  { name: 'Голосовые правила', href: '/admin/voice-training' },
   { name: 'Вопросы ИИ', href: '/admin/ai-questions' },
   { name: 'Журнал изменений', href: '/admin/knowledge-changes' },
   { name: 'Настройки ИИ', href: '/admin/ai-settings' },

@@ -34,6 +34,8 @@ export interface EnhancedAnswerResult {
     documentTitle?: string;
     quote: string;
     relevanceScore: number;
+    authorityTag?: string;
+    priority?: string;
   }[];
   domainsUsed: string[];
   queryAnalysis: {
@@ -147,6 +149,8 @@ const ENHANCED_ANSWERING_PROMPT = `Ты — ИИ-библиотекарь зна
 2а. **ПРОВЕРЯЙ ГЛАВНОЕ БИЗНЕС-УТВЕРЖДЕНИЕ**: прежде чем писать "мы делаем", "можно заказать" или "услуга доступна", найди прямое подтверждение именно этой возможности в цитатах. Похожая услуга, общая редактура или общий регламент не являются подтверждением.
 
 2б. **НЕ ДОБАВЛЯЙ ЦЕНЫ И СРОКИ, ЕСЛИ ПОЛЬЗОВАТЕЛЬ ИХ НЕ СПРАШИВАЛ**. Даже если они случайно присутствуют в найденном фрагменте, они не относятся к ответу и могут быть динамическими.
+
+2в. Правила с маркером **VOICE_AUTHORITY** подтверждены уполномоченным экспертом и имеют приоритет над обычными правилами в той же области действия. Если два VOICE_AUTHORITY правила противоречат друг другу — не выбирай одно молча, сообщи о конфликте и запроси проверку оператора.
 
 3. **НЕ ОБОБЩАЙ И НЕ ЭКСТРАПОЛИРУЙ**: если в источнике написано "2500₽ за документ" — не добавляй "значит 5000₽ за два"; если написано "нотариус СПб" — не расширяй до "нотариус СПб или ЛО".
 
@@ -335,10 +339,10 @@ function rankByQuestion<T>(
   if (terms.length === 0) return items;
 
   return items
-    .map((item) => ({
-      item,
-      score: scoreText(getText(item), terms) + scoreText(getSummary(item), terms) + getBoost(item),
-    }))
+    .map((item) => {
+      const relevance = scoreText(getText(item), terms) + scoreText(getSummary(item), terms);
+      return { item, score: relevance > 0 ? relevance + getBoost(item) : 0 };
+    })
     .filter(({ score }) => score > 0)
     .sort((a, b) => b.score - a.score)
     .map(({ item }) => item);
@@ -359,6 +363,25 @@ function questionTermOverlap(question: string, candidate: string): number {
   let shared = 0;
   for (const t of qTerms) if (cTerms.has(t)) shared++;
   return shared / Math.min(qTerms.size, cTerms.size);
+}
+
+function getVoiceAuthority(sourceSpan: unknown): { authorityTag?: string; priority?: string; boost: number } {
+  if (!sourceSpan || typeof sourceSpan !== 'object' || Array.isArray(sourceSpan)) return { boost: 0 };
+  const value = sourceSpan as Record<string, unknown>;
+  if (value.authorityTag !== 'VOICE_AUTHORITY' || value.operatorApproved !== true) return { boost: 0 };
+  const priority = typeof value.priority === 'string' ? value.priority : 'HIGH';
+  const boost = priority === 'PRIMARY' ? 40 : priority === 'HIGH' ? 20 : 8;
+  return { authorityTag: 'VOICE_AUTHORITY', priority, boost };
+}
+
+/**
+ * Deterministic backstop for answers that explicitly admit a knowledge gap.
+ * The synthesis model may still open with a confident "да" and only later say
+ * that availability is not confirmed. Such drafts are useful to an operator,
+ * but must never be presented as evidence-complete.
+ */
+function answerSignalsKnowledgeGap(answer: string): boolean {
+  return /(?:в (?:базе знаний|источнике) не указано|не указано,?\s+(?:доступна|можно|есть ли)|не удалось подтвердить|требуется уточнить доступность|уточнения доступности)/iu.test(answer);
 }
 
 /**
@@ -601,7 +624,7 @@ export async function answerQuestionEnhanced(
       ruleCandidates,
       relevanceText,
       (rule) => `${rule.ruleCode} ${rule.title} ${rule.body} ${rule.document?.title ?? ''}`,
-      (rule) => rule.confidence >= 1 ? 2 : 0,
+      (rule) => (rule.confidence >= 1 ? 2 : 0) + getVoiceAuthority(rule.sourceSpan).boost,
       (rule) => rule.title // title^2 field boost — curated summary of the rule
     ).slice(0, 10);
     console.log('[enhanced-answering] Found', rules.length, 'rules from', ruleCandidates.length, 'candidates');
@@ -863,7 +886,9 @@ ${fixList}
   // Clarification is handled by the scenario decision gate upstream.
   const clarificationQuestion: { question: string; options: string[] } | undefined = undefined;
   const requiresHumanReview = Boolean(
-    consistency?.verificationFailed || consistency?.unsupported.length
+    consistency?.verificationFailed ||
+    consistency?.unsupported.length ||
+    answerSignalsKnowledgeGap(answer)
   );
 
   // Build source references from context chunks
@@ -911,12 +936,17 @@ ${fixList}
     .filter((r) => r.documentId != null && contextDocIds.has(r.documentId))
     .sort((a, b) => (docScoreByDocId.get(b.documentId ?? '') ?? 0) - (docScoreByDocId.get(a.documentId ?? '') ?? 0));
   const citationRules = (provenanceRules.length > 0 ? provenanceRules : rules).slice(0, 5);
-  const citations = citationRules.map((r) => ({
-    ruleCode: r.ruleCode,
-    documentTitle: r.document?.title,
-    quote: r.body.slice(0, 200) + (r.body.length > 200 ? '...' : ''),
-    relevanceScore: r.documentId ? (docScoreByDocId.get(r.documentId) ?? 0) : 0,
-  }));
+  const citations = citationRules.map((r) => {
+    const authority = getVoiceAuthority(r.sourceSpan);
+    return {
+      ruleCode: r.ruleCode,
+      documentTitle: r.document?.title,
+      quote: r.body.slice(0, 200) + (r.body.length > 200 ? '...' : ''),
+      relevanceScore: r.documentId ? (docScoreByDocId.get(r.documentId) ?? 0) : 0,
+      authorityTag: authority.authorityTag,
+      priority: authority.priority,
+    };
+  });
 
   const result: EnhancedAnswerResult = {
     answer,
@@ -1282,7 +1312,7 @@ function generateClarificationQuestion(
 
 function buildEnhancedContext(
   chunks: HybridSearchResult[],
-  rules: { ruleCode: string; title: string; body: string }[],
+  rules: { ruleCode: string; title: string; body: string; sourceSpan?: unknown }[],
   qaPairs: { question: string; answer: string }[]
 ): string {
   let context = '';
@@ -1307,7 +1337,11 @@ function buildEnhancedContext(
   if (rules.length > 0) {
     context += '## Правила и регламенты\n';
     for (const rule of rules) {
-      context += `[${rule.ruleCode}] ${rule.title}:\n${rule.body}\n\n`;
+      const authority = getVoiceAuthority(rule.sourceSpan);
+      const marker = authority.authorityTag
+        ? ` [VOICE_AUTHORITY:${authority.priority ?? 'HIGH'}]`
+        : '';
+      context += `[${rule.ruleCode}]${marker} ${rule.title}:\n${rule.body}\n\n`;
     }
   }
 
