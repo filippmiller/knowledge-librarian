@@ -10,6 +10,7 @@ const navigation = [
   { name: 'Предложения доменов', href: '/admin/domain-suggestions' },
   { name: 'Правила', href: '/admin/rules' },
   { name: 'Вопросы и ответы', href: '/admin/qa' },
+  { name: 'Лаборатория бота', href: '/admin/bot-lab' },
   { name: 'Вопросы ИИ', href: '/admin/ai-questions' },
   { name: 'Журнал изменений', href: '/admin/knowledge-changes' },
   { name: 'Настройки ИИ', href: '/admin/ai-settings' },
