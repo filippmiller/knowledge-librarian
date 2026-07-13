@@ -152,6 +152,8 @@ const ENHANCED_ANSWERING_PROMPT = `Ты — ИИ-библиотекарь зна
 
 2в. Правила с маркером **VOICE_AUTHORITY** подтверждены уполномоченным экспертом и имеют приоритет над обычными правилами в той же области действия. Если два VOICE_AUTHORITY правила противоречат друг другу — не выбирай одно молча, сообщи о конфликте и запроси проверку оператора.
 
+2г. Если пользователь спрашивает о нескольких вариантах через «или», проверь и опиши каждый вариант отдельно. Не отвечай «оба варианта», «всё можем» или аналогично, пока в контексте нет отдельного прямого подтверждения для каждого названного варианта.
+
 3. **НЕ ОБОБЩАЙ И НЕ ЭКСТРАПОЛИРУЙ**: если в источнике написано "2500₽ за документ" — не добавляй "значит 5000₽ за два"; если написано "нотариус СПб" — не расширяй до "нотариус СПб или ЛО".
 
 4. **НЕ СМЕШИВАЙ** факты из разных цитат в один: если цитата 1 говорит "Вторник 10-12", а цитата 2 "Четверг 14-16", пиши их раздельно с указанием источника, не склеивай в "Вторник-четверг 10-16".
@@ -382,6 +384,18 @@ function getVoiceAuthority(sourceSpan: unknown): { authorityTag?: string; priori
  */
 function answerSignalsKnowledgeGap(answer: string): boolean {
   return /(?:в (?:базе знаний|источнике) не указано|не указано,?\s+(?:доступна|можно|есть ли)|не удалось подтвердить|требуется уточнить доступность|уточнения доступности)/iu.test(answer);
+}
+
+/**
+ * Composite capability questions are a common source of overclaiming: evidence
+ * for option A gets generalized into "both A and B". Keep such broad answers
+ * in the operator loop even if a model-based verifier misses the extrapolation.
+ */
+function answerSignalsCompositeCapabilityRisk(question: string, answer: string): boolean {
+  const asksCapability = /(?:можете ли|можно ли|делаете ли|предлагаете ли|оказываете ли)/iu.test(question);
+  const hasAlternatives = /\s(?:или|и\s*\/\s*или)\s/iu.test(question);
+  const claimsAll = /(?:оба\s+варианта|все\s+(?:варианты|перечисленные)|можем\s+предложить\s+оба)/iu.test(answer);
+  return asksCapability && hasAlternatives && claimsAll;
 }
 
 /**
@@ -888,7 +902,8 @@ ${fixList}
   const requiresHumanReview = Boolean(
     consistency?.verificationFailed ||
     consistency?.unsupported.length ||
-    answerSignalsKnowledgeGap(answer)
+    answerSignalsKnowledgeGap(answer) ||
+    answerSignalsCompositeCapabilityRisk(question, answer)
   );
 
   // Build source references from context chunks
