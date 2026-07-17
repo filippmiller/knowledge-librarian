@@ -382,6 +382,9 @@ function getQaAuthority(metadata: unknown): { authorityTag?: string; origin?: st
   if (value.authorityTag === 'VOICE_ANSWER_AUTHORITY' || value.origin === 'voice-operator') {
     return { authorityTag: 'VOICE_ANSWER_AUTHORITY', origin: 'voice-operator', boost: 30 };
   }
+  if (value.authorityTag === 'HISTORICAL_ANSWER_AUTHORITY' || value.origin === 'historical-operator') {
+    return { authorityTag: 'HISTORICAL_ANSWER_AUTHORITY', origin: 'historical-operator', boost: 30 };
+  }
   return { boost: 0 };
 }
 

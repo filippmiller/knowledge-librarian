@@ -235,6 +235,9 @@ export default function BotLabPage() {
   const [candidateLoading, setCandidateLoading] = useState(false);
   const [candidateId, setCandidateId] = useState<string | null>(null);
   const [candidateError, setCandidateError] = useState<string | null>(null);
+  const [historicalSaved, setHistoricalSaved] = useState<{ qaPairId: string; reused: boolean } | null>(null);
+  const [historicalLoading, setHistoricalLoading] = useState(false);
+  const [historicalError, setHistoricalError] = useState<string | null>(null);
 
   useEffect(() => {
     async function loadCases() {
@@ -302,6 +305,8 @@ export default function BotLabPage() {
     setCanonicalAnswer(item.answer);
     setCandidateId(null);
     setCandidateError(null);
+    setHistoricalSaved(null);
+    setHistoricalError(null);
   }
 
   function updateQuestion(value: string) {
@@ -391,6 +396,26 @@ export default function BotLabPage() {
     }
   }
 
+  async function saveHistoricalAsCanonical() {
+    if (!selectedCase || historicalLoading) return;
+    setHistoricalLoading(true);
+    setHistoricalError(null);
+    try {
+      const response = await fetch('/api/admin/bot-lab/historical-answers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ caseId: selectedCase.id }),
+      });
+      const data = await response.json() as { qaPairId?: string; reused?: boolean; error?: string };
+      if (!response.ok || !data.qaPairId) throw new Error(data.error || 'Не удалось сохранить эталон');
+      setHistoricalSaved({ qaPairId: data.qaPairId, reused: Boolean(data.reused) });
+    } catch (error) {
+      setHistoricalError(error instanceof Error ? error.message : 'Не удалось сохранить эталон');
+    } finally {
+      setHistoricalLoading(false);
+    }
+  }
+
   if (loadingCases) {
     return (
       <div className="grid min-h-[60vh] place-items-center">
@@ -477,7 +502,24 @@ export default function BotLabPage() {
           <div className="grid gap-4 lg:grid-cols-2">
             <Card className="rounded-3xl border-slate-200/80 bg-white/80 py-0 shadow-sm">
               <CardHeader className="border-b border-slate-100 pb-4"><div className="flex items-center gap-2"><ThumbsUp className="size-4 text-emerald-600" /><CardTitle className="text-sm">Исторический ответ сотрудника</CardTitle></div></CardHeader>
-              <CardContent className="max-h-[430px] overflow-y-auto pb-5 pt-5"><p className="whitespace-pre-wrap text-sm leading-6 text-slate-700">{selectedCase?.answer ?? 'Для собственного вопроса эталон отсутствует.'}</p></CardContent>
+              <CardContent className="max-h-[430px] overflow-y-auto space-y-3 pb-5 pt-5">
+                <p className="whitespace-pre-wrap text-sm leading-6 text-slate-700">{selectedCase?.answer ?? 'Для собственного вопроса эталон отсутствует.'}</p>
+                {selectedCase ? (
+                  <div className="space-y-2">
+                    {historicalError ? <p className="text-xs text-rose-700" role="alert">{historicalError}</p> : null}
+                    {historicalSaved ? (
+                      <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+                        <div className="font-semibold">Сохранено как эталонный ответ</div>
+                        <div className="font-mono text-emerald-700">{historicalSaved.qaPairId}{historicalSaved.reused ? ' (уже существовала)' : ''}</div>
+                      </div>
+                    ) : (
+                      <Button size="sm" onClick={saveHistoricalAsCanonical} disabled={historicalLoading} className="rounded-full bg-emerald-700 text-white hover:bg-emerald-800">
+                        {historicalLoading ? <LoaderCircle className="animate-spin" /> : <CheckCircle2 />} Сделать эталонным ответом
+                      </Button>
+                    )}
+                  </div>
+                ) : null}
+              </CardContent>
             </Card>
             <Card className="rounded-3xl border-slate-800 bg-slate-950 py-0 text-white shadow-elevated">
               <CardHeader className="border-b border-white/10 pb-4"><div className="flex items-center gap-2"><Bot className="size-4 text-cyan-300" /><CardTitle className="text-sm text-white">Текущий ответ бота</CardTitle>{latencyMs !== null ? <span className="ml-auto flex items-center gap-1 text-[10px] text-slate-400"><Clock3 className="size-3" /> {(latencyMs / 1000).toFixed(1)}с</span> : null}</div></CardHeader>
