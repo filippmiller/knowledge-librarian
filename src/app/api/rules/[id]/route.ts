@@ -20,7 +20,6 @@ export async function GET(
         supersedesRule: true,
         supersededBy: true,
         qaPairs: { where: { status: 'ACTIVE' } },
-        changes: { orderBy: { createdAt: 'desc' } },
       },
     });
 

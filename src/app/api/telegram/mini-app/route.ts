@@ -1200,8 +1200,32 @@ export async function POST(request: NextRequest) {
         const recentActivity = await prisma.knowledgeChange.findMany({
           take: 10,
           orderBy: { createdAt: 'desc' },
-          include: { rule: { select: { ruleCode: true, title: true } } },
+          select: {
+            id: true,
+            targetType: true,
+            targetId: true,
+            changeType: true,
+            reason: true,
+            status: true,
+            createdAt: true,
+            approvedBy: true,
+          },
         });
+
+        const ruleTargetIds = recentActivity
+          .filter((a) => a.targetType === 'RULE')
+          .map((a) => a.targetId);
+        const ruleTitles = Object.fromEntries(
+          (await prisma.rule.findMany({
+            where: { id: { in: ruleTargetIds } },
+            select: { id: true, ruleCode: true, title: true },
+          })).map((r) => [r.id, r])
+        );
+
+        const recentActivityWithMeta = recentActivity.map((a) => ({
+          ...a,
+          rule: a.targetType === 'RULE' ? ruleTitles[a.targetId] ?? null : null,
+        }));
 
         // Documents list for filter
         const documents = await prisma.document.findMany({
@@ -1216,7 +1240,7 @@ export async function POST(request: NextRequest) {
           totalQa,
           totalDocs,
           confidence: { high: highConf, medium: mediumConf, low: lowConf },
-          recentActivity,
+          recentActivity: recentActivityWithMeta,
           documents,
         });
       }

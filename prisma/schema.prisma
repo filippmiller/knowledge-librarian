@@ -177,7 +177,6 @@ model Rule {
   supersededBy   Rule[]             @relation("RuleVersions")
   domains        RuleDomain[]
   qaPairs        QAPair[]
-  changes        KnowledgeChange[]  @relation("RuleChanges")
   favorites      UserFavorite[]
   comments       RuleComment[]
   notifications  UserNotification[]
@@ -213,7 +212,6 @@ model QAPair {
   supersedesQa QAPair?           @relation("QAVersions", fields: [supersedesQaId], references: [id])
   supersededBy QAPair[]          @relation("QAVersions")
   domains      QADomain[]
-  changes      KnowledgeChange[] @relation("QAChanges")
 
   @@index([status])
   @@index([documentId])
@@ -321,10 +319,6 @@ model KnowledgeChange {
   status      ChangeStatus     @default(PENDING)
   createdAt   DateTime         @default(now())
   reviewedAt  DateTime?
-
-  // Polymorphic relations
-  rule   Rule?   @relation("RuleChanges", fields: [targetId], references: [id], map: "rule_change_fk")
-  qaPair QAPair? @relation("QAChanges", fields: [targetId], references: [id], map: "qa_change_fk")
 
   @@index([targetType, targetId])
   @@index([status])
