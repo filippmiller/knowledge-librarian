@@ -16,6 +16,7 @@ import { expandQuery, ExpandedQueries, ExtractedEntities, extractEntities } from
 import { classifyScenario, type ScenarioDecision } from '@/lib/knowledge/scenario-classifier';
 import { ancestorsOf } from '@/lib/knowledge/scenarios';
 import { expandAbbreviations, selectKeyTerms } from '@/lib/knowledge/glossary';
+import { polishCanonicalAnswer } from '@/lib/ai/canonical-answer-polisher';
 import { type QAPair } from '@prisma/client';
 import { verifyAnswer, type ConsistencyReport } from '@/lib/ai/consistency-gate';
 
@@ -445,14 +446,24 @@ async function findCanonicalQaOverride(question: string): Promise<QAPair | null>
   }
 }
 
-function buildCanonicalQaResult(
+async function buildCanonicalQaResult(
   question: string,
   qa: QAPair,
   includeDebug: boolean
-): EnhancedAnswerResult {
+): Promise<EnhancedAnswerResult> {
   const authority = getQaAuthority(qa.metadata);
+
+  let polishedAnswer: string;
+  try {
+    const polished = await polishCanonicalAnswer(question, qa.answer);
+    polishedAnswer = polished.polishedAnswer;
+  } catch (error) {
+    console.warn('[enhanced-answering] Failed to polish canonical answer, using raw:', error);
+    polishedAnswer = qa.answer;
+  }
+
   const result: EnhancedAnswerResult = {
-    answer: qa.answer,
+    answer: polishedAnswer,
     confidence: 1.0,
     confidenceLevel: 'high',
     needsClarification: false,
@@ -520,7 +531,7 @@ export async function answerQuestionEnhanced(
   const canonicalQa = await findCanonicalQaOverride(question);
   if (canonicalQa) {
     console.log('[enhanced-answering] Canonical QA override matched:', canonicalQa.id);
-    return buildCanonicalQaResult(question, canonicalQa, includeDebug);
+    return await buildCanonicalQaResult(question, canonicalQa, includeDebug);
   }
 // Short-circuit: if the gate needs clarification, skip retrieval entirely
   // and return a structured clarification response. The mini-app renders this
