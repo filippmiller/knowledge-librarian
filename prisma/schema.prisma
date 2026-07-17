@@ -507,16 +507,18 @@ model TelegramUser {
 // ============================================
 
 model AISettings {
-  id             String    @id @default(cuid())
-  provider       String    @default("openai")
-  apiKey         String // Зашифрованный ключ
-  model          String    @default("gpt-4o")
-  embeddingModel String    @default("text-embedding-3-small")
-  isActive       Boolean   @default(true)
-  lastVerified   DateTime?
-  lastError      String?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  id                      String    @id @default(cuid())
+  provider                String    @default("openai")
+  apiKey                  String // Зашифрованный ключ
+  model                   String    @default("gpt-4o")
+  embeddingModel          String    @default("text-embedding-3-small")
+  isActive                Boolean   @default(true)
+  lastVerified            DateTime?
+  lastError               String?
+  autoAnswerEnabled       Boolean   @default(false)
+  autoAnswerMinConfidence Float     @default(0.7)
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
 }
 
 // ============================================

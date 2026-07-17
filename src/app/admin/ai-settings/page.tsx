@@ -23,6 +23,8 @@ interface AISettings {
   lastVerified: string | null;
   lastError: string | null;
   isActive: boolean;
+  autoAnswerEnabled: boolean;
+  autoAnswerMinConfidence: number;
 }
 
 export default function AISettingsPage() {
@@ -33,6 +35,8 @@ export default function AISettingsPage() {
   const [newApiKey, setNewApiKey] = useState('');
   const [selectedModel, setSelectedModel] = useState('gpt-4o');
   const [selectedEmbeddingModel, setSelectedEmbeddingModel] = useState('text-embedding-3-small');
+  const [autoAnswerEnabled, setAutoAnswerEnabled] = useState(false);
+  const [autoAnswerMinConfidence, setAutoAnswerMinConfidence] = useState(0.7);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   async function fetchSettings() {
@@ -42,6 +46,10 @@ export default function AISettingsPage() {
       setSettings(data);
       setSelectedModel(data.model || 'gpt-4o');
       setSelectedEmbeddingModel(data.embeddingModel || 'text-embedding-3-small');
+      setAutoAnswerEnabled(Boolean(data.autoAnswerEnabled));
+      setAutoAnswerMinConfidence(
+        typeof data.autoAnswerMinConfidence === 'number' ? data.autoAnswerMinConfidence : 0.7
+      );
     } catch (error) {
       console.error('Error fetching AI settings:', error);
       setMessage({ type: 'error', text: 'Не удалось загрузить настройки' });
@@ -59,9 +67,11 @@ export default function AISettingsPage() {
     setMessage(null);
 
     try {
-      const body: Record<string, string> = {
+      const body: Record<string, string | boolean | number> = {
         model: selectedModel,
         embeddingModel: selectedEmbeddingModel,
+        autoAnswerEnabled,
+        autoAnswerMinConfidence,
       };
 
       if (newApiKey) {
@@ -262,6 +272,70 @@ export default function AISettingsPage() {
             <Button onClick={handleSave} disabled={saving}>
               {saving ? 'Сохранение...' : 'Сохранить'}
             </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Auto-answer Settings */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Автоматические ответы бота</CardTitle>
+          <CardDescription>
+            Режим, в котором бот сам отвечает клиентам в Telegram, если уверенность ответа достаточно высокая.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <div className="flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 p-4">
+            <div className="space-y-1">
+              <div className="text-sm font-medium text-amber-900">Включить автоответ</div>
+              <div className="text-xs text-amber-700">
+                Бот будет писать клиентам самостоятельно. Сомнительные вопросы всё равно передадутся оператору.
+              </div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={autoAnswerEnabled}
+              onClick={() => setAutoAnswerEnabled((value) => !value)}
+              className={`relative inline-flex h-7 w-12 items-center rounded-full transition ${
+                autoAnswerEnabled ? 'bg-emerald-600' : 'bg-slate-300'
+              }`}
+            >
+              <span
+                className={`inline-block size-5 rounded-full bg-white transition-transform ${
+                  autoAnswerEnabled ? 'translate-x-6' : 'translate-x-1'
+                }`}
+              />
+            </button>
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium">Минимальная уверенность для автоответа</label>
+              <span className="text-sm font-mono">{Math.round(autoAnswerMinConfidence * 100)}%</span>
+            </div>
+            <input
+              type="range"
+              min={0.5}
+              max={0.95}
+              step={0.05}
+              value={autoAnswerMinConfidence}
+              onChange={(e) => setAutoAnswerMinConfidence(Number.parseFloat(e.target.value))}
+              className="w-full accent-slate-900"
+            />
+            <p className="text-xs text-gray-500">
+              Рекомендуется 70%. Выше — консервативнее, больше вопросов пойдёт оператору. Ниже — больше автоответов, но выше риск ошибки.
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 space-y-1">
+            <p>Бот не будет отвечать автоматически, если:</p>
+            <ul className="list-disc list-inside space-y-0.5">
+              <li>ответ требует ручной проверки,</li>
+              <li>ответ основан на общих знаниях ИИ,</li>
+              <li>уверенность ниже порога,</li>
+              <li>нужно уточнение у клиента (кроме режима автоответа, где уточнение отправляется).</li>
+            </ul>
           </div>
         </CardContent>
       </Card>

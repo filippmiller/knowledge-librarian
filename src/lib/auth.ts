@@ -2,13 +2,17 @@ import { NextRequest, NextResponse } from 'next/server';
 import { compare, hash } from 'bcryptjs';
 import type { UserRole } from '@prisma/client';
 import { prisma } from './db';
+import { getSession } from './session';
 
 export interface AuthenticatedUser {
+  userId: string;
   username: string;
   role: UserRole;
 }
 
-export function getBasicAuthCredentials(request: NextRequest): { username: string; password: string } | null {
+export function getBasicAuthCredentials(
+  request: NextRequest
+): { username: string; password: string } | null {
   const authHeader = request.headers.get('authorization');
 
   if (!authHeader || !authHeader.startsWith('Basic ')) {
@@ -22,43 +26,70 @@ export function getBasicAuthCredentials(request: NextRequest): { username: strin
   return { username, password };
 }
 
-export async function validateUser(username: string, password: string): Promise<boolean> {
+export async function validateUser(
+  username: string,
+  password: string
+): Promise<{ id: string; username: string; role: UserRole } | null> {
   try {
     const user = await prisma.user.findUnique({
       where: { username: username.toLowerCase() },
     });
 
     if (!user) {
-      return false;
+      return null;
     }
 
     const isValid = await compare(password, user.passwordHash);
 
     if (isValid) {
-      // Update last login time
       await prisma.user.update({
         where: { id: user.id },
         data: { lastLoginAt: new Date() },
       });
     }
 
-    return isValid;
+    return isValid
+      ? { id: user.id, username: user.username, role: user.role }
+      : null;
   } catch (error) {
     console.error('Auth validation error:', error);
-    return false;
+    return null;
   }
 }
 
-export async function requireAdminAuth(request: NextRequest): Promise<NextResponse | null> {
-  const credentials = getBasicAuthCredentials(request);
-
-  if (!credentials) {
-    return createAuthResponse();
+async function resolveUser(
+  request: NextRequest
+): Promise<AuthenticatedUser | null> {
+  // Prefer cookie-based session (normal browser flow).
+  const session = await getSession(request);
+  if (session) {
+    return {
+      userId: session.userId,
+      username: session.username,
+      role: session.role,
+    };
   }
 
-  const isValid = await validateUser(credentials.username, credentials.password);
+  // Fall back to Basic Auth for scripts/integrations that already use it.
+  const credentials = getBasicAuthCredentials(request);
+  if (!credentials) return null;
 
-  if (!isValid) {
+  const user = await validateUser(credentials.username, credentials.password);
+  return user
+    ? { userId: user.id, username: user.username, role: user.role }
+    : null;
+}
+
+/**
+ * Require a valid admin session or Basic Auth credentials for API routes.
+ * Returns a JSON 401 response (no browser prompt) on failure.
+ */
+export async function requireAdminAuth(
+  request: NextRequest
+): Promise<NextResponse | null> {
+  const user = await resolveUser(request);
+
+  if (!user) {
     return createAuthResponse();
   }
 
@@ -66,37 +97,20 @@ export async function requireAdminAuth(request: NextRequest): Promise<NextRespon
 }
 
 /**
- * Validate Basic-Auth credentials and return the authenticated principal
- * (username + role) WITHOUT mutating lastLoginAt. Use for authorization
- * decisions where the role matters or the acting user must be recorded — e.g.
- * who may write to the knowledge base, and whose name to stamp as approver.
- * Returns null when the header is missing or the credentials are invalid.
+ * Return the authenticated principal (user id + username + role) for
+ * authorization decisions and audit logging.
  */
 export async function getAuthenticatedUser(
   request: NextRequest
 ): Promise<AuthenticatedUser | null> {
-  const credentials = getBasicAuthCredentials(request);
-  if (!credentials) return null;
-  try {
-    const user = await prisma.user.findUnique({
-      where: { username: credentials.username.toLowerCase() },
-    });
-    if (!user) return null;
-    const ok = await compare(credentials.password, user.passwordHash);
-    return ok ? { username: user.username, role: user.role } : null;
-  } catch (error) {
-    console.error('Auth principal lookup error:', error);
-    return null;
-  }
+  return resolveUser(request);
 }
 
 export function createAuthResponse(): NextResponse {
-  return new NextResponse('Unauthorized', {
-    status: 401,
-    headers: {
-      'WWW-Authenticate': 'Basic realm="Admin Area"',
-    },
-  });
+  return NextResponse.json(
+    { error: 'Unauthorized' },
+    { status: 401 }
+  );
 }
 
 // Utility function to hash passwords (for seeding/user creation)

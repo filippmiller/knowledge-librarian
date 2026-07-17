@@ -17,6 +17,12 @@ import { answerQuestionEnhanced, type EnhancedAnswerResult } from '@/lib/ai/enha
 import { getCachedAnswer, storeCachedAnswer } from '@/lib/ai/answer-cache';
 import { looksLikeClarificationReply } from '@/lib/ai/answer-policy';
 import { escalateUnconvincingAIAnswer } from './ai-escalation';
+import {
+  shouldAutoAnswer,
+  shouldSendClarification,
+  getAutoAnswerSettings,
+  escalateToHuman,
+} from './auto-answer-policy';
 import { getOrCreateSession, saveChatMessage } from '@/lib/ai/answering-engine';
 import prisma from '@/lib/db';
 
@@ -579,6 +585,19 @@ export async function handleQuestion(message: TelegramMessage, user: TelegramUse
     const cached = resolvingClarification ? null : getCachedAnswer(question);
     const result = cached?.result ?? await answerQuestionEnhanced(effectiveQuestion, session.id);
     if (!cached && !resolvingClarification) storeCachedAnswer(question, result);
+
+    // Auto-answer policy: in auto-answer mode we send clarifications and
+    // high-confidence answers automatically; everything else goes to a human.
+    const autoAnswerSettings = await getAutoAnswerSettings();
+    const canAutoAnswer = autoAnswerSettings.enabled;
+
+    if (canAutoAnswer && shouldSendClarification(result)) {
+      // Clarification is a safe interaction, not a factual claim.
+    } else if (!shouldAutoAnswer(result, autoAnswerSettings)) {
+      await escalateToHuman(chatId, effectiveQuestion, result, user.telegramId);
+      return;
+    }
+
     void escalateUnconvincingAIAnswer({
       question: effectiveQuestion,
       result,

@@ -376,6 +376,15 @@ function getVoiceAuthority(sourceSpan: unknown): { authorityTag?: string; priori
   return { authorityTag: 'VOICE_AUTHORITY', priority, boost };
 }
 
+function getQaAuthority(metadata: unknown): { authorityTag?: string; origin?: string; boost: number } {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return { boost: 0 };
+  const value = metadata as Record<string, unknown>;
+  if (value.authorityTag === 'VOICE_ANSWER_AUTHORITY' || value.origin === 'voice-operator') {
+    return { authorityTag: 'VOICE_ANSWER_AUTHORITY', origin: 'voice-operator', boost: 30 };
+  }
+  return { boost: 0 };
+}
+
 /**
  * Deterministic backstop for answers that explicitly admit a knowledge gap.
  * The synthesis model may still open with a confident "да" and only later say
@@ -685,7 +694,7 @@ export async function answerQuestionEnhanced(
       qaCandidates,
       relevanceText,
       (qa) => `${qa.question} ${qa.answer}`,
-      () => 0,
+      (qa) => getQaAuthority(qa.metadata).boost,
       (qa) => qa.question // question^2 field boost — the QAPair's curated summary
     ).slice(0, 5);
     console.log('[enhanced-answering] Found', qaPairs.length, 'QA pairs from', qaCandidates.length, 'candidates');
@@ -702,7 +711,14 @@ export async function answerQuestionEnhanced(
   const bestQaMatch = qaPairs.length > 0
     ? Math.max(...qaPairs.map((qa) => questionTermOverlap(question, qa.question)))
     : 0;
-  const hasStrongQaMatch = bestQaMatch >= 0.7;
+  const bestAuthorityQaMatch = qaPairs.length > 0
+    ? Math.max(
+        ...qaPairs.map((qa) =>
+          getQaAuthority(qa.metadata).boost > 0 ? questionTermOverlap(question, qa.question) : 0
+        )
+      )
+    : 0;
+  const hasStrongQaMatch = bestQaMatch >= 0.7 || bestAuthorityQaMatch >= 0.6;
 
   // Step 7: Calculate overall confidence.
   // Primary signal: best SEMANTIC similarity of the retrieved chunks (RRF rank

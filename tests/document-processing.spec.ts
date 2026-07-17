@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { login } from './helpers/auth';
 
 test.skip(
   !process.env.RUN_PRODUCTION_MUTATION_TESTS,
@@ -6,6 +7,10 @@ test.skip(
 );
 
 test.describe('Document Processing', () => {
+  test.beforeEach(async ({ page }) => {
+    await login(page);
+  });
+
   test('should upload document and navigate to processing page', async ({ page }) => {
     // Navigate to documents page
     await page.goto('/admin/documents');

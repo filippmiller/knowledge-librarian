@@ -1,29 +1,37 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { verifySessionToken, SESSION_COOKIE } from '@/lib/session';
 
 /**
- * Middleware to protect admin pages with HTTP Basic Auth.
- *
- * When the browser receives a 401 with WWW-Authenticate: Basic,
- * it prompts for credentials and caches them for the domain.
- * All subsequent requests (including fetch() from JS) will
- * automatically include the cached Authorization header.
+ * Middleware protects /admin pages with cookie-based sessions.
+ * Unauthenticated visitors are redirected to /login.
+ * Already-authenticated visitors hitting /login are sent to /admin.
  */
-export function middleware(request: NextRequest) {
-  const authHeader = request.headers.get('authorization');
+export async function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+  const token = request.cookies.get(SESSION_COOKIE)?.value;
+  const session = token ? await verifySessionToken(token) : null;
+  const isAuthenticated = Boolean(session);
 
-  if (!authHeader || !authHeader.startsWith('Basic ')) {
-    return new NextResponse('Unauthorized', {
-      status: 401,
-      headers: {
-        'WWW-Authenticate': 'Basic realm="Admin Area"',
-      },
-    });
+  // Redirect logged-in users away from the login page.
+  if (pathname === '/login' || pathname.startsWith('/login/')) {
+    if (isAuthenticated) {
+      return NextResponse.redirect(new URL('/admin', request.url));
+    }
+    return NextResponse.next();
   }
 
-  // Let the request through - API routes will validate the actual credentials
+  // Protect admin area.
+  if (pathname === '/admin' || pathname.startsWith('/admin/')) {
+    if (!isAuthenticated) {
+      const loginUrl = new URL('/login', request.url);
+      loginUrl.searchParams.set('callbackUrl', request.nextUrl.pathname + request.nextUrl.search);
+      return NextResponse.redirect(loginUrl);
+    }
+  }
+
   return NextResponse.next();
 }
 
 export const config = {
-  matcher: ['/admin/:path*'],
+  matcher: ['/admin/:path*', '/login', '/login/:path*'],
 };

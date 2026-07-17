@@ -1,8 +1,10 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { cn } from '@/lib/utils';
+import { Button } from '@/components/ui/button';
+import { LogOut } from 'lucide-react';
 
 const navigation = [
   { name: 'Документы', href: '/admin/documents' },
@@ -23,6 +25,17 @@ export default function AdminLayout({
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
+  const router = useRouter();
+
+  async function handleLogout() {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+      router.push('/login');
+      router.refresh();
+    } catch (error) {
+      console.error('Logout failed:', error);
+    }
+  }
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-hero">
@@ -33,12 +46,18 @@ export default function AdminLayout({
             <Link href="/admin" className="font-display text-lg font-semibold text-slate-900">
               Библиотека знаний
             </Link>
-            <Link
-              href="/playground"
-              className="rounded-full border border-slate-200/70 bg-white/80 px-4 py-2 text-sm text-slate-600 transition hover:bg-white hover:text-slate-900"
-            >
-              Песочница
-            </Link>
+            <div className="flex items-center gap-3">
+              <Link
+                href="/playground"
+                className="rounded-full border border-slate-200/70 bg-white/80 px-4 py-2 text-sm text-slate-600 transition hover:bg-white hover:text-slate-900"
+              >
+                Песочница
+              </Link>
+              <Button                variant="ghost"                size="sm"                onClick={handleLogout}                className="gap-2 text-slate-600 hover:text-slate-900"              >
+                <LogOut className="h-4 w-4" />
+                Выйти
+              </Button>
+            </div>
           </div>
         </header>
 

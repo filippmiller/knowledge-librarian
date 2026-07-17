@@ -28,6 +28,12 @@ import {
 } from '@/lib/ai/enhanced-answering-engine';
 import { sendMessage, sendInlineKeyboard } from './telegram-api';
 import { formatAnswerResponse } from './commands';
+import {
+  shouldAutoAnswer,
+  shouldSendClarification,
+  getAutoAnswerSettings,
+  escalateToHuman,
+} from './auto-answer-policy';
 import type { TelegramUserInfo } from './access-control';
 
 type ClarificationMeta = {
@@ -106,6 +112,16 @@ export async function handleScenarioCallback(
   const effectiveQuestion = await buildClarificationQuery(session.id, original, originalAt);
 
   const result = await answerQuestionEnhanced(effectiveQuestion, session.id);
+
+  const autoAnswerSettings = await getAutoAnswerSettings();
+  const canAutoAnswer = autoAnswerSettings.enabled;
+
+  if (canAutoAnswer && shouldSendClarification(result)) {
+    // Clarification is a safe interaction, not a factual claim.
+  } else if (!shouldAutoAnswer(result, autoAnswerSettings)) {
+    await escalateToHuman(chatId, effectiveQuestion, result, telegramId);
+    return;
+  }
 
   // Persist ASSISTANT with the same anchor threaded forward so the next
   // click (if any) still has the original-question timestamp to rebuild

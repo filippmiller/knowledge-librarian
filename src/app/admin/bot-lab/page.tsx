@@ -30,6 +30,7 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
 import { VoiceRuleCapture } from '@/components/bot-lab/voice-rule-capture';
+import { VoiceAnswerCapture } from '@/components/bot-lab/voice-answer-capture';
 
 interface BotCase {
   id: string;
@@ -499,6 +500,10 @@ export default function BotLabPage() {
                 </div>
               </CardContent>
             </Card>
+          ) : null}
+
+          {selectedCase ? (
+            <VoiceAnswerCapture question={question} caseId={evaluationCase?.id ?? null} />
           ) : null}
 
           <VoiceRuleCapture question={question} caseId={evaluationCase?.id ?? null} />

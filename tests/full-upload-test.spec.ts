@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import path from 'path';
+import { login } from './helpers/auth';
 
-const adminUser = process.env.ADMIN_USER || 'filipp';
 const adminPassword = process.env.ADMIN_PASSWORD;
 
 test.skip(
@@ -17,10 +17,6 @@ test.skip(
 test.describe('Full Document Processing Test', () => {
   test.use({
     baseURL: 'https://avrora-library-production.up.railway.app',
-    httpCredentials: {
-      username: adminUser,
-      password: adminPassword ?? '',
-    },
   });
 
   test('Upload, process, and verify knowledge extraction', async ({ page }) => {
@@ -29,7 +25,7 @@ test.describe('Full Document Processing Test', () => {
     // Track all network requests and responses
     const failedRequests: string[] = [];
     const serverErrors: Array<{ url: string; status: number; text: string }> = [];
-    
+
     page.on('requestfailed', request => {
       const failure = `${request.method()} ${request.url()} - ${request.failure()?.errorText}`;
       failedRequests.push(failure);
@@ -39,12 +35,12 @@ test.describe('Full Document Processing Test', () => {
     page.on('response', async response => {
       const url = response.url();
       const status = response.status();
-      
+
       // Log SSE stream events
       if (url.includes('/process-stream')) {
         console.log(`[SSE Response]: ${status} for ${url}`);
       }
-      
+
       // Capture server errors
       if (status >= 500) {
         try {
@@ -56,7 +52,7 @@ test.describe('Full Document Processing Test', () => {
           console.log(`[Server Error ${status}]: ${url} (couldn't read body)`);
         }
       }
-      
+
       // Capture OOM or memory errors
       if (status === 429 || status === 503) {
         console.log(`⚠️ [Resource Limit?]: ${status} on ${url}`);
@@ -67,22 +63,26 @@ test.describe('Full Document Processing Test', () => {
     page.on('console', msg => {
       const type = msg.type();
       const text = msg.text();
-      
+
       // Always log errors and warnings
       if (type === 'error' || type === 'warning') {
         console.log(`[Console ${type}]: ${text}`);
       }
-      
+
       // Log processing progress
       if (text.includes('Phase') || text.includes('batch') || text.includes('Batch')) {
         console.log(`[Console log]: ${text}`);
       }
-      
+
       // Log OOM indicators
       if (text.toLowerCase().includes('memory') || text.toLowerCase().includes('oom')) {
         console.log(`🔴 [Memory Issue]: ${text}`);
       }
     });
+
+    // Step 0: Log in
+    console.log('\n=== STEP 0: Log In ===');
+    await login(page);
 
     // Step 1: Navigate to documents page
     console.log('\n=== STEP 1: Navigate to Documents ===');
@@ -95,17 +95,17 @@ test.describe('Full Document Processing Test', () => {
     console.log('\n=== STEP 2: Upload Document ===');
     const sampleDocPath = path.resolve(__dirname, '../sample/Инструкция по услугам Олега.docx');
     console.log('Uploading:', sampleDocPath);
-    
+
     const fileInput = page.locator('input[type="file"]');
     await fileInput.setInputFiles(sampleDocPath);
-    
+
     // Wait for upload response
     await page.waitForTimeout(3000);
     console.log('Document uploaded, waiting for processing dialog...');
 
     // Step 3: Wait for processing terminal to appear
     console.log('\n=== STEP 3: Monitor Processing ===');
-    
+
     // Wait for Librarian Terminal to appear (modal with processing)
     const terminalSelector = 'text=LIBRARIAN AI TERMINAL';
     try {
@@ -144,14 +144,14 @@ test.describe('Full Document Processing Test', () => {
       processingCompleted = true;
     } catch {
       console.log('⚠️ Completion status not found within timeout');
-      
+
       // Check for error messages in the UI
       const errorText = await page.locator('text=/error|ошибка|failed/i').first().textContent().catch(() => null);
       if (errorText) {
         console.log(`🔴 Error found in UI: ${errorText}`);
       }
     }
-    
+
     await page.screenshot({ path: 'test-results/full-test-03-completion.png' });
 
     // Report network issues
@@ -159,7 +159,7 @@ test.describe('Full Document Processing Test', () => {
       console.log('\n🔴 Failed Requests:');
       failedRequests.forEach(req => console.log(`  - ${req}`));
     }
-    
+
     if (serverErrors.length > 0) {
       console.log('\n🔴 Server Errors:');
       serverErrors.forEach(err => {
@@ -167,7 +167,7 @@ test.describe('Full Document Processing Test', () => {
         console.log(`    ${err.text.slice(0, 200)}`);
       });
     }
-    
+
     if (!processingCompleted) {
       console.log('\n⚠️ Processing did not complete - check Railway logs for OOM or timeout');
       // Continue test to capture current state
@@ -194,7 +194,7 @@ test.describe('Full Document Processing Test', () => {
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(2000);
     await page.screenshot({ path: 'test-results/full-test-05-rules.png' });
-    
+
     const rulesCount = await page.locator('table tbody tr').count();
     console.log(`Found ${rulesCount} rules extracted`);
 
@@ -204,7 +204,7 @@ test.describe('Full Document Processing Test', () => {
     await page.waitForLoadState('networkidle');
     await page.waitForTimeout(2000);
     await page.screenshot({ path: 'test-results/full-test-06-qa.png' });
-    
+
     const qaCount = await page.locator('table tbody tr, .qa-item, [class*="qa"]').count();
     console.log(`Found ${qaCount} Q&A pairs extracted`);
 
@@ -225,13 +225,13 @@ test.describe('Full Document Processing Test', () => {
     console.log(`Failed requests: ${failedRequests.length}`);
     console.log(`Server errors: ${serverErrors.length}`);
     console.log(`Processing completed: ${processingCompleted ? '✅ YES' : '❌ NO'}`);
-    
+
     // Assertions
     if (!processingCompleted) {
       console.log('\n⚠️ WARNING: Processing incomplete - likely OOM or timeout on Railway');
       console.log('Check Railway logs: https://railway.app/project/<your-project>/deployments');
     }
-    
+
     expect(processingCompleted).toBe(true);
     expect(rulesCount).toBeGreaterThan(0);
   });

@@ -23,6 +23,8 @@ export async function GET(request: NextRequest): Promise<Response> {
         lastVerified: null,
         lastError: null,
         isActive: false,
+        autoAnswerEnabled: false,
+        autoAnswerMinConfidence: 0.7,
       });
     }
 
@@ -45,6 +47,8 @@ export async function GET(request: NextRequest): Promise<Response> {
       lastVerified: settings.lastVerified,
       lastError: settings.lastError,
       isActive: settings.isActive,
+      autoAnswerEnabled: settings.autoAnswerEnabled,
+      autoAnswerMinConfidence: settings.autoAnswerMinConfidence,
     });
   } catch (error) {
     console.error('Error fetching AI settings:', error);
@@ -62,7 +66,7 @@ export async function POST(request: NextRequest): Promise<Response> {
 
   try {
     const body = await request.json();
-    const { apiKey, model, embeddingModel } = body;
+    const { apiKey, model, embeddingModel, autoAnswerEnabled, autoAnswerMinConfidence } = body;
 
     // Validate API key format
     if (apiKey && !apiKey.startsWith('sk-')) {
@@ -79,6 +83,14 @@ export async function POST(request: NextRequest): Promise<Response> {
 
     const encryptedKey = apiKey ? encrypt(apiKey) : undefined;
 
+    const autoAnswerData: Record<string, unknown> = {};
+    if (typeof autoAnswerEnabled === 'boolean') {
+      autoAnswerData.autoAnswerEnabled = autoAnswerEnabled;
+    }
+    if (typeof autoAnswerMinConfidence === 'number') {
+      autoAnswerData.autoAnswerMinConfidence = Math.max(0, Math.min(1, autoAnswerMinConfidence));
+    }
+
     if (existing) {
       // Update existing settings
       const updated = await prisma.aISettings.update({
@@ -87,6 +99,7 @@ export async function POST(request: NextRequest): Promise<Response> {
           ...(encryptedKey && { apiKey: encryptedKey }),
           ...(model && { model }),
           ...(embeddingModel && { embeddingModel }),
+          ...autoAnswerData,
           lastError: null,
         },
       });
@@ -112,6 +125,10 @@ export async function POST(request: NextRequest): Promise<Response> {
           model: model || 'gpt-4o',
           embeddingModel: embeddingModel || 'text-embedding-3-small',
           isActive: true,
+          ...(typeof autoAnswerEnabled === 'boolean' && { autoAnswerEnabled }),
+          ...(typeof autoAnswerMinConfidence === 'number' && {
+            autoAnswerMinConfidence: Math.max(0, Math.min(1, autoAnswerMinConfidence)),
+          }),
         },
       });
 

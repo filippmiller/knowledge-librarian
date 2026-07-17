@@ -1,6 +1,10 @@
 import { test, expect } from '@playwright/test';
+import { login } from './helpers/auth';
 
 test.describe('Admin Dashboard', () => {
+  test.beforeEach(async ({ page }) => {
+    await login(page);
+  });
 
   test('should load admin dashboard with authentication', async ({ page }) => {
     await page.goto('/admin');
@@ -65,10 +69,12 @@ test.describe('Admin Dashboard', () => {
     // Should load playground page (Russian)
     await expect(page.getByText('Песочница знаний')).toBeVisible();
   });
-
 });
 
 test.describe('Rules Page Functionality', () => {
+  test.beforeEach(async ({ page }) => {
+    await login(page);
+  });
 
   test('should filter rules by status', async ({ page }) => {
     await page.goto('/admin/rules');
@@ -85,10 +91,12 @@ test.describe('Rules Page Functionality', () => {
       await expect(filterDropdown).toBeVisible();
     }
   });
-
 });
 
 test.describe('Documents Page Functionality', () => {
+  test.beforeEach(async ({ page }) => {
+    await login(page);
+  });
 
   test('should have working file upload area', async ({ page }) => {
     await page.goto('/admin/documents');
@@ -104,5 +112,4 @@ test.describe('Documents Page Functionality', () => {
     const acceptAttr = await fileInput.getAttribute('accept');
     console.log('Accepted file types:', acceptAttr);
   });
-
 });

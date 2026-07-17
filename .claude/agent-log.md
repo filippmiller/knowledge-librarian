@@ -9,6 +9,94 @@ Each entry tracks: timestamp, agent session, functionality area, files changed, 
 
 ---
 
+## [2026-06-06 16:00] — Fix isBureauTopic Unicode bug + add migration terms + 18/20 test pass
+
+**Area:** AI/Answering Engine / Knowledge Base Quality
+**Type:** bugfix
+
+### Files Changed
+- `src/lib/ai/enhanced-answering-engine.ts` — replaced BUREAU_TOPIC_PATTERN with BUREAU_TOPIC_PATTERN_CI (/iu flags, no normalizeRussianText); added migration terms (внж, рвп, миграц, вид на жительств, etc.); removed diagnostic console.log
+
+### Functions/Symbols Modified
+- `BUREAU_TOPIC_PATTERN` — deleted (replaced by BUREAU_TOPIC_PATTERN_CI)
+- `BUREAU_TOPIC_PATTERN_CI` — new (RegExp with /iu flags on raw question)
+- `isBureauTopic()` — modified (uses BUREAU_TOPIC_PATTERN_CI, tests original question without normalization)
+
+### Database Tables
+- `Rule` — 80 rows updated (Nalivayko title prefix, applied prev session via API)
+
+### Summary
+20-question production test showed 15/20 passing with migration questions (ВНЖ, РВП, вид на жительство) all returning 0% confidence. Root cause: `normalizeRussianText().toLowerCase()` on Alpine Linux Node 20 was producing U+FFFD replacement characters for all Cyrillic, causing `isBureauTopic()` to always return false. Fixed by replacing the Cyrillic literal regex + normalization approach with a `new RegExp(pattern, 'iu')` that tests the original question directly. Also added migration-domain terms that were missing from the pattern. Final score: 18/20 (2 remaining failures are legitimate KB gaps — no German/French price data in uploaded documents).
+
+### Session Notes
+→ `.claude/sessions/2026-06-06-160000.md`
+
+---
+
+## [2026-06-06 14:00] — Process 5 new .docx documents + fix 3 extraction bugs
+
+**Area:** Document Processing / AI Extraction / Knowledge Base Quality
+**Type:** bugfix
+
+### Files Changed
+- `src/lib/ai/knowledge-extractor-stream.ts` — added ПРАЙС-ЛИСТЫ section with КРИТИЧЕСКОЕ/ЗАПРЕЩЕНО/ОБЯЗАТЕЛЬНО markers + JSON example for price table consolidation; added common abbreviation exclusions
+- `src/lib/document-processing/extraction-lint.ts` — fixed hardFacts(): removed whitespace normalization (`replace(/\s+/g, '')`), now uses `\b\d{3,}\b` directly on raw text
+- `src/lib/document-processing/commit.ts` — added empty QA pair guard (skip if question/answer is blank)
+
+### Functions/Symbols Modified
+- `hardFacts()` — modified (broken whitespace normalization removed)
+- `commitDocumentKnowledge()` — modified (empty QA pair guard added)
+- `streamKnowledgeExtraction()` — modified (price table prompt section added)
+
+### Database Tables
+- `Rule` — 513 new rows (5 documents committed)
+- `QAPair` — 128 new rows
+- `DocChunk` — 53 new rows
+- `Document` — 5 rows status → COMPLETED
+
+### Summary
+User uploaded 5 new .docx documents (price lists, apostille guide, Q&A reference, migration instruction). Processing under manual control revealed 3 bugs: (1) price table granularity — LLM creating one rule per table cell (5× too many); fixed with explicit КРИТИЧЕСКОЕ prompt section + JSON example after first soft attempt was ignored. (2) lint hardFacts() false positives — whitespace normalization concatenated adjacent prices causing every price to appear "hallucinated"; fixed by removing normalization entirely and using `\b` word boundaries. (3) empty QA pair crash — LLM emitted `question: ""`, Prisma NOT NULL violated; fixed with trim() guard. All 5 documents now COMPLETED in production with 0 blocking issues.
+
+### Session Notes
+→ `.claude/sessions/2026-06-06-140000.md`
+
+---
+
+## [2026-06-06 12:00] — Fix extraction engine resilience + fix 7-build deploy break + commit stale docs
+
+**Area:** Document Processing / Deployment / Knowledge Base
+**Type:** bugfix
+
+### Files Changed
+- `src/lib/ai/knowledge-extractor-stream.ts` — batch parse failure: throw → skip+warn; added `batch_skipped` event type
+- `src/app/api/documents/[id]/route.ts` — reset/retry actions now set `retryCount: 0`
+- `src/app/api/documents/[id]/process-stream/route.ts` — `isFatalError` narrowed; batch_skipped surfaced in terminal
+- `src/lib/crypto.ts` — ENCRYPTION_KEY validation deferred to `getKey()` (fixes Docker build break since June 4)
+- `src/lib/document-processing/commit.ts` — `autoVerifyPending` option; null-safe secondaryDomainSlugs; better empty-staged handling
+- `src/app/api/documents/[id]/commit/route.ts` — accept `autoVerifyPending`/`replaceExisting` from request body
+
+### Functions/Symbols Modified
+- `streamKnowledgeExtraction()` — modified (batch skip instead of throw)
+- `isFatalError()` — modified (narrowed to permanent failures only)
+- `getKey()` in crypto.ts — modified (contains ENCRYPTION_KEY check now)
+- `commitDocumentKnowledge()` — modified (autoVerifyPending + null safety)
+- PATCH reset/retry handlers — modified (retryCount reset)
+
+### Database Tables
+- `Document` — retryCount/parseStatus updates; 3 documents set COMPLETED
+- `Rule` — 98 new rows (3 documents committed)
+- `QAPair` — 35 new rows
+- `DocChunk` — 10 new rows with pgvector embeddings
+- `StagedExtraction` — 171 rows marked isVerified=true
+
+### Summary
+Fixed 4 bugs in the extraction engine: batch JSON parse failures no longer abort entire documents; reset/retry now clears retryCount; isFatalError no longer treats transient errors as permanent. Diagnosed and fixed a Docker build break (ENCRYPTION_KEY module-level throw) that had silently failed 7 consecutive Railway deployments since June 4th. Committed 3 stale EXTRACTED documents (98 rules, 35 QA pairs). 5 documents remain PENDING and need processing via the admin terminal.
+
+### Session Notes
+→ `.claude/sessions/2026-06-06-120000.md`
+
+---
+
 ## [2026-02-28 22:30] — Fix JSON parsing pipeline + process error-logging document + verify Q&A
 
 **Area:** Document Processing / Knowledge Extraction / Q&A Engine
