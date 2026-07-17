@@ -29,6 +29,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
+import { VoiceRuleCapture } from '@/components/bot-lab/voice-rule-capture';
 
 interface BotCase {
   id: string;
@@ -499,6 +500,8 @@ export default function BotLabPage() {
               </CardContent>
             </Card>
           ) : null}
+
+          <VoiceRuleCapture question={question} caseId={evaluationCase?.id ?? null} />
 
           {result ? (
             <Card className="glass-panel rounded-3xl border-white/70 py-0">

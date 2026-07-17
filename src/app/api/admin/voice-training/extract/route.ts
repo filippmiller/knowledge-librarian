@@ -9,10 +9,16 @@ export async function POST(request: NextRequest): Promise<Response> {
     return NextResponse.json({ error: 'Недостаточно прав для извлечения правил' }, { status: 403 });
   }
 
-  const body = await request.json().catch(() => null) as { transcript?: unknown } | null;
+  const body = await request.json().catch(() => null) as {
+    transcript?: unknown;
+    questionContext?: unknown;
+  } | null;
   const transcript = typeof body?.transcript === 'string' ? body.transcript.trim() : '';
+  const questionContext = typeof body?.questionContext === 'string'
+    ? body.questionContext.trim().slice(0, 2000)
+    : undefined;
   try {
-    return NextResponse.json(await extractVoiceRules(transcript));
+    return NextResponse.json(await extractVoiceRules(transcript, questionContext));
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Не удалось извлечь правила' },

@@ -46,6 +46,8 @@ export async function POST(request: NextRequest): Promise<Response> {
     audioHash?: unknown;
     reviewConfirmed?: unknown;
     acknowledgedUncertainties?: unknown;
+    originQuestion?: unknown;
+    evalCaseId?: unknown;
   } | null;
   if (payload?.reviewConfirmed !== true) {
     return NextResponse.json({ error: 'Подтвердите операторскую проверку правил' }, { status: 400 });
@@ -62,6 +64,8 @@ export async function POST(request: NextRequest): Promise<Response> {
     ? payload.acknowledgedUncertainties.map((item) => clean(item, 600)).filter(Boolean).slice(0, 30)
     : [];
   const approvedAt = new Date();
+  const originQuestion = clean(payload?.originQuestion, 2000);
+  const evalCaseId = clean(payload?.evalCaseId, 180);
 
   const result = await prisma.$transaction(async (tx) => {
     const existingCodes = await tx.rule.findMany({ select: { ruleCode: true } });
@@ -104,6 +108,9 @@ export async function POST(request: NextRequest): Promise<Response> {
             operatorApproved: true,
             reviewConfirmed: true,
             acknowledgedUncertainties,
+            origin: originQuestion ? 'BOT_DECISION_LAB' : 'VOICE_RULE_STUDIO',
+            originQuestion: originQuestion || null,
+            evalCaseId: evalCaseId || null,
             approvedBy: actor.username,
             approvedAt: approvedAt.toISOString(),
           },
@@ -114,8 +121,10 @@ export async function POST(request: NextRequest): Promise<Response> {
           targetType: 'RULE',
           targetId: createdRule.id,
           changeType: 'CREATE',
-          newValue: { ruleCode: createdRule.ruleCode, title: rule.title, body: rule.body, authorityTag: 'VOICE_AUTHORITY', priority: rule.priority },
-          reason: 'Правило надиктовано экспертом и подтверждено в Voice Rule Studio',
+          newValue: { ruleCode: createdRule.ruleCode, title: rule.title, body: rule.body, authorityTag: 'VOICE_AUTHORITY', priority: rule.priority, originQuestion: originQuestion || null, evalCaseId: evalCaseId || null },
+          reason: originQuestion
+            ? 'Правило создано из вопроса в Bot Decision Lab и подтверждено оператором'
+            : 'Правило надиктовано экспертом и подтверждено в Voice Rule Studio',
           initiatedBy: 'ADMIN',
           approvedBy: `web:${actor.username}`,
           status: 'APPROVED',

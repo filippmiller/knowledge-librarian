@@ -5,6 +5,8 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Mic, X } from 'lucide-react';
+import { VoiceRuleCapture } from '@/components/bot-lab/voice-rule-capture';
 
 interface AIQuestion {
   id: string;
@@ -22,6 +24,7 @@ export default function AIQuestionsPage() {
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState<string | null>(null);
   const [responses, setResponses] = useState<Record<string, string>>({});
+  const [voiceQuestionId, setVoiceQuestionId] = useState<string | null>(null);
 
   async function fetchQuestions() {
     try {
@@ -105,6 +108,13 @@ export default function AIQuestionsPage() {
     );
   }
 
+  function getTrainingQuestion(question: AIQuestion): string {
+    const draft = (question.context as { draft?: { question?: unknown } } | null)?.draft;
+    return typeof draft?.question === 'string' && draft.question.trim()
+      ? draft.question.trim()
+      : question.question;
+  }
+
   if (loading) {
     return <div className="text-center py-8">Загрузка...</div>;
   }
@@ -183,7 +193,7 @@ export default function AIQuestionsPage() {
                             className="bg-white min-h-[120px]"
                           />
                         </div>
-                        <div className="flex gap-2">
+                        <div className="flex flex-wrap gap-2">
                           {q.issueType === 'knowledge_gap' ? (
                             <>
                               <Button
@@ -221,7 +231,19 @@ export default function AIQuestionsPage() {
                               </Button>
                             </>
                           )}
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setVoiceQuestionId((current) => current === q.id ? null : q.id)}
+                            className="ml-auto bg-white"
+                          >
+                            {voiceQuestionId === q.id ? <X /> : <Mic />}
+                            {voiceQuestionId === q.id ? 'Закрыть тренировку' : 'Надиктовать правило'}
+                          </Button>
                         </div>
+                        {voiceQuestionId === q.id ? (
+                          <VoiceRuleCapture question={getTrainingQuestion(q)} initialOpen />
+                        ) : null}
                       </div>
                     </CardContent>
                   </Card>

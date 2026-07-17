@@ -72,7 +72,10 @@ function text(value: unknown, max: number): string {
   return typeof value === 'string' ? value.trim().slice(0, max) : '';
 }
 
-export async function extractVoiceRules(transcript: string): Promise<VoiceRuleExtractionResult> {
+export async function extractVoiceRules(
+  transcript: string,
+  questionContext?: string
+): Promise<VoiceRuleExtractionResult> {
   const normalized = transcript.trim();
   if (normalized.length < 10 || normalized.length > 30000) {
     throw new Error('Расшифровка должна содержать от 10 до 30000 символов');
@@ -81,7 +84,15 @@ export async function extractVoiceRules(transcript: string): Promise<VoiceRuleEx
   const raw = await createChatCompletion({
     messages: [
       { role: 'system', content: VOICE_RULE_PROMPT },
-      { role: 'user', content: `РАСШИФРОВКА:\n${normalized}` },
+      {
+        role: 'user',
+        content: [
+          questionContext?.trim()
+            ? `КОНТЕКСТ — ВОПРОС КЛИЕНТА (используй только для scope и условий, не цитируй как слова эксперта):\n${questionContext.trim().slice(0, 2000)}`
+            : '',
+          `РАСШИФРОВКА ЭКСПЕРТА:\n${normalized}`,
+        ].filter(Boolean).join('\n\n'),
+      },
     ],
     responseFormat: 'json_object',
     temperature: 0,
