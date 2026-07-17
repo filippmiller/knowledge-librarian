@@ -16,6 +16,7 @@ import { expandQuery, ExpandedQueries, ExtractedEntities, extractEntities } from
 import { classifyScenario, type ScenarioDecision } from '@/lib/knowledge/scenario-classifier';
 import { ancestorsOf } from '@/lib/knowledge/scenarios';
 import { expandAbbreviations, selectKeyTerms } from '@/lib/knowledge/glossary';
+import { type QAPair } from '@prisma/client';
 import { verifyAnswer, type ConsistencyReport } from '@/lib/ai/consistency-gate';
 
 // Confidence thresholds
@@ -412,6 +413,80 @@ function answerSignalsCompositeCapabilityRisk(question: string, answer: string):
   return asksCapability && hasAlternatives && claimsAll;
 }
 
+
+/**
+ * Operator-approved canonical Q&A pairs (voice or historical) are allowed to
+ * bypass the scenario decision gate. If a user's question closely matches a
+ * canonical pair, we answer directly from it instead of asking for clarification
+ * or declaring "no data".
+ */
+async function findCanonicalQaOverride(question: string): Promise<QAPair | null> {
+  try {
+    const candidates = await prisma.qAPair.findMany({
+      where: { status: 'ACTIVE' },
+      take: 200,
+      orderBy: { createdAt: 'desc' },
+    });
+    const authorityCandidates = candidates.filter((qa) => getQaAuthority(qa.metadata).boost > 0);
+    if (authorityCandidates.length === 0) return null;
+
+    const ranked = authorityCandidates
+      .map((qa) => ({
+        qa,
+        overlap: questionTermOverlap(question, qa.question),
+      }))
+      .filter((item) => item.overlap >= 0.55)
+      .sort((a, b) => b.overlap - a.overlap);
+
+    return ranked[0]?.qa ?? null;
+  } catch (error) {
+    console.warn('[enhanced-answering] Canonical QA override lookup failed:', error);
+    return null;
+  }
+}
+
+function buildCanonicalQaResult(
+  question: string,
+  qa: QAPair,
+  includeDebug: boolean
+): EnhancedAnswerResult {
+  const authority = getQaAuthority(qa.metadata);
+  const result: EnhancedAnswerResult = {
+    answer: qa.answer,
+    confidence: 1.0,
+    confidenceLevel: 'high',
+    needsClarification: false,
+    citations: [
+      {
+        quote: qa.answer.slice(0, 250) + (qa.answer.length > 250 ? '...' : ''),
+        relevanceScore: 1.0,
+        authorityTag: authority.authorityTag,
+      },
+    ],
+    domainsUsed: [],
+    queryAnalysis: {
+      originalQuery: question,
+      expandedQueries: [],
+      extractedEntities: { dates: [], prices: [], documentTypes: [], services: [] },
+      isAmbiguous: false,
+    },
+    scenarioKey: qa.scenarioKey ?? undefined,
+    answerSource: 'knowledge_base',
+    requiresHumanReview: false,
+  };
+
+  if (includeDebug) {
+    result.debug = {
+      chunks: [],
+      intentClassification: { intent: 'canonical_qa_override', domains: [], confidence: 1.0, reasoning: 'Direct match to operator-approved canonical Q&A' },
+      rules: [],
+      qaPairs: [{ id: qa.id, question: qa.question.slice(0, 80) }],
+      searchStats: { totalChunksSearched: 0, avgSimilarity: 0, maxSimilarity: 0 },
+    };
+  }
+
+  return result;
+}
 /**
  * Main enhanced answering function
  */
@@ -438,7 +513,16 @@ export async function answerQuestionEnhanced(
     scenarioDecision = { kind: 'out_of_scope', reasoning: 'gate error; fell through to open retrieval' };
   }
 
-  // Short-circuit: if the gate needs clarification, skip retrieval entirely
+  
+  // Canonical Q&A override: operator-approved voice/historical pairs bypass
+  // the scenario gate when the user's question closely matches the canonical
+  // question. This closes the training loop: save an answer → the bot uses it.
+  const canonicalQa = await findCanonicalQaOverride(question);
+  if (canonicalQa) {
+    console.log('[enhanced-answering] Canonical QA override matched:', canonicalQa.id);
+    return buildCanonicalQaResult(question, canonicalQa, includeDebug);
+  }
+// Short-circuit: if the gate needs clarification, skip retrieval entirely
   // and return a structured clarification response. The mini-app renders this
   // as buttons (Пачка B); legacy clients see the prompt text in `answer`.
   if (scenarioDecision.kind === 'needs_clarification') {
