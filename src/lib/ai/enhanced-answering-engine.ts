@@ -205,8 +205,10 @@ const CLIENT_ANSWERING_PROMPT = `Ты — менеджер бюро перево
 
 Чего не знаешь — просто НЕ УПОМИНАЙ. Не сообщай клиенту о пробеле, переходи к тому, что можешь предложить.
 
+В примерах ниже цены и сроки намеренно не указаны: подставляй ТОЛЬКО те числа, которые приведены в сведениях ниже. Если их там нет — строй фразу без чисел.
+
 Плохо: «График работы МинЮста в цитатах не указан. Но я могу помочь с апостилем.»
-Хорошо: «График приёма уточню и напишу отдельно. По апостилю могу сказать сразу: стандартный срок 1–1,5 недели, 5000 ₽ за документ.»
+Хорошо: «График приёма уточню и напишу отдельно. По апостилю могу сказать сразу — вот сроки и стоимость: …»
 
 Плохо: «В наших источниках нет подтверждённых данных о вашем случае.»
 Хорошо: «Ваш случай разберу индивидуально — уточню детали и вернусь с решением и стоимостью.»
@@ -463,6 +465,32 @@ const KNOWLEDGE_GAP_PATTERNS: RegExp[] = [
   /требуется\s+уточнить\s+доступность|уточнения\s+доступности/iu,
 ];
 
+/**
+ * Два разных диагноза, и путать их нельзя. Маршрут наружу (контакты госоргана,
+ * «по месту выдачи») означает, что источник размечен неверно — чинить надо
+ * разметку. Ссылка на цитаты и правила означает, что модель проговорила своё
+ * устройство — чинить надо промпт. Единая функция, чтобы канонический путь и
+ * основной синтез не разъехались в формулировках предупреждений.
+ */
+function logClientSafetyVerdict(violations: string[], sourceHint: string): void {
+  const framing = violations.filter((v) => v.startsWith('ссылка на'));
+  const routing = violations.filter((v) => !v.startsWith('ссылка на'));
+  if (routing.length > 0) {
+    console.warn(
+      '[enhanced-answering] РАЗМЕТКА: клиентский ответ уводит клиента наружу:',
+      routing.join(', '),
+      '| проверьте audience у источников:',
+      sourceHint
+    );
+  }
+  if (framing.length > 0) {
+    console.warn(
+      '[enhanced-answering] ПРОМПТ: клиентский ответ проговорил своё устройство:',
+      framing.join(', ')
+    );
+  }
+}
+
 export function answerSignalsKnowledgeGap(answer: string): boolean {
   return KNOWLEDGE_GAP_PATTERNS.some((pattern) => pattern.test(answer));
 }
@@ -620,12 +648,7 @@ export async function answerQuestionEnhanced(
     if (audience === 'client') {
       const safety = checkClientSafety(canonicalResult.answer);
       if (!safety.safe) {
-        console.warn(
-          '[enhanced-answering] Канонический ответ уводит клиента наружу:',
-          safety.violations.join(', '),
-          '| QAPair:',
-          canonicalQa.id
-        );
+        logClientSafetyVerdict(safety.violations, `QAPair ${canonicalQa.id}`);
         return { ...canonicalResult, requiresHumanReview: true };
       }
     }
@@ -987,10 +1010,18 @@ export async function answerQuestionEnhanced(
   // Declare the chosen scenario explicitly so the synthesizer knows the
   // frame. This amplifies the evidence-only contract: "all your citations
   // belong to {{scenarioLabel}} — don't mention any other scenario".
-  const scenarioPreamble = openKnowledgeLookup
-    ? `СЦЕНАРИЙ: ${scenarioLabelForAnswer}\nВсе цитаты ниже найдены открытым поиском по базе знаний. Отвечай только по приведенным цитатам.\n`
-    : `СЦЕНАРИЙ: ${scenarioLabelForAnswer}  (ключ: ${scenarioKeyForAnswer})\n` +
-      `Все цитаты ниже относятся к этому сценарию. НЕ упоминай другие процедуры (например другие регионы или учреждения), даже если они существуют вообще.\n`;
+  // Преамбула тоже учит модель словарю: сказав ей «отвечай только по
+  // приведённым цитатам», мы получаем от неё «в цитатах не указано» в ответе
+  // клиенту. Для клиентской ветки то же требование формулируется, не называя
+  // источник, — иначе запрет в системном промпте спорит с этой строкой и
+  // проигрывает ей по частоте.
+  const scenarioPreamble =
+    audience === 'client'
+      ? `Тема обращения: ${scenarioLabelForAnswer}. Ниже — проверенные сведения по ней. Опирайся только на них; не называй их, не описывай, откуда они у тебя, и не сообщай, если чего-то в них не оказалось. Не упоминай процедуры и учреждения, которых там нет.\n`
+      : openKnowledgeLookup
+        ? `СЦЕНАРИЙ: ${scenarioLabelForAnswer}\nВсе цитаты ниже найдены открытым поиском по базе знаний. Отвечай только по приведенным цитатам.\n`
+        : `СЦЕНАРИЙ: ${scenarioLabelForAnswer}  (ключ: ${scenarioKeyForAnswer})\n` +
+          `Все цитаты ниже относятся к этому сценарию. НЕ упоминай другие процедуры (например другие регионы или учреждения), даже если они существуют вообще.\n`;
 
   const systemPrompt = audience === 'client' ? CLIENT_ANSWERING_PROMPT : ENHANCED_ANSWERING_PROMPT;
 
@@ -1011,7 +1042,7 @@ ${context}
 ═══ ЗАДАЧА ═══
 ${confidenceLevel === 'insufficient'
               ? audience === 'client'
-                ? 'Сведений по этому вопросу нет. Ничего не выдумывай и НЕ сообщай клиенту об отсутствии данных. Ответь коротко: разберём случай индивидуально, — и предложи связаться с нами.'
+                ? 'Подходящих сведений ниже нет. Ничего не выдумывай и НЕ пиши клиенту, что данных не нашлось. Ответь коротко: разберём случай индивидуально, — и предложи связаться с нами.'
                 : 'Релевантных цитат не найдено. Ответь: "В базе знаний по этому вопросу нет данных." Ни в коем случае не выдумывай факты.'
               : audience === 'client'
                 ? 'Опирайся только на сведения выше. Цены и сроки — дословно оттуда. Чего там нет — просто не упоминай; не сообщай клиенту, что каких-то данных у тебя не оказалось, и никак не называй свой источник.'
@@ -1132,26 +1163,7 @@ ${fixList}
   // Молча вырезать фразы нельзя: ошибка разметки останется невидимой.
   const clientSafety = audience === 'client' ? checkClientSafety(answer) : null;
   if (clientSafety && !clientSafety.safe) {
-    // Два разных диагноза, и путать их нельзя. Маршрут наружу (контакты
-    // госоргана, «по месту выдачи») означает, что источник размечен неверно —
-    // чинить надо разметку. Ссылка на цитаты и правила означает, что модель
-    // проговорила своё устройство — чинить надо промпт.
-    const framing = clientSafety.violations.filter((v) => v.startsWith('ссылка на'));
-    const routing = clientSafety.violations.filter((v) => !v.startsWith('ссылка на'));
-    if (routing.length > 0) {
-      console.warn(
-        '[enhanced-answering] РАЗМЕТКА: клиентский ответ уводит клиента наружу:',
-        routing.join(', '),
-        '| проверьте audience у источников:',
-        rules.map((r) => r.ruleCode).join(', ')
-      );
-    }
-    if (framing.length > 0) {
-      console.warn(
-        '[enhanced-answering] ПРОМПТ: клиентский ответ проговорил своё устройство:',
-        framing.join(', ')
-      );
-    }
+    logClientSafetyVerdict(clientSafety.violations, rules.map((r) => r.ruleCode).join(', '));
   }
 
   const requiresHumanReview = Boolean(
