@@ -66,3 +66,5 @@ tmp-upload/
 
 # mined email data (real customer content — never commit)
 scratchpad/
+
+docs/bot-audit/.rerun-progress.log
