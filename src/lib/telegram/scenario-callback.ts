@@ -106,7 +106,11 @@ export async function handleScenarioCallback(
 
   const effectiveQuestion = await buildClarificationQuery(session.id, original, originalAt);
 
-  const result = await answerQuestionEnhanced(effectiveQuestion, session.id);
+  const result = await answerQuestionEnhanced({
+    question: effectiveQuestion,
+    audience: 'internal',
+    sessionId: session.id,
+  });
 
   const autoAnswerSettings = await getAutoAnswerSettings();
   if (decideDelivery(result, autoAnswerSettings) === 'escalate') {

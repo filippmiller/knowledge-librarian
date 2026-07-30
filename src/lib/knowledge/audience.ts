@@ -1,0 +1,144 @@
+import { KnowledgeAudience } from '@prisma/client';
+import prisma from '@/lib/db';
+
+/**
+ * Кто читает ответ. Определяет и состав допустимых фактов, и цель ответа.
+ *
+ * - `internal` — сотрудник бюро. Нужна полная процедура: куда подавать, часы
+ *   приёма органа, внутренняя себестоимость, партнёрские цены.
+ * - `client` — заказчик. Ему нельзя показывать, где и как получить услугу
+ *   самостоятельно: это уводит его мимо бюро. Ответ должен говорить, что мы
+ *   для него сделаем, за сколько и в какой срок.
+ */
+export type Audience = 'internal' | 'client';
+
+/** Какие метки знания допустимы для этой аудитории. */
+export function admissibleAudiences(audience: Audience): KnowledgeAudience[] {
+  return audience === 'internal'
+    ? [KnowledgeAudience.INTERNAL_ONLY, KnowledgeAudience.CLIENT_SAFE]
+    : [KnowledgeAudience.CLIENT_SAFE];
+}
+
+/** Значения для SQL-фильтра векторного поиска (сырой SQL не берёт Prisma-enum). */
+export function audienceSqlValues(audience: Audience): string[] {
+  return admissibleAudiences(audience).map((value) => String(value));
+}
+
+/**
+ * Разметить документ и всё извлечённое из него.
+ *
+ * Единственный способ менять аудиторию: Document — источник истины, а копии в
+ * Rule / QAPair / DocChunk существуют только чтобы извлечение фильтровало одним
+ * предикатом. Разъезд между ними означал бы утечку, поэтому обновление идёт
+ * одной транзакцией.
+ */
+export async function setDocumentAudience(
+  documentId: string,
+  audience: KnowledgeAudience
+): Promise<{ rules: number; qaPairs: number; chunks: number }> {
+  return prisma.$transaction(async (tx) => {
+    await tx.document.update({ where: { id: documentId }, data: { audience } });
+    const rules = await tx.rule.updateMany({ where: { documentId }, data: { audience } });
+    const qaPairs = await tx.qAPair.updateMany({ where: { documentId }, data: { audience } });
+    const chunks = await tx.docChunk.updateMany({ where: { documentId }, data: { audience } });
+    return { rules: rules.count, qaPairs: qaPairs.count, chunks: chunks.count };
+  });
+}
+
+/**
+ * Признаки того, что в клиентский ответ утекла внутренняя информация:
+ * адрес или телефон постороннего органа, часы его приёма, инструкция подать
+ * документы куда-то ещё.
+ *
+ * Это НЕ фильтр текста. Фильтрация происходит на уровне данных — клиентское
+ * извлечение просто не видит внутренних правил. Этот контроль — сигнализация:
+ * если он сработал, значит знание размечено неверно, и ответ надо отдать
+ * человеку, а метку — починить. Молча вырезать фразы нельзя: тогда ошибка
+ * разметки останется невидимой и будет копиться.
+ */
+
+// ВНИМАНИЕ: `\b` в JS опирается на `\w` = [A-Za-z0-9_], поэтому перед
+// кириллицей граница слова НЕ срабатывает: /\bМВД/ не совпадает с «в МВД».
+// Тот же дефект уже ловили в истории репозитория. Вместо `\b` используем
+// негативный lookbehind по буквам — он работает и для кириллицы.
+const NOT_LETTER_BEFORE = '(?<![A-Za-zА-Яа-яЁё])';
+
+/**
+ * Госорганы и площадки, куда клиент может уйти делать услугу сам.
+ *
+ * Перечисляем СТЕМЫ, а не полные формы: русский падеж иначе рвёт совпадение
+ * («в Министерстве юстиции» против шаблона `Министерство юстиции`). Аббревиатуры
+ * не склоняются, для них стем равен слову.
+ */
+const EXTERNAL_BODY = new RegExp(
+  `${NOT_LETTER_BEFORE}(?:МВД|МинЮст|Минюст|Министерств[а-яё]*\\s+юстиции|КЗАГС|ЗАГС|Рособрнадзор|ГУВМ|МФЦ|Госуслуг|консульств|посольств|отдел[а-яё]*\\s+ЗАГС)`,
+  'u'
+);
+
+/** Контактные и режимные детали — то, что превращает упоминание органа в маршрут. */
+const CONTACT_OR_SCHEDULE: Array<{ name: string; pattern: RegExp }> = [
+  {
+    name: 'телефон',
+    pattern: /(?:\+7|(?<!\d)8)\s*\(?\d{3,4}\)?[\s-]?\d{2,3}[\s-]?\d{2}[\s-]?\d{2}/u,
+  },
+  {
+    name: 'адрес',
+    pattern: new RegExp(
+      `(?:${NOT_LETTER_BEFORE}(?:ул|пл|пр|наб)\\.|улиц[аеы]|проспект|набережн)[^.!?]{0,80}?${NOT_LETTER_BEFORE}д(?:\\.|ом)\\s*\\d`,
+      'iu'
+    ),
+  },
+  {
+    // Окно широкое: между «приём» и временем помещается «документов на апостиль
+    // в Министерстве юстиции осуществляется с» — 60+ символов.
+    name: 'часы приёма',
+    pattern: /(?:при[её]м|подач[аи])[^.!?]{0,90}\d{1,2}[:.]\d{2}(?!\d)/iu,
+  },
+];
+
+/**
+ * Отправка клиента делать услугу самостоятельно. Срабатывает сама по себе, без
+ * упоминания органа: «ставить по месту выдачи», «подайте документы туда».
+ * Обращения к нам («обратитесь к нам», «приезжайте в наш офис») не считаются —
+ * они и есть цель клиентского ответа.
+ */
+const SELF_SERVICE_INSTRUCTION: Array<{ name: string; pattern: RegExp }> = [
+  {
+    name: 'отправка по месту выдачи',
+    pattern: /по\s+месту\s+(?:выдачи|получения|регистрации)/iu,
+  },
+  {
+    name: 'предложение подать самостоятельно',
+    pattern:
+      /(?:вам\s+(?:нужно|необходимо|придётся|придется|следует)\s+(?:будет\s+)?(?:подать|обратиться|съездить|приехать|поехать)|подайт[еи]\s+(?:документы|заявление)|обратит[еь]с[ья]\s+(?!.{0,20}\bк\s+нам\b)(?:в|напрямую))/iu,
+  },
+];
+
+export interface ClientSafetyVerdict {
+  safe: boolean;
+  /** Названия сработавших признаков — для лога и операторского разбора. */
+  violations: string[];
+}
+
+/**
+ * Проверить, не увёл ли клиентский ответ клиента наружу.
+ *
+ * Логика намеренно требует совпадения ДВУХ условий для контактных данных:
+ * упоминание госоргана само по себе нормально («мы подадим документы в Минюст
+ * за вас»), а вот орган плюс его адрес, телефон или часы приёма — это уже
+ * готовый маршрут мимо бюро. Инструкции сделать самому опасны без оговорок.
+ */
+export function checkClientSafety(answer: string): ClientSafetyVerdict {
+  const violations: string[] = [];
+
+  if (EXTERNAL_BODY.test(answer)) {
+    for (const signal of CONTACT_OR_SCHEDULE) {
+      if (signal.pattern.test(answer)) violations.push(`госорган + ${signal.name}`);
+    }
+  }
+  for (const signal of SELF_SERVICE_INSTRUCTION) {
+    if (signal.pattern.test(answer)) violations.push(signal.name);
+  }
+
+  return { safe: violations.length === 0, violations };
+}

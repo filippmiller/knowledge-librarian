@@ -74,7 +74,7 @@ async function main() {
     for (let attempt = 0; attempt < 2 && !ok; attempt++) {
       try {
         if (attempt > 0) await new Promise((r) => setTimeout(r, 2000));
-        const r = await answerQuestionEnhanced(c.q);
+        const r = await answerQuestionEnhanced({ question: c.q, audience: 'internal' });
         answer = r.answer ?? '';
         source = r.answerSource ?? 'none';
         scenarioKey = r.scenarioKey;

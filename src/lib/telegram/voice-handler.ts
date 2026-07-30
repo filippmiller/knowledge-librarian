@@ -162,7 +162,7 @@ export async function handleVoiceMessage(
     const session = await getOrCreateSession('TELEGRAM', user.telegramId);
     const userMsg = await saveChatMessage(session.id, 'USER', text);
 
-    const result = await answerQuestionEnhanced(text, session.id);
+    const result = await answerQuestionEnhanced({ question: text, audience: 'internal', sessionId: session.id });
 
     const autoAnswerSettings = await getAutoAnswerSettings();
     if (decideDelivery(result, autoAnswerSettings) === 'escalate') {

@@ -19,6 +19,11 @@ import { expandAbbreviations, selectKeyTerms } from '@/lib/knowledge/glossary';
 import { polishCanonicalAnswer } from '@/lib/ai/canonical-answer-polisher';
 import { type QAPair } from '@prisma/client';
 import { verifyAnswer, type ConsistencyReport } from '@/lib/ai/consistency-gate';
+import {
+  admissibleAudiences,
+  checkClientSafety,
+  type Audience,
+} from '@/lib/knowledge/audience';
 
 // Confidence thresholds
 const CONFIDENCE_THRESHOLD_HIGH = 0.7;    // Answer confidently
@@ -180,6 +185,37 @@ const ENHANCED_ANSWERING_PROMPT = `Ты — ИИ-библиотекарь зна
 
 Если по конкретному аспекту вопроса НЕТ ни одной цитаты — скажи это прямо ("в базе знаний не указано, уточните у …"), НЕ ВЫДУМЫВАЙ.`;
 
+/**
+ * Клиентский контур. Отличается от внутреннего не тоном, а ЦЕЛЬЮ: внутренний
+ * ответ информирует сотрудника, клиентский — приводит заказчика в бюро.
+ *
+ * Железные правила о недопустимости выдумок наследуются, но добавляется
+ * коммерческая рамка и запрет уводить клиента наружу. Состав фактов при этом
+ * ограничен ещё на уровне извлечения (audience-фильтр), так что внутренних
+ * цитат в контексте быть не должно — этот промпт лишь вторая линия.
+ */
+const CLIENT_ANSWERING_PROMPT = `Ты — менеджер бюро переводов, отвечаешь клиенту.
+
+ЦЕЛЬ ОТВЕТА: клиент должен понять, что мы решим его задачу, сколько это стоит и что ему сделать дальше. Ответ должен приводить его к нам, а не помогать сделать самому.
+
+═══ ЖЕЛЕЗНЫЕ ЗАПРЕТЫ ═══
+
+1. **НЕ ВЫДУМЫВАЙ** цены, сроки, адреса, телефоны. Только то, что есть в цитатах. Нет данных о цене — не называй её и не оценивай «примерно».
+
+2. **НЕ ОТПРАВЛЯЙ КЛИЕНТА НАРУЖУ.** Никогда не пиши, где и как получить услугу самостоятельно: не давай адреса, телефоны и часы приёма госорганов, не пиши «подайте документы туда», «обратитесь в МВД», «ставится по месту выдачи», «уточните в министерстве». Мы не справочное бюро.
+
+3. **НЕ ССЫЛАЙСЯ НА ВНУТРЕННЕЕ УСТРОЙСТВО.** Никаких «в базе знаний», «по правилу», «в источнике не указано», «согласно документу». Клиент не должен знать, что за ним стоит база.
+
+4. **НЕ ОБЕЩАЙ ТОГО, ЧТО НЕ ПОДТВЕРЖДЕНО.** «Мы делаем X» — только при прямом подтверждении именно X в цитатах.
+
+═══ ЕСЛИ МЫ НЕ МОЖЕМ СДЕЛАТЬ ИМЕННО ТО, О ЧЁМ СПРОСИЛИ ═══
+
+Не отказывай сухо и не отправляй клиента решать вопрос самому. Скажи прямо, что запрошенным способом задача не решается, и сразу предложи тот путь, которым мы её решаем, — с ценой и сроком, если они есть в цитатах. Если подтверждённой альтернативы в цитатах нет, скажи, что подберём решение, и предложи связаться с нами.
+
+═══ ФОРМА ОТВЕТА ═══
+
+Коротко и по делу, как живой менеджер: что мы для клиента сделаем → сколько это стоит и в какой срок → что от него нужно (обычно скан или фото документа) → как получит результат. Без списков ради списков, без канцелярита, без рекламных штампов вроде «лучшие на рынке». Уверенно и спокойно.`;
+
 const GENERAL_KNOWLEDGE_FALLBACK_PROMPT = `Ты — экспертный помощник бюро переводов.
 
 База знаний не дала прямого уверенного ответа. Используй ОБЩЕЕ профессиональное знание только для вопросов по услугам бюро: апостиль, легализация, нотариальные документы, ЗАГС, МВД, переводы.
@@ -241,11 +277,12 @@ async function multiQuerySearch(
   queries: string[],
   domainSlugs: string[],
   limit: number,
-  scenarioAncestors: string[] = []
+  scenarioAncestors: string[] = [],
+  audience: Audience = 'internal'
 ): Promise<HybridSearchResult[]> {
   // Run searches in parallel
   const allResults = await Promise.all(
-    queries.map(q => hybridSearch(q, domainSlugs, limit, 0.7, scenarioAncestors))
+    queries.map(q => hybridSearch(q, domainSlugs, limit, 0.7, scenarioAncestors, audience))
   );
 
   // Merge and deduplicate results using max score
@@ -410,7 +447,7 @@ const KNOWLEDGE_GAP_PATTERNS: RegExp[] = [
   // "не указано, доступна ли услуга" — gap about availability rather than a fact
   /не\s+указан[оаы]?,?\s+(?:доступн|можно|есть\s+ли|как\s+именно|где\s+именно)/iu,
   // Model punts the whole question back to a human
-  /рекомендуем\s+(?:связаться|уточнить|обратиться)[^.!?]{0,40}(?:напрямую|с\s+компанией|у\s+менеджера)/iu,
+  /рекоменду(?:ем|ю)\s+(?:связаться|уточнить|обратиться)[^.!?]{0,40}(?:напрямую|с\s+компанией|у\s+менеджера)/iu,
   /не\s+удалось\s+подтвердить/iu,
   /требуется\s+уточнить\s+доступность|уточнения\s+доступности/iu,
 ];
@@ -438,10 +475,13 @@ function answerSignalsCompositeCapabilityRisk(question: string, answer: string):
  * canonical pair, we answer directly from it instead of asking for clarification
  * or declaring "no data".
  */
-async function findCanonicalQaOverride(question: string): Promise<QAPair | null> {
+async function findCanonicalQaOverride(
+  question: string,
+  audience: Audience
+): Promise<QAPair | null> {
   try {
     const candidates = await prisma.qAPair.findMany({
-      where: { status: 'ACTIVE' },
+      where: { status: 'ACTIVE', audience: { in: admissibleAudiences(audience) } },
       take: 200,
       orderBy: { createdAt: 'desc' },
     });
@@ -516,14 +556,28 @@ async function buildCanonicalQaResult(
   return result;
 }
 /**
+ * Запрос на ответ. `audience` обязателен намеренно: от него зависит не
+ * формулировка, а состав допустимых фактов, поэтому молчаливого значения по
+ * умолчанию быть не должно — каждый вызывающий обязан объявить, кому отвечает.
+ */
+export interface AnswerRequest {
+  question: string;
+  audience: Audience;
+  sessionId?: string;
+  includeDebug?: boolean;
+}
+
+/**
  * Main enhanced answering function
  */
 export async function answerQuestionEnhanced(
-  question: string,
-  sessionId?: string,
-  includeDebug: boolean = false
+  req: AnswerRequest
 ): Promise<EnhancedAnswerResult> {
-  console.log('[enhanced-answering] Starting for question:', question.substring(0, 100));
+  const { question, audience, sessionId, includeDebug = false } = req;
+  console.log(
+    `[enhanced-answering] Starting for question (audience=${audience}):`,
+    question.substring(0, 100)
+  );
 
   // Step 0: Scenario decision gate — decides whether we have enough info to
   // pick a single procedure, need to ask the user, or should say "out of
@@ -545,7 +599,7 @@ export async function answerQuestionEnhanced(
   // Canonical Q&A override: operator-approved voice/historical pairs bypass
   // the scenario gate when the user's question closely matches the canonical
   // question. This closes the training loop: save an answer → the bot uses it.
-  const canonicalQa = await findCanonicalQaOverride(question);
+  const canonicalQa = await findCanonicalQaOverride(question, audience);
   if (canonicalQa) {
     console.log('[enhanced-answering] Canonical QA override matched:', canonicalQa.id);
     return await buildCanonicalQaResult(question, canonicalQa, includeDebug);
@@ -646,7 +700,8 @@ export async function answerQuestionEnhanced(
       allQueries,
       [], // domains disabled — scenario filter does the narrowing
       10,
-      scenarioAncestors
+      scenarioAncestors,
+      audience
     );
     console.log('[enhanced-answering] Step 3 completed. Found', chunks.length, 'chunks');
   } catch (error) {
@@ -719,6 +774,10 @@ export async function answerQuestionEnhanced(
   const scenarioWhere = scenarioAncestors.length > 0
     ? { OR: [{ scenarioKey: null }, { scenarioKey: { in: scenarioAncestors } }] }
     : {};
+  // Клиентское извлечение физически не видит внутренних знаний — фильтр стоит
+  // здесь, а не на выходе. Вырезать фразы из готового ответа было бы хрупко:
+  // модель перескажет тот же факт другими словами.
+  const audienceWhere = { audience: { in: admissibleAudiences(audience) } };
   let rules;
   try {
     // Two candidate pools, merged: (a) keyword-prefiltered — rules whose body
@@ -740,7 +799,7 @@ export async function answerQuestionEnhanced(
     const perTerm = await Promise.all(
       keyTerms.map((t) =>
         prisma.rule.findMany({
-          where: { status: 'ACTIVE', ...scenarioWhere, body: { contains: t, mode: 'insensitive' as const } },
+          where: { status: 'ACTIVE', ...scenarioWhere, ...audienceWhere, body: { contains: t, mode: 'insensitive' as const } },
           include: { document: { select: { title: true } } },
           take: 25,
           orderBy: { confidence: 'desc' },
@@ -749,7 +808,7 @@ export async function answerQuestionEnhanced(
     );
     const keywordMatched = perTerm.flat();
     const byConfidence = await prisma.rule.findMany({
-      where: { status: 'ACTIVE', ...scenarioWhere },
+      where: { status: 'ACTIVE', ...scenarioWhere, ...audienceWhere },
       include: { document: { select: { title: true } } },
       take: 100,
       orderBy: { confidence: 'desc' },
@@ -787,6 +846,7 @@ export async function answerQuestionEnhanced(
           where: {
             status: 'ACTIVE',
             ...scenarioWhere,
+            ...audienceWhere,
             OR: [
               { question: { contains: t, mode: 'insensitive' as const } },
               { answer: { contains: t, mode: 'insensitive' as const } },
@@ -797,7 +857,7 @@ export async function answerQuestionEnhanced(
       )
     );
     const qaRecent = await prisma.qAPair.findMany({
-      where: { status: 'ACTIVE', ...scenarioWhere },
+      where: { status: 'ACTIVE', ...scenarioWhere, ...audienceWhere },
       take: 100,
       orderBy: { createdAt: 'desc' },
     });
@@ -905,7 +965,7 @@ export async function answerQuestionEnhanced(
     : `СЦЕНАРИЙ: ${scenarioLabelForAnswer}  (ключ: ${scenarioKeyForAnswer})\n` +
       `Все цитаты ниже относятся к этому сценарию. НЕ упоминай другие процедуры (например другие регионы или учреждения), даже если они существуют вообще.\n`;
 
-  const systemPrompt = ENHANCED_ANSWERING_PROMPT;
+  const systemPrompt = audience === 'client' ? CLIENT_ANSWERING_PROMPT : ENHANCED_ANSWERING_PROMPT;
 
   let answer: string;
   try {
@@ -1032,11 +1092,26 @@ ${fixList}
 
   // Clarification is handled by the scenario decision gate upstream.
   const clarificationQuestion: { question: string; options: string[] } | undefined = undefined;
+  // Сигнализация клиентского контура. Фильтрация уже произошла на уровне
+  // данных; если наружу всё равно просочился маршрут мимо бюро — значит знание
+  // размечено неверно. Такой ответ идёт человеку, а метку надо починить.
+  // Молча вырезать фразы нельзя: ошибка разметки останется невидимой.
+  const clientSafety = audience === 'client' ? checkClientSafety(answer) : null;
+  if (clientSafety && !clientSafety.safe) {
+    console.warn(
+      '[enhanced-answering] Клиентский ответ уводит клиента наружу:',
+      clientSafety.violations.join(', '),
+      '| проверьте audience у источников:',
+      rules.map((r) => r.ruleCode).join(', ')
+    );
+  }
+
   const requiresHumanReview = Boolean(
     consistency?.verificationFailed ||
     consistency?.unsupported.length ||
     answerSignalsKnowledgeGap(answer) ||
-    answerSignalsCompositeCapabilityRisk(question, answer)
+    answerSignalsCompositeCapabilityRisk(question, answer) ||
+    (clientSafety && !clientSafety.safe)
   );
 
   // Build source references from context chunks
@@ -1506,6 +1581,7 @@ function buildEnhancedContext(
 export async function answerWithContext(
   question: string,
   sessionId: string,
+  audience: Audience,
   includeDebug: boolean = false
 ): Promise<EnhancedAnswerResult> {
   // Get recent conversation history
@@ -1527,11 +1603,16 @@ export async function answerWithContext(
 
     if (isFollowUp.isFollowUp && isFollowUp.expandedQuestion) {
       // Use the expanded question that includes context
-      return answerQuestionEnhanced(isFollowUp.expandedQuestion, sessionId, includeDebug);
+      return answerQuestionEnhanced({
+        question: isFollowUp.expandedQuestion,
+        audience,
+        sessionId,
+        includeDebug,
+      });
     }
   }
 
-  return answerQuestionEnhanced(question, sessionId, includeDebug);
+  return answerQuestionEnhanced({ question, audience, sessionId, includeDebug });
 }
 
 async function checkIfFollowUp(

@@ -92,9 +92,10 @@ async function main() {
     'Moscow-issued non-education documents must not be routed into СПб apostille scenarios'
   );
 
-  const moscowToSpbAnswer = await answerQuestionEnhanced(
-    'Если документ выдан в Москве как его апостилировать в Санкт Петербурге?'
-  );
+  const moscowToSpbAnswer = await answerQuestionEnhanced({
+    question: 'Если документ выдан в Москве как его апостилировать в Санкт Петербурге?',
+    audience: 'internal',
+  });
   assert.equal(
     moscowToSpbAnswer.answerSource,
     'deterministic_guardrail',

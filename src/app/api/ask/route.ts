@@ -14,6 +14,7 @@ import {
   RATE_LIMITS,
 } from '@/lib/rate-limiter';
 import { escalateUnconvincingAIAnswer } from '@/lib/telegram/ai-escalation';
+import type { Audience } from '@/lib/knowledge/audience';
 
 export async function POST(request: NextRequest) {
   // Rate limiting
@@ -51,18 +52,36 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid request body' }, { status: 400 });
     }
 
-    const { question, sessionId, includeDebug, useConversationContext, clarificationAnswer } =
-      body as {
+    const {
+      question,
+      sessionId,
+      includeDebug,
+      useConversationContext,
+      clarificationAnswer,
+      audience: rawAudience,
+    } = body as {
         question?: unknown;
         sessionId?: string;
         includeDebug?: boolean;
         useConversationContext?: boolean;
         clarificationAnswer?: string;
+        audience?: unknown;
       };
 
     if (!question || typeof question !== 'string') {
       return NextResponse.json({ error: 'Question is required' }, { status: 400 });
     }
+
+    // Этот эндпоинт обслуживает внутренние инструменты (плейграунд, бот-лаб),
+    // поэтому по умолчанию внутренний контур. Клиентский вызывающий обязан
+    // объявить audience: 'client' явно — молчаливо клиентским он не станет.
+    if (rawAudience !== undefined && rawAudience !== 'internal' && rawAudience !== 'client') {
+      return NextResponse.json(
+        { error: "audience должен быть 'internal' или 'client'" },
+        { status: 400 }
+      );
+    }
+    const audience: Audience = rawAudience === 'client' ? 'client' : 'internal';
 
     // Validate question length
     if (question.length > 2000) {
@@ -105,8 +124,13 @@ export async function POST(request: NextRequest) {
     // Use conversation context if session exists and flag is set
     console.log('[ASK] Generating answer...');
     const result = useConversationContext && sessionId
-      ? await answerWithContext(effectiveQuestion, currentSessionId, includeDebug === true)
-      : await answerQuestionEnhanced(effectiveQuestion, currentSessionId, includeDebug === true);
+      ? await answerWithContext(effectiveQuestion, currentSessionId, audience, includeDebug === true)
+      : await answerQuestionEnhanced({
+          question: effectiveQuestion,
+          audience,
+          sessionId: currentSessionId,
+          includeDebug: includeDebug === true,
+        });
     console.log('[ASK] Answer generated successfully');
     void escalateUnconvincingAIAnswer({
       question,
