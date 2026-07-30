@@ -116,6 +116,29 @@ const SELF_SERVICE_INSTRUCTION: Array<{ name: string; pattern: RegExp }> = [
   },
 ];
 
+/**
+ * Ссылки на внутреннее устройство системы. Клиент не должен знать, что за
+ * ответом стоит база знаний с цитатами и правилами: «в цитатах не указан
+ * график» вместо «график уточним» разрушает впечатление живого менеджера и
+ * выдаёт, что бот отвечает по документам.
+ *
+ * Промпт это запрещает, но модель перефразирует запрет — на живом проде она
+ * выдала «в цитатах не указан» и «в наших источниках есть информация»,
+ * обойдя буквальные формулировки «в базе знаний» и «в источнике не указано».
+ */
+const INTERNAL_FRAMING: Array<{ name: string; pattern: RegExp }> = [
+  {
+    name: 'ссылка на цитаты или источники',
+    // Без \b на конце: `[а-яё]*` уже съедает окончание, а сам \b перед
+    // кириллицей не работает — та же ловушка, что описана у NOT_LETTER_BEFORE.
+    pattern: /(?:в|из)\s+(?:наш[а-яё]*\s+)?(?:цитат[а-яё]*|источник[а-яё]*|баз[а-яё]*\s+знаний|материал[а-яё]*|документ[а-яё]*)/iu,
+  },
+  {
+    name: 'ссылка на правило',
+    pattern: /(?:согласно|по)\s+(?:правил[а-яё]*|регламент[а-яё]*|инструкц[а-яё]*)/iu,
+  },
+];
+
 export interface ClientSafetyVerdict {
   safe: boolean;
   /** Названия сработавших признаков — для лога и операторского разбора. */
@@ -139,6 +162,9 @@ export function checkClientSafety(answer: string): ClientSafetyVerdict {
     }
   }
   for (const signal of SELF_SERVICE_INSTRUCTION) {
+    if (signal.pattern.test(answer)) violations.push(signal.name);
+  }
+  for (const signal of INTERNAL_FRAMING) {
     if (signal.pattern.test(answer)) violations.push(signal.name);
   }
 
