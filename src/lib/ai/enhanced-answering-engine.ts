@@ -561,7 +561,16 @@ async function findCanonicalQaOverride(
       // Порог по длинной стороне отсекает главный класс ложных совпадений:
       // короткий общий вопрос против длинного специфичного канонического.
       .filter((item) => item.overlap.short >= 0.55 && item.overlap.long >= 0.5)
-      .sort((a, b) => b.overlap.long - a.overlap.long);
+      // Тайбрейк обязателен: при равном покрытии победитель определялся порядком
+      // строк в БД, и один и тот же вопрос мог получать разные канонические
+      // ответы между запросами. Сортируем по длинной стороне, затем по короткой,
+      // затем по id — id стабилен и делает выбор воспроизводимым.
+      .sort(
+        (a, b) =>
+          b.overlap.long - a.overlap.long ||
+          b.overlap.short - a.overlap.short ||
+          a.qa.id.localeCompare(b.qa.id)
+      );
 
     return ranked[0]?.qa ?? null;
   } catch (error) {
