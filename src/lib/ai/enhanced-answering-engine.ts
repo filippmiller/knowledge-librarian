@@ -21,6 +21,10 @@ import { type QAPair } from '@prisma/client';
 import { verifyAnswer, type ConsistencyReport } from '@/lib/ai/consistency-gate';
 import { checkClaimGrounding } from '@/lib/ai/claim-grounding';
 import {
+  detectIssuingRegion,
+  resolveApostilleTerritoriality,
+} from '@/lib/knowledge/apostille-authority';
+import {
   admissibleAudiences,
   checkClientSafety,
   type Audience,
@@ -1483,6 +1487,41 @@ function buildDeterministicGuardrailResult(
   };
 }
 
+/** Точка входа для тестов: см. scripts/verify-territorial-guardrail.ts. */
+export function buildInternalGuardrailResultForTests(
+  question: string
+): EnhancedAnswerResult | null {
+  return buildInternalGuardrailResult(question);
+}
+
+/** Общая обвязка детерминированного ответа: разная у веток только суть. */
+function buildGuardrailShell(
+  question: string,
+  answer: string,
+  quotes: string[]
+): EnhancedAnswerResult {
+  return {
+    answer,
+    confidence: 0.9,
+    confidenceLevel: 'medium',
+    needsClarification: false,
+    citations: quotes.map((quote) => ({
+      documentTitle: 'Операционный guardrail',
+      quote,
+      relevanceScore: 0.9,
+    })),
+    domainsUsed: ['legal_compliance'],
+    queryAnalysis: {
+      originalQuery: question,
+      expandedQueries: [],
+      extractedEntities: { dates: [], prices: [], documentTypes: [], services: ['апостиль'] },
+      isAmbiguous: false,
+    },
+    answerSource: 'deterministic_guardrail',
+    requiresHumanReview: false,
+  };
+}
+
 function buildInternalGuardrailResult(question: string): EnhancedAnswerResult | null {
   // All regexes use /iu flags and test the ORIGINAL question directly.
   // Never call normalizeRussianText() here — its toLowerCase() silently corrupts
@@ -1501,13 +1540,15 @@ function buildInternalGuardrailResult(question: string): EnhancedAnswerResult | 
   // from another region must be apostilled THERE. Explain that + offer the
   // notarized-copy alternative. Fires only when it's NOT the mirror case (which
   // mentions both СПб and Москва and has its own directional answer below).
-  const mentionsOtherRegion = /друг[а-яё]*\s+регион|друг[а-яё]*\s+город/iu.test(question);
-  const mentionsOtherCity =
-    /москв|перм|нижн|новосиб|екатеринбург|казан|самар|ростов|краснодар|воронеж|челябинск|волгоград|саратов|тюмен|иркутск|омск/iu.test(question);
-  const zagsContext =
-    /загс|свидетельств|(?:^|[^а-яё])со[рбс](?:[^а-яё]|$)|рожден|брак|растор|смерт|перемен.{0,4}имен|отцовств/iu.test(question);
-  const isLocalIssue = mentionsSpb || /ленинградск|лен\.?\s*обл/iu.test(question);
-  if (mentionsApostille && zagsContext && (mentionsOtherRegion || (mentionsOtherCity && !isLocalIssue))) {
+  // Территориальность решает ОДНА таблица — apostille-authority.ts, собранная
+  // по тетради стажёра. Раньше решение было размазано: здесь регулярка про
+  // ЗАГС, ниже отдельная ветка про Москву, а справка о несудимости из чужого
+  // региона не попадала никуда и уходила в свободный синтез. Ниже по тексту
+  // различается только ФОРМУЛИРОВКА ответа по органам; сам вывод «берём или
+  // нет» приходит из таблицы.
+  const territorial = resolveApostilleTerritoriality(question);
+
+  if (mentionsApostille && territorial.kind === 'reject_original' && territorial.authority.key === 'zags') {
     const answer = [
       'Апостиль на оригинал свидетельства ЗАГС ставится по месту выдачи документа — в том регионе, где он выдан. Наше бюро ставит апостиль на оригиналы ЗАГС только для документов, выданных в Санкт-Петербурге и Ленинградской области.',
       '',
@@ -1537,6 +1578,51 @@ function buildInternalGuardrailResult(question: string): EnhancedAnswerResult | 
       answerSource: 'deterministic_guardrail',
       requiresHumanReview: false,
     };
+  }
+
+  // Остальные территориальные органы: Минюст и МВД. Раньше сюда не доходил
+  // никто — ветка ниже требует, чтобы в вопросе были названы ОБА города, а
+  // «справка о несудимости выдана в Саратове» не называет ни одного. Именно на
+  // этом классе бот сочинял, что апостиль можно поставить в Петербурге.
+  if (mentionsApostille && asksHowOrCan && territorial.kind === 'reject_original') {
+    const { authority } = territorial;
+    const answer = [
+      `Апостиль на такой документ ставит ${authority.label}, и у этого органа действует территориальный признак: апостилируются только документы, выданные в том же регионе. Документ выдан в другом регионе — значит, апостиль на оригинал ставится по месту выдачи, и здесь мы этого сделать не можем.`,
+      '',
+      // Сноска тетради: чем закрывать вопрос, когда прямой путь закрыт.
+      'Что можно предложить: апостиль на НОТАРИАЛЬНУЮ КОПИЮ документа — её снимает наш нотариус, и она становится документом, выданным здесь. Апостиль на оригинал всегда предпочтительнее, поэтому этот вариант подходит, только если принимающая сторона допускает апостиль на копию. Требования лучше уточнить заранее.',
+      '',
+      `Сроки органа: ${authority.deadline}. Доверенность: ${authority.powerOfAttorney}.`,
+      ...(authority.footnote ? ['', authority.footnote] : []),
+    ].join('\n');
+
+    return buildGuardrailShell(question, answer, [
+      'Территориальный признак органа апостилирования (тетрадь стажёра, с. 10): апостилируются только документы, выданные в регионе обращения.',
+    ]);
+  }
+
+  // Обратный случай и главный по деньгам: образовательный комитет
+  // территориального признака НЕ имеет. Без этой ветки вопрос «можно ли
+  // апостилировать саратовский диплом у вас» рискует получить отказ по общему
+  // правилу про регион — то есть потерю заказа на ровном месте.
+  if (
+    mentionsApostille &&
+    asksHowOrCan &&
+    territorial.kind === 'accept' &&
+    territorial.authority.key === 'education' &&
+    detectIssuingRegion(question) === 'other'
+  ) {
+    const { authority } = territorial;
+    const answer = [
+      `Да, можем. Образовательные документы апостилирует ${authority.label}, и территориального признака у него нет: диплом или аттестат, выданный в любом регионе России, апостилируется здесь.`,
+      '',
+      `Сроки: ${authority.deadline}. Доверенность: ${authority.powerOfAttorney}.`,
+      ...(authority.footnote ? ['', authority.footnote] : []),
+    ].join('\n');
+
+    return buildGuardrailShell(question, answer, [
+      'Образовательный комитет НЕ имеет территориального признака: апостилируются документы, выданные в любом ином регионе (тетрадь стажёра, с. 10).',
+    ]);
   }
 
   if (!mentionsApostille || !mentionsSpb || !mentionsMoscow || !asksHowOrCan || mentionsEducation) {
