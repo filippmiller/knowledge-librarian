@@ -181,7 +181,29 @@ const OTHER_REGION_CITY = new RegExp(
   'iu'
 );
 
+/**
+ * Место выдачи, названное глаголом прямо: «диплом, ВЫДАННЫЙ в Саратове».
+ *
+ * Такая формулировка снимает неоднозначность, даже когда в вопросе есть и второй
+ * город: «выданный в Саратове, у вас в СПб» — Саратов это место выдачи, а
+ * Петербург место обращения. Без этого разбора вопрос считался неоднозначным и
+ * таблица молчала, а клиент вместо «да, регион не помеха» получал «уточню у
+ * коллеги». Найдено запросом к проду.
+ */
+const ISSUE_VERB_PLACE = new RegExp(
+  '(?:выдан[а-яё]*|получен[а-яё]*|составлен[а-яё]*|оформлен[а-яё]*|выписан[а-яё]*)' +
+    '\\s+(?:в|во)\\s+([А-Яа-яЁё-]+)',
+  'iu'
+);
+
 export function detectIssuingRegion(question: string): IssuingRegion {
+  const issued = question.match(ISSUE_VERB_PLACE);
+  if (issued) {
+    const place = issued[1];
+    if (LOCAL_REGION.test(place)) return 'local';
+    if (new RegExp(OTHER_CITY_STEM, 'iu').test(place)) return 'other';
+  }
+
   const local = LOCAL_REGION.test(question);
   const other = OTHER_REGION_EXPLICIT.test(question) || OTHER_REGION_CITY.test(question);
   // Названы оба — по одному вопросу не понять, где выдан документ, а где его
