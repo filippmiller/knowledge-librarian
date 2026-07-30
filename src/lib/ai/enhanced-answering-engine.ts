@@ -602,7 +602,23 @@ export async function answerQuestionEnhanced(
   const canonicalQa = await findCanonicalQaOverride(question, audience);
   if (canonicalQa) {
     console.log('[enhanced-answering] Canonical QA override matched:', canonicalQa.id);
-    return await buildCanonicalQaResult(question, canonicalQa, includeDebug);
+    const canonicalResult = await buildCanonicalQaResult(question, canonicalQa, includeDebug);
+    // Ранний возврат минует сигнализацию ниже, поэтому проверяем здесь:
+    // неверно размеченная как CLIENT_SAFE каноническая пара с адресом органа
+    // иначе ушла бы клиенту с уверенностью 1.0 и без ручной проверки.
+    if (audience === 'client') {
+      const safety = checkClientSafety(canonicalResult.answer);
+      if (!safety.safe) {
+        console.warn(
+          '[enhanced-answering] Канонический ответ уводит клиента наружу:',
+          safety.violations.join(', '),
+          '| QAPair:',
+          canonicalQa.id
+        );
+        return { ...canonicalResult, requiresHumanReview: true };
+      }
+    }
+    return canonicalResult;
   }
 // Short-circuit: if the gate needs clarification, skip retrieval entirely
   // and return a structured clarification response. The mini-app renders this
@@ -983,8 +999,12 @@ ${context}
 
 ═══ ЗАДАЧА ═══
 ${confidenceLevel === 'insufficient'
-              ? 'Релевантных цитат не найдено. Ответь: "В базе знаний по этому вопросу нет данных." Ни в коем случае не выдумывай факты.'
-              : 'Ответь на вопрос, СТРОГО опираясь только на приведённые цитаты. Адреса, телефоны, цены, графики работы — цитируй дословно. Если какой-то аспект не покрыт цитатами, так и скажи: "в источнике не указано". Не добавляй информацию, которой нет выше.'}`,
+              ? audience === 'client'
+                ? 'Подтверждённых данных по этому вопросу нет. Не выдумывай ничего. Ответь коротко, что подберём решение индивидуально, и предложи связаться с нами.'
+                : 'Релевантных цитат не найдено. Ответь: "В базе знаний по этому вопросу нет данных." Ни в коем случае не выдумывай факты.'
+              : audience === 'client'
+                ? 'Ответь СТРОГО по приведённым цитатам. Цены и сроки — дословно из цитат. Чего в цитатах нет — не упоминай вовсе; не пиши «в источнике не указано» и не ссылайся на базу знаний.'
+                : 'Ответь на вопрос, СТРОГО опираясь только на приведённые цитаты. Адреса, телефоны, цены, графики работы — цитируй дословно. Если какой-то аспект не покрыт цитатами, так и скажи: "в источнике не указано". Не добавляй информацию, которой нет выше.'}`,
         },
       ],
       temperature: 0,
@@ -1031,7 +1051,10 @@ ${confidenceLevel === 'insufficient'
         try {
           const revised = (await createChatCompletion({
             messages: [
-              { role: 'system', content: ENHANCED_ANSWERING_PROMPT },
+              // Тот же промпт, что и при первичной генерации: иначе клиентский
+              // ответ переписывается по внутренним правилам, которым разрешено
+              // цитировать адреса и писать «в источнике не указано».
+              { role: 'system', content: systemPrompt },
               {
                 role: 'user',
                 content: `${scenarioPreamble}
