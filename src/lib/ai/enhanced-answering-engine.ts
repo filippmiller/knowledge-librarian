@@ -1270,10 +1270,20 @@ function buildDeterministicGuardrailResult(
 ): EnhancedAnswerResult | null {
   const result = buildInternalGuardrailResult(question);
   if (!result) return null;
-  if (audience === 'client') {
-    return { ...result, requiresHumanReview: true };
-  }
-  return result;
+  if (audience !== 'client') return result;
+
+  // Текст guardrail'а написан для сотрудника и содержит «ставится по месту
+  // выдачи» — то есть отправляет клиента делать услугу самостоятельно.
+  // Отдавать его наружу нельзя даже как черновик: потребитель API может взять
+  // поле answer напрямую. Подменяем на удерживающий текст и помечаем на
+  // ручной разбор — оператор увидит сам вопрос и продаст решение.
+  return {
+    ...result,
+    answer:
+      'Такой случай нужно разобрать индивидуально — уточню детали и вернусь с решением и стоимостью.',
+    confidenceLevel: 'low',
+    requiresHumanReview: true,
+  };
 }
 
 function buildInternalGuardrailResult(question: string): EnhancedAnswerResult | null {
