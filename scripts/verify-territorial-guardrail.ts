@@ -6,7 +6,11 @@
  *
  * Запуск: npx tsx scripts/verify-territorial-guardrail.ts
  */
-import { buildInternalGuardrailResultForTests } from '../src/lib/ai/enhanced-answering-engine';
+import {
+  buildInternalGuardrailResultForTests,
+  buildDeterministicGuardrailResultForTests,
+} from '../src/lib/ai/enhanced-answering-engine';
+import { checkClientSafety } from '../src/lib/knowledge/audience';
 
 interface Case {
   name: string;
@@ -140,5 +144,64 @@ for (const c of CASES) {
   if (!ok && fired) console.log(`      ответ: ${result!.answer.replace(/\s+/g, ' ').slice(0, 180)}`);
 }
 
-console.log(`\n${CASES.length - failed}/${CASES.length} прошло`);
+// --- Клиентский контур: ответ должен доходить, а не глушиться ---
+console.log('\n=== Клиентский контур ===');
+
+let clientChecks = 0;
+function clientCheck(name: string, ok: boolean, detail = ''): void {
+  clientChecks++;
+  if (!ok) failed++;
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '\n      ' + detail : ''}`);
+}
+
+const CLIENT_CASES: Array<{ name: string; question: string; mustInclude: string[] }> = [
+  {
+    name: 'диплом из Саратова: клиент получает ПРОДАЮЩЕЕ «да», а не «уточню у коллеги»',
+    question: 'Можно ли апостилировать диплом, выданный в Саратове?',
+    mustInclude: ['регион не помеха', 'приложением', 'Госуслуги'],
+  },
+  {
+    name: 'СОН из Саратова: клиент получает предложение решения, а не отказ',
+    question: 'Можно ли поставить апостиль на справку о несудимости, выданную в Саратовской области?',
+    mustInclude: ['наш нотариус', 'вам никуда ехать не нужно'],
+  },
+];
+
+for (const c of CLIENT_CASES) {
+  const res = buildDeterministicGuardrailResultForTests(c.question, 'client');
+  if (!res) {
+    clientCheck(c.name, false, 'детерминированный ответ не сработал вовсе');
+    continue;
+  }
+  const missing = c.mustInclude.filter((f) => !res.answer.includes(f));
+  const held = res.answer.includes('уточню детали и вернусь');
+  const safety = checkClientSafety(res.answer);
+  const ok = missing.length === 0 && !held && safety.safe;
+  clientCheck(
+    c.name,
+    ok,
+    ok
+      ? ''
+      : [
+          missing.length ? `нет фрагментов: ${missing.join(', ')}` : '',
+          held ? 'ответ заглушён удерживающей фразой' : '',
+          safety.safe ? '' : `сигнализация утечки: ${safety.violations.join(', ')}`,
+        ]
+          .filter(Boolean)
+          .join(' | ')
+  );
+}
+
+// Ветки, написанные для сотрудника, клиенту по-прежнему не отдаются.
+const zagsForClient = buildDeterministicGuardrailResultForTests(
+  'Как апостилировать свидетельство о рождении, выданное в другом регионе?',
+  'client'
+);
+clientCheck(
+  'ветка без клиентского текста по-прежнему удерживается',
+  Boolean(zagsForClient?.answer.includes('уточню детали и вернусь') && zagsForClient?.requiresHumanReview)
+);
+
+const total = CASES.length + clientChecks;
+console.log(`\n${total - failed}/${total} прошло`);
 if (failed > 0) process.exit(1);
