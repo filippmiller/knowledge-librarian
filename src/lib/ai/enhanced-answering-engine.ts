@@ -429,7 +429,31 @@ export function questionTermOverlapForTests(
   return questionTermOverlap(question, candidate);
 }
 
+/**
+ * Отрицание в вопросе. Проверяется по СЫРОМУ тексту, потому что термы к этому
+ * моменту уже потеряли короткие слова.
+ *
+ * `extractSearchTerms` отбрасывает всё короче трёх букв, а по-русски смысл
+ * переворачивают именно короткие слова: «не», «без». Из-за этого пары
+ *
+ *   «Нужен ли оригинал для заверения?» ←→ «НЕ нужен ли оригинал для заверения?»
+ *   «Можно ли апостилировать в СПб?»   ←→ «Можно ли НЕ апостилировать в СПб?»
+ *
+ * давали пересечение термов 1.00 — измерено. Для канонической подмены это
+ * означало готовый ответ на противоположный вопрос с уверенностью 1.0, а для
+ * `hasStrongQaMatch` — поднятый уровень уверенности на том же основании.
+ * Ровно тот же дефект, что был в нечётком кэше.
+ */
+function hasNegation(text: string): boolean {
+  return /(?<![А-Яа-яЁёA-Za-z])(?:не|нет|без|нельзя|невозможно)(?![А-Яа-яЁёA-Za-z])/iu.test(text);
+}
+
 function questionTermOverlap(question: string, candidate: string): { short: number; long: number } {
+  // Разная полярность — разные вопросы, сколько бы слов ни совпало. Ошибка в
+  // эту сторону лишь отправляет вопрос в обычный синтез вместо подмены готовым
+  // ответом, поэтому строгость здесь безопаснее снисходительности.
+  if (hasNegation(question) !== hasNegation(candidate)) return { short: 0, long: 0 };
+
   const qTerms = new Set(extractSearchTerms(question));
   const cTerms = new Set(extractSearchTerms(candidate));
   if (qTerms.size === 0 || cTerms.size === 0) return { short: 0, long: 0 };

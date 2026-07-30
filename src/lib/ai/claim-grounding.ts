@@ -50,6 +50,27 @@ const NUM = String.raw`\d[\d\s   ]*(?:[.,]\d+)?`;
 const DASH = String.raw`\s*(?:-|–|—|…|\.\.\.)\s*`;
 
 /**
+ * Множитель между числом и единицей: «12 тыс. рублей», «1,5 млн руб.».
+ * Без него разговорная форма цены не распознавалась как утверждение о деньгах
+ * вовсе — выдуманная сумма проходила проверку с нулём найденных утверждений.
+ */
+const MAGNITUDE = String.raw`(?:\s*(тыс\.?|тысяч[а-яё]*|млн\.?|миллион[а-яё]*))?`;
+
+const MAGNITUDE_FACTOR: Array<{ test: RegExp; factor: number }> = [
+  { test: /^(?:млн|миллион)/iu, factor: 1_000_000 },
+  { test: /^(?:тыс|тысяч)/iu, factor: 1_000 },
+];
+
+/** «12 тыс.» и «12000» — одна сумма, сравнивать их надо как одну. */
+function applyMagnitude(value: string, magnitude: string | undefined): string {
+  if (!magnitude) return value;
+  const entry = MAGNITUDE_FACTOR.find((m) => m.test.test(magnitude.trim()));
+  if (!entry) return value;
+  const scaled = Number(value) * entry.factor;
+  return Number.isFinite(scaled) ? normalizeNumber(String(scaled)) : value;
+}
+
+/**
  * Единицы измерения по отдельности, а не одним классом «срок».
  *
  * Классом было слишком грубо: строка «офис в 5 минутах от метро» заземляла
@@ -69,8 +90,17 @@ interface UnitSpec {
 }
 
 const UNITS: UnitSpec[] = [
-  // `р\.` (рубль) отделяется от `р. д.` (рабочий день) просмотром вперёд.
-  { unit: 'rub', kind: 'money', pattern: String.raw`(?:₽|руб\.?|рублей|рубля|р\.(?!\s*д))` },
+  // `р` и `р.` (рубль) отделяются от `р.д.` (рабочий день) просмотром вперёд.
+  // Точка после «р» необязательна: «1100 р» — живая форма записи, и без неё
+  // выдуманная сумма не распознавалась как утверждение о деньгах вовсе.
+  {
+    unit: 'rub',
+    kind: 'money',
+    // `(?![\s.]*д)` обязан стоять ДО проверки на букву: при необязательной точке
+    // движок откатывается на позицию перед ней, и просмотр «\s*д» промахивается
+    // мимо «д» в «3 р.д.» — рабочий день засчитывался как три рубля.
+    pattern: String.raw`(?:₽|руб\.?|рублей|рубля|р\.?(?![\s.]*д)(?![а-яё]))`,
+  },
   {
     unit: 'day',
     kind: 'duration',
@@ -84,7 +114,7 @@ const UNITS: UnitSpec[] = [
 ];
 
 function singlePattern(spec: UnitSpec): RegExp {
-  return new RegExp(String.raw`(${NUM})\s*${spec.pattern}`, 'giu');
+  return new RegExp(String.raw`(${NUM})${MAGNITUDE}\s*${spec.pattern}`, 'giu');
 }
 
 /**
@@ -94,7 +124,7 @@ function singlePattern(spec: UnitSpec): RegExp {
  * верхнюю границу, потому что первая половина диапазона не примыкает к единице.
  */
 function rangePattern(spec: UnitSpec): RegExp {
-  return new RegExp(String.raw`(${NUM})${DASH}(${NUM})\s*${spec.pattern}`, 'giu');
+  return new RegExp(String.raw`(${NUM})${DASH}(${NUM})${MAGNITUDE}\s*${spec.pattern}`, 'giu');
 }
 
 function add(
@@ -103,9 +133,10 @@ function add(
   rawValue: string,
   text: string,
   at: number,
-  matchLength: number
+  matchLength: number,
+  magnitude?: string
 ): void {
-  const value = normalizeNumber(rawValue);
+  const value = applyMagnitude(normalizeNumber(rawValue), magnitude);
   if (!value || Number(value) === 0) return;
   const key = claimKey(spec.unit, value);
   if (into.has(key)) return;
@@ -128,16 +159,18 @@ export function extractRiskyClaims(text: string): RiskyClaim[] {
   for (const spec of UNITS) {
     // Сначала диапазоны: они дают обе границы. Одиночный проход после этого
     // добавит только то, чего диапазоны не покрыли, — дубли отсекает ключ.
+    // Множитель у диапазона общий и стоит после второй границы: «10–12 тыс.
+    // рублей» означает и 10 000, и 12 000.
     const range = rangePattern(spec);
     let m: RegExpExecArray | null;
     while ((m = range.exec(text)) !== null) {
-      add(found, spec, m[1], text, m.index, m[0].length);
-      add(found, spec, m[2], text, m.index, m[0].length);
+      add(found, spec, m[1], text, m.index, m[0].length, m[3]);
+      add(found, spec, m[2], text, m.index, m[0].length, m[3]);
     }
 
     const single = singlePattern(spec);
     while ((m = single.exec(text)) !== null) {
-      add(found, spec, m[1], text, m.index, m[0].length);
+      add(found, spec, m[1], text, m.index, m[0].length, m[2]);
     }
   }
 
@@ -165,7 +198,11 @@ export function checkClaimGrounding(answer: string, sources: string[]): Groundin
   const claims = extractRiskyClaims(answer);
   if (claims.length === 0) return { grounded: true, ungrounded: [], total: 0 };
 
-  const sourceClaims = extractRiskyClaims(sources.join('\n'));
+  // Разделитель обязан содержать НЕ-пробельный символ. Между числом и единицей
+  // в шаблонах стоит `\s*`, а перевод строки — тоже пробел: при склейке через
+  // «\n» источник, кончающийся на «1100», и следующий, начинающийся с «рублей»,
+  // давали несуществующее утверждение «1100 рублей» и заземляли выдумку.
+  const sourceClaims = extractRiskyClaims(sources.join(' ¦ '));
   const allowed = new Set(sourceClaims.map((c) => claimKey(c.unit, c.value)));
 
   const ungrounded = claims.filter((c) => !allowed.has(claimKey(c.unit, c.value)));

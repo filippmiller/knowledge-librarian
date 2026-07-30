@@ -901,12 +901,21 @@ export async function POST(request: NextRequest) {
         // можно. Но решение о доставке всё равно прикладываем: без него
         // интерфейс выдаёт забракованный движком ответ как готовый, и сотрудник
         // пересылает его клиенту, не зная, что автоответ его бы не отправил.
-        const { resolveDelivery } = await import('@/lib/ai/delivery');
-        const delivery = await resolveDelivery(result, 'internal');
+        // Ответ собирается тем же `applyDelivery`, что и в `/api/ask`, а не
+        // руками: сегодня контур внутренний и подмены не будет, но стоит
+        // сделать аудиторию настраиваемой — и ручная сборка молча отдала бы
+        // клиенту забракованный черновик. Поле `answer` обязано быть уже
+        // безопасным для своей аудитории в каждом канале.
+        const { resolveDelivery, applyDelivery } = await import('@/lib/ai/delivery');
+        const audience = 'internal' as const;
+        const delivery = await resolveDelivery(result, audience);
+        const delivered = applyDelivery(result, delivery, { includeDraft: true });
 
         return NextResponse.json({
-          answer: result.answer,
-          delivery: delivery.decision,
+          answer: delivered.answer,
+          delivery: delivered.delivery,
+          answerWithheld: delivered.answerWithheld,
+          draftAnswer: delivered.draftAnswer,
           confidence: result.confidence,
           confidenceLevel: result.confidenceLevel,
           requiresHumanReview: result.requiresHumanReview,

@@ -16,7 +16,8 @@ import type { EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
 import { classifyScenario } from '@/lib/knowledge/scenario-classifier';
 import { isDraftableDraft } from '@/lib/ai/answer-policy';
 import { upsertLearnedQaPair } from '@/lib/knowledge/qa-upsert';
-import type { Audience } from '@/lib/knowledge/audience';
+import { checkClientSafety, type Audience } from '@/lib/knowledge/audience';
+import { extractRiskyClaims } from '@/lib/ai/claim-grounding';
 
 /** Контур, в котором был задан вопрос → метка знания, которую получит пара. */
 function audienceToKnowledge(audience: Audience): KnowledgeAudience {
@@ -160,6 +161,35 @@ export async function approveKnowledgeGap(
   // утверждением проходит человек, и вопрос «клиентский он или внутренний» по
   // одному тексту уже не восстановить.
   const audience = audienceToKnowledge(readDraftAudience(aq.context));
+
+  // Оператор вправе отредактировать черновик перед утверждением, и правка не
+  // проходит ни одной проверки движка. Так в базу попадает утверждение, которое
+  // синтез никогда бы не выпустил: адрес госоргана в клиентской паре или цена,
+  // взятая из головы. Пара при этом становится постоянной — её будут выдавать
+  // снова и снова.
+  //
+  // Клиентскую пару с маршрутом наружу отклоняем: она прямо противоречит цели
+  // контура. Про числа только предупреждаем — источников на этом шаге уже нет,
+  // и отличить выдуманную цену от правильной, но отредактированной, нельзя.
+  if (audience === KnowledgeAudience.CLIENT_SAFE) {
+    const safety = checkClientSafety(answer);
+    if (!safety.safe) {
+      throw new Error(
+        `Ответ уводит клиента наружу (${safety.violations.join(', ')}) — как клиентскую пару сохранять нельзя`
+      );
+    }
+  }
+  const editedByOperator = opts.answer !== undefined && opts.answer.trim() !== (draft.answer ?? '').trim();
+  if (editedByOperator) {
+    const claims = extractRiskyClaims(answer);
+    if (claims.length > 0) {
+      console.warn(
+        '[knowledge-feedback] Оператор отредактировал черновик и в ответе есть числа (%s). Источники на этом шаге недоступны — проверить вручную: %s',
+        claims.map((c) => `${c.value}/${c.unit}`).join(', '),
+        question.slice(0, 80)
+      );
+    }
+  }
 
   // Atomic claim + write. `updateMany` with a status guard is the lock: only ONE
   // concurrent approval can flip OPEN→ANSWERED (count === 1); a loser sees

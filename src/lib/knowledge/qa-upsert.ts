@@ -67,6 +67,28 @@ export async function upsertLearnedQaPair(
     orderBy: { updatedAt: 'desc' },
   });
 
+  // Пара без сценария действует как универсальная и извлекается вместе со
+  // сценарными. Поэтому «тот же вопрос, но другой сценарий» — это два ACTIVE
+  // ответа на один вопрос, и какой из них попадёт в синтез, решает поиск.
+  //
+  // Гасить чужую пару здесь нельзя: сценарии — разные условия, и общий ответ
+  // может быть верен там, где специфичного нет. Но и молчать нельзя: именно так
+  // в базе накапливаются противоречия. Поэтому конфликт делается видимым —
+  // разрешать его должен человек, а не порядок строк в выдаче.
+  const rivals = await tx.qAPair.findMany({
+    where: { question, status: 'ACTIVE', audience, NOT: { scenarioKey } },
+    select: { id: true, scenarioKey: true },
+  });
+  if (rivals.length > 0) {
+    console.warn(
+      '[qa-upsert] КОНФЛИКТ СЦЕНАРИЕВ: на вопрос «%s» (%s) уже есть активные пары с другими сценариями: %s. Новая пара получает сценарий «%s». Оба ответа будут попадать в синтез.',
+      question.slice(0, 80),
+      audience,
+      rivals.map((r) => `${r.id}:${r.scenarioKey ?? 'без сценария'}`).join(', '),
+      scenarioKey ?? 'без сценария'
+    );
+  }
+
   if (existing && existing.answer.trim() === answer.trim()) {
     return {
       qaPairId: existing.id,

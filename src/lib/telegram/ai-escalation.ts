@@ -17,6 +17,13 @@ export async function escalateUnconvincingAIAnswer(params: {
   audience: Audience;
   userId?: string;
   sessionId?: string;
+  /**
+   * Причины эскалации, которые не выводятся из самого результата. Нужны там,
+   * где ответ забракован не своим качеством, а политикой: выключенным
+   * автоответом или порогом. Без них уверенный, но не отправленный ответ не
+   * создавал ни задачи, ни уведомления — а клиенту при этом обещан человек.
+   */
+  extraReasons?: string[];
 }): Promise<void> {
   // The bot asking a clarifying question is healthy behaviour, not an escalation.
   if (isClarificationTurn(params.result)) return;
@@ -36,7 +43,7 @@ export async function escalateUnconvincingAIAnswer(params: {
     return;
   }
 
-  const reasons = getEscalationReasons(params.result);
+  const reasons = [...getEscalationReasons(params.result), ...(params.extraReasons ?? [])];
   if (reasons.length === 0) return;
 
   const throttleKey = `${params.source}:${normalizeThrottleKey(params.question)}:${reasons.join(',')}`;

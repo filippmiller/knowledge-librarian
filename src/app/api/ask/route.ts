@@ -149,13 +149,6 @@ export async function POST(request: NextRequest) {
           includeDebug: includeDebug === true,
         });
     console.log('[ASK] Answer generated successfully');
-    void escalateUnconvincingAIAnswer({
-      question,
-      result,
-      source: 'API',
-      audience,
-      sessionId: currentSessionId,
-    });
 
     // Cache only convincing final answers; weak answers and clarification prompts are skipped.
     if (!includeDebug && !useConversationContext) {
@@ -176,6 +169,24 @@ export async function POST(request: NextRequest) {
         question.slice(0, 80)
       );
     }
+
+    // Эскалация ПОСЛЕ решения о доставке и с его учётом.
+    //
+    // Удерживающий текст обещает клиенту ответ живого человека. Обычная
+    // эскалация срабатывает только на признаках недоверия к ответу, а уверенный
+    // ответ может быть забракован одними настройками — выключенным автоответом
+    // или поднятым порогом. Без явной причины такой случай не создавал ни
+    // задачи, ни уведомления: клиенту обещали коллегу, а вопрос не получал никто.
+    void escalateUnconvincingAIAnswer({
+      question,
+      result,
+      source: 'API',
+      audience,
+      sessionId: currentSessionId,
+      extraReasons: delivery.withheld
+        ? [`ответ удержан от клиента политикой доставки (${delivery.decision})`]
+        : undefined,
+    });
 
     // В историю — то, что реально увидел собеседник. Черновик сохраняется
     // рядом, в метаданных: оператору он нужен, в контекст следующего ответа
