@@ -334,21 +334,22 @@ export async function searchByKeywords(
       }));
     }
   } catch {
-    return searchByKeywordTerms(query, domainSlugs, limit, scenarioAncestors);
+    return searchByKeywordTerms(query, domainSlugs, limit, scenarioAncestors, audience);
   }
 
   // PostgreSQL full-text search is strict about all lexemes in the query.
   // If a user asks "для каких стран требуется КЛ", a chunk titled "страны,
   // для которых нужна КЛ" can miss because "требуется" != "нужна". Fall back
   // to OR-style term matching for recall.
-  return searchByKeywordTerms(query, domainSlugs, limit, scenarioAncestors);
+  return searchByKeywordTerms(query, domainSlugs, limit, scenarioAncestors, audience);
 }
 
 async function searchByKeywordTerms(
   query: string,
   domainSlugs: string[] = [],
   limit: number = 10,
-  scenarioAncestors: string[] = []
+  scenarioAncestors: string[] = [],
+  audience: Audience = 'internal'
 ): Promise<SearchResult[]> {
   const searchTerms = query
     .toLowerCase()
@@ -370,6 +371,10 @@ async function searchByKeywordTerms(
   if (scenarioAncestors.length > 0) {
     fallbackConditions.push({ OR: [{ scenarioKey: null }, { scenarioKey: { in: scenarioAncestors } }] });
   }
+  // Резервные ветки фильтруются так же, как основная: путь, по которому запрос
+  // попадает сюда (пустой полнотекстовый результат или ошибка SQL), не должен
+  // становиться обходом фильтра аудитории.
+  fallbackConditions.push({ audience: { in: admissibleAudiences(audience) } });
   const whereClause: Prisma.DocChunkWhereInput = { AND: fallbackConditions };
 
   const chunks = await prisma.docChunk.findMany({

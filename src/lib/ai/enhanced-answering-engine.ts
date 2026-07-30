@@ -608,7 +608,7 @@ export async function answerQuestionEnhanced(
   // and return a structured clarification response. The mini-app renders this
   // as buttons (Пачка B); legacy clients see the prompt text in `answer`.
   if (scenarioDecision.kind === 'needs_clarification') {
-    const guardrail = buildDeterministicGuardrailResult(question);
+    const guardrail = buildDeterministicGuardrailResult(question, audience);
     if (guardrail) return guardrail;
     return buildClarificationResult(question, scenarioDecision);
   }
@@ -625,7 +625,7 @@ export async function answerQuestionEnhanced(
   //   3) only genuinely off-topic questions (no bureau keyword: weather,
   //      crypto, …) get the honest "no data" short-circuit, never general_ai.
   if (scenarioDecision.kind === 'out_of_scope') {
-    const guardrail = buildDeterministicGuardrailResult(question);
+    const guardrail = buildDeterministicGuardrailResult(question, audience);
     if (guardrail) return guardrail;
 
     if (!isBureauTopic(question)) {
@@ -947,7 +947,7 @@ export async function answerQuestionEnhanced(
   const context = buildEnhancedContext(contextChunks, rules, qaPairs);
 
   if (confidenceLevel === 'insufficient' && !hasStrongQaMatch && shouldUseGeneralKnowledgeFallback(question)) {
-    const guardrail = buildDeterministicGuardrailResult(question);
+    const guardrail = buildDeterministicGuardrailResult(question, audience);
     if (guardrail) return guardrail;
 
     return answerFromGeneralKnowledgeFallback(
@@ -1229,7 +1229,31 @@ ${fixList}
   return result;
 }
 
-function buildDeterministicGuardrailResult(question: string): EnhancedAnswerResult | null {
+/**
+ * Guardrail'ы писались для внутреннего контура: их текст объясняет сотруднику,
+ * что апостиль ставится по месту выдачи и куда клиенту идти. Клиенту такой
+ * ответ выдавать нельзя — это отказ плюс отправка мимо бюро.
+ *
+ * Подтверждённой клиентской альтернативы для документа из чужого региона в базе
+ * пока нет (правила про апостиль на нотариальную копию противоречат друг другу,
+ * R-410/R-967 против R-407/R-1494), поэтому клиентский контур на таких вопросах
+ * уходит к человеку: внутренний текст остаётся черновиком для оператора, а
+ * клиент получает передачу коллеге. Как только правило «что мы предлагаем
+ * вместо» появится в базе, здесь встанет продающий ответ.
+ */
+function buildDeterministicGuardrailResult(
+  question: string,
+  audience: Audience
+): EnhancedAnswerResult | null {
+  const result = buildInternalGuardrailResult(question);
+  if (!result) return null;
+  if (audience === 'client') {
+    return { ...result, requiresHumanReview: true };
+  }
+  return result;
+}
+
+function buildInternalGuardrailResult(question: string): EnhancedAnswerResult | null {
   // All regexes use /iu flags and test the ORIGINAL question directly.
   // Never call normalizeRussianText() here — its toLowerCase() silently corrupts
   // Cyrillic to U+FFFD on some Alpine Linux / Node 20 (small-icu) deployments.

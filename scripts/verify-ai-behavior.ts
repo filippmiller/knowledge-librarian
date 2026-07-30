@@ -30,12 +30,31 @@ async function main() {
     },
   };
   clearAnswerCache();
-  assert.equal(storeCachedAnswer('какие документы ЗАГС ты можешь мне назвать', cacheable), true);
-  assert.equal(getCachedAnswer('какие документы загс ты можешь мне назвать')?.cacheHit, 'exact');
-  assert.equal(getCachedAnswer('назови документы загс')?.cacheHit, 'similar');
+  assert.equal(
+    storeCachedAnswer('internal', 'какие документы ЗАГС ты можешь мне назвать', cacheable),
+    true
+  );
+  assert.equal(
+    getCachedAnswer('internal', 'какие документы загс ты можешь мне назвать')?.cacheHit,
+    'exact'
+  );
+  assert.equal(getCachedAnswer('internal', 'назови документы загс')?.cacheHit, 'similar');
+
+  // Кэш разделён по аудитории: внутренний ответ не должен утечь клиенту ни
+  // точным ключом, ни нечётким совпадением.
+  assert.equal(
+    getCachedAnswer('client', 'какие документы загс ты можешь мне назвать'),
+    null,
+    'внутренний ответ не должен отдаваться клиентскому запросу по точному ключу'
+  );
+  assert.equal(
+    getCachedAnswer('client', 'назови документы загс'),
+    null,
+    'внутренний ответ не должен отдаваться клиентскому запросу по нечёткому совпадению'
+  );
 
   const unclear: EnhancedAnswerResult = { ...cacheable, needsClarification: true, confidenceLevel: 'insufficient' };
-  assert.equal(storeCachedAnswer('где выдан документ', unclear), false);
+  assert.equal(storeCachedAnswer('internal', 'где выдан документ', unclear), false);
 
   const zagsCatalog = await classifyScenario('какие документы ЗАГС ты можешь мне назвать');
   assert.equal(

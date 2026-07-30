@@ -1,6 +1,7 @@
 import prisma from '@/lib/db';
 import { generateEmbeddings } from '@/lib/openai';
 import { lintRules, type LintInput, type LintWarning } from './extraction-lint';
+import { setDocumentAudience } from '@/lib/knowledge/audience';
 
 export interface CommitResult {
   success: boolean;
@@ -341,6 +342,12 @@ export async function commitDocumentKnowledge(documentId: string, options: Commi
     where: { id: documentId },
     data: { parseStatus: 'COMPLETED' },
   });
+
+  // Приводим аудиторию всего извлечённого к аудитории документа. Отдельные
+  // create-вызовы выше её не задают и получают безопасный дефолт INTERNAL_ONLY;
+  // сверка одной операцией надёжнее, чем требовать поле в каждом из десятка
+  // мест создания — забытое поле там означало бы тихий разъезд метки.
+  await setDocumentAudience(documentId, document.audience);
 
   await prisma.stagedExtraction.deleteMany({
     where: { documentId, isVerified: true },

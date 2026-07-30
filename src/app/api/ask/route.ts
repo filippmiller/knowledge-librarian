@@ -15,6 +15,7 @@ import {
 } from '@/lib/rate-limiter';
 import { escalateUnconvincingAIAnswer } from '@/lib/telegram/ai-escalation';
 import type { Audience } from '@/lib/knowledge/audience';
+import { getSession } from '@/lib/session';
 
 export async function POST(request: NextRequest) {
   // Rate limiting
@@ -72,16 +73,24 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Question is required' }, { status: 400 });
     }
 
-    // Этот эндпоинт обслуживает внутренние инструменты (плейграунд, бот-лаб),
-    // поэтому по умолчанию внутренний контур. Клиентский вызывающий обязан
-    // объявить audience: 'client' явно — молчаливо клиентским он не станет.
     if (rawAudience !== undefined && rawAudience !== 'internal' && rawAudience !== 'client') {
       return NextResponse.json(
         { error: "audience должен быть 'internal' или 'client'" },
         { status: 400 }
       );
     }
-    const audience: Audience = rawAudience === 'client' ? 'client' : 'internal';
+
+    // Этот роут публичный: middleware его не закрывает, и любой внешний вызов
+    // сюда доходит. Поэтому внутренний контур выдаётся ТОЛЬКО по сессии
+    // сотрудника. Аноним получает клиентский контур независимо от того, что
+    // прислал в теле: неавторизованный вызывающий по определению не сотрудник,
+    // а ошибка в эту сторону приводит к менее полному ответу, а не к утечке
+    // адресов госорганов и внутренней себестоимости.
+    const session = await getSession(request);
+    const audience: Audience = session && rawAudience !== 'client' ? 'internal' : 'client';
+    if (!session && rawAudience === 'internal') {
+      console.warn('[ASK] Внутренний контур запрошен без сессии — отдаём клиентский');
+    }
 
     // Validate question length
     if (question.length > 2000) {
@@ -108,7 +117,7 @@ export async function POST(request: NextRequest) {
 
     // Check shared answer cache first (skip for debug and conversation-context requests).
     if (!includeDebug) {
-      const cached = !useConversationContext ? getCachedAnswer(question, clarificationAnswer) : null;
+      const cached = !useConversationContext ? getCachedAnswer(audience, question, clarificationAnswer) : null;
       if (cached) {
         console.log('[ASK] Returning cached answer for:', question.substring(0, 60));
         return NextResponse.json({ sessionId: currentSessionId, ...cached.result });
@@ -141,7 +150,7 @@ export async function POST(request: NextRequest) {
 
     // Cache only convincing final answers; weak answers and clarification prompts are skipped.
     if (!includeDebug && !useConversationContext) {
-      storeCachedAnswer(question, result, clarificationAnswer);
+      storeCachedAnswer(audience, question, result, clarificationAnswer);
     }
 
     // Save assistant message with enhanced metadata

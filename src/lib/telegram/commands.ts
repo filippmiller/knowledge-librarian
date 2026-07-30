@@ -577,14 +577,14 @@ export async function handleQuestion(message: TelegramMessage, user: TelegramUse
 
     // Caching is keyed on the raw text; a clarification reply ("Москва") means
     // something different per conversation, so never cache or serve it.
-    const cached = resolvingClarification ? null : getCachedAnswer(question);
+    const cached = resolvingClarification ? null : getCachedAnswer('internal', question);
     const result = cached?.result ?? await answerQuestionEnhanced({
       question: effectiveQuestion,
       // Telegram — внутренний контур: сотруднику нужна полная процедура.
       audience: 'internal',
       sessionId: session.id,
     });
-    if (!cached && !resolvingClarification) storeCachedAnswer(question, result);
+    if (!cached && !resolvingClarification) storeCachedAnswer('internal', question, result);
 
     // Auto-answer policy: clarifications and confident answers go to the user,
     // everything else goes to a human.
