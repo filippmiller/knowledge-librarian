@@ -25,6 +25,10 @@ import {
   resolveApostilleTerritoriality,
 } from '@/lib/knowledge/apostille-authority';
 import {
+  checkCertificationPriceAttribution,
+  type PriceContradiction,
+} from '@/lib/knowledge/certification-price';
+import {
   admissibleAudiences,
   checkClientSafety,
   type Audience,
@@ -569,6 +573,24 @@ function logClientSafetyVerdict(violations: string[], sourceHint: string): void 
   }
 }
 
+/**
+ * Противоречие прайсу печатается так, чтобы оператор увидел обе цены сразу и
+ * мог решить: ошибся синтез или устарела строка базы. Без «прайс: …» рядом
+ * запись в логе бесполезна — цену пришлось бы искать в документе.
+ */
+function logPriceContradictions(contradictions: PriceContradiction[], sourceHint: string): void {
+  for (const c of contradictions) {
+    console.warn(
+      '[enhanced-answering] ПРАЙС: цена приписана не той услуге — «%s»: назвал %s, прайс %s | фраза: %s | источники: %s',
+      c.serviceLabel,
+      c.claimed,
+      c.expected,
+      c.sentence,
+      sourceHint
+    );
+  }
+}
+
 export function answerSignalsKnowledgeGap(answer: string): boolean {
   return KNOWLEDGE_GAP_PATTERNS.some((pattern) => pattern.test(answer));
 }
@@ -757,6 +779,17 @@ export async function answerQuestionEnhanced(
         canonicalQa.id,
         canonicalGrounding.ungrounded.map((c) => `${c.value}/${c.unit}`).join(', ')
       );
+      return { ...canonicalResult, requiresHumanReview: true };
+    }
+
+    // Прайс сверяется и здесь. Эталонная пара — это ответ оператора из живой
+    // переписки: он был верен в своём случае, но цена в нём могла устареть или
+    // относиться к другой услуге, а этот путь отдаёт ответ с уверенностью 1.0
+    // и без ручной проверки. Заземление выше сверяет полировку с самой парой и
+    // ошибку В ПАРЕ увидеть не может — для этого нужен внешний источник правды.
+    const canonicalPrices = checkCertificationPriceAttribution(canonicalResult.answer);
+    if (!canonicalPrices.consistent) {
+      logPriceContradictions(canonicalPrices.contradictions, `QAPair ${canonicalQa.id}`);
       return { ...canonicalResult, requiresHumanReview: true };
     }
 
@@ -1340,13 +1373,25 @@ ${fixList}
   // означало бы лишить его инструмента.
   const ungroundedBlocksClient = audience === 'client' && !grounding.grounded;
 
+  // Приписка цены. Заземление проверяет ПРОИСХОЖДЕНИЕ числа и потому слепо к
+  // самой дорогой ошибке: «нотариальное заверение перевода — 260 рублей за
+  // страницу». Число из источников, и всё же это противоречие прайсу — 260 ₽/стр
+  // стоит заверение КОПИИ, а перевода 1100 ₽/док. Здесь ответ сверяется с
+  // таблицей прайса напрямую. В отличие от заземления, вердикт действует на оба
+  // контура: сотруднику назвать клиенту чужой тариф так же нельзя.
+  const priceAttribution = checkCertificationPriceAttribution(answer);
+  if (!priceAttribution.consistent) {
+    logPriceContradictions(priceAttribution.contradictions, rules.map((r) => r.ruleCode).join(', '));
+  }
+
   const requiresHumanReview = Boolean(
     consistency?.verificationFailed ||
     consistency?.unsupported.length ||
     answerSignalsKnowledgeGap(answer) ||
     answerSignalsCompositeCapabilityRisk(question, answer) ||
     (clientSafety && !clientSafety.safe) ||
-    ungroundedBlocksClient
+    ungroundedBlocksClient ||
+    !priceAttribution.consistent
   );
 
   // Build source references from context chunks
