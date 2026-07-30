@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { KnowledgeAudience } from '@prisma/client';
 import prisma from '@/lib/db';
 import { createAuthResponse, getAuthenticatedUser } from '@/lib/auth';
 import { polishVoiceAnswer } from '@/lib/ai/voice-answer-polisher';
 import { getBotLabCase } from '@/lib/bot-lab/cases';
+import { upsertLearnedQaPair } from '@/lib/knowledge/qa-upsert';
 
 function clean(value: unknown, max: number): string {
   return typeof value === 'string' ? value.trim().slice(0, max) : '';
@@ -61,60 +63,47 @@ export async function POST(request: NextRequest): Promise<Response> {
   const approvedAt = new Date();
 
   const result = await prisma.$transaction(async (tx) => {
-    // Supersede any existing active pair for the same canonical question.
-    const existingQa = await tx.qAPair.findFirst({
-      where: { status: 'ACTIVE', question },
-      orderBy: { updatedAt: 'desc' },
-    });
-
-    if (existingQa && existingQa.answer.trim() === polishedAnswer) {
-      return { qaPairId: existingQa.id, reused: true, version: existingQa.version };
-    }
-
-    if (existingQa) {
-      await tx.qAPair.update({
-        where: { id: existingQa.id },
-        data: { status: 'SUPERSEDED' },
-      });
-    }
-
-    const qa = await tx.qAPair.create({
-      data: {
-        question,
-        answer: polishedAnswer,
-        status: 'ACTIVE',
-        version: existingQa ? existingQa.version + 1 : 1,
-        supersedesQaId: existingQa?.id,
-        scenarioKey: sourceCase?.category ?? null,
-        metadata: {
-          origin: 'voice-operator',
-          authorityTag: 'VOICE_ANSWER_AUTHORITY',
-          confidence: 1.0,
-          approvedBy: `web:${actor.username}`,
-          approvedAt: approvedAt.toISOString(),
-          rawTranscript,
-          evalCaseId: caseId || null,
-          note: null,
-        },
+    // Пара пишется как внутренняя и опознаётся по тройке (вопрос, аудитория,
+    // сценарий). Раньше поиск шёл только по тексту вопроса, и запись голосового
+    // эталона гасила одноимённую КЛИЕНТСКУЮ пару, подставляя вместо неё
+    // внутреннюю. Выпускать голосовой эталон клиенту без разметки нельзя:
+    // оператор наговорил его сотруднику, а не заказчику.
+    const upsert = await upsertLearnedQaPair(tx, {
+      question,
+      answer: polishedAnswer,
+      audience: KnowledgeAudience.INTERNAL_ONLY,
+      scenarioKey: sourceCase?.category ?? null,
+      metadata: {
+        origin: 'voice-operator',
+        authorityTag: 'VOICE_ANSWER_AUTHORITY',
+        confidence: 1.0,
+        approvedBy: `web:${actor.username}`,
+        approvedAt: approvedAt.toISOString(),
+        rawTranscript,
+        evalCaseId: caseId || null,
+        note: null,
       },
     });
+
+    if (upsert.reused) {
+      return { qaPairId: upsert.qaPairId, reused: true, version: upsert.version };
+    }
 
     await tx.knowledgeChange.create({
       data: {
         targetType: 'QA_PAIR',
-        targetId: qa.id,
-        changeType: existingQa ? 'SUPERSEDE' : 'CREATE',
-        oldValue: existingQa
-          ? { question: existingQa.question, answer: existingQa.answer, version: existingQa.version }
-          : undefined,
+        targetId: upsert.qaPairId,
+        changeType: upsert.supersededId ? 'SUPERSEDE' : 'CREATE',
+        oldValue: upsert.previous,
         newValue: {
-          question: qa.question,
-          answer: qa.answer,
-          version: qa.version,
-          scenarioKey: qa.scenarioKey,
+          question,
+          answer: polishedAnswer,
+          version: upsert.version,
+          scenarioKey: sourceCase?.category ?? null,
+          audience: KnowledgeAudience.INTERNAL_ONLY,
           authorityTag: 'VOICE_ANSWER_AUTHORITY',
         },
-        reason: existingQa
+        reason: upsert.supersededId
           ? 'Оператор записал новую версию эталонного ответа в Bot Decision Lab'
           : 'Оператор записал эталонный ответ в Bot Decision Lab',
         initiatedBy: 'ADMIN',
@@ -124,7 +113,7 @@ export async function POST(request: NextRequest): Promise<Response> {
       },
     });
 
-    return { qaPairId: qa.id, reused: false, version: qa.version };
+    return { qaPairId: upsert.qaPairId, reused: false, version: upsert.version };
   });
 
   return NextResponse.json(

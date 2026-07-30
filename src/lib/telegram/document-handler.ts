@@ -4,6 +4,7 @@ import type { TelegramUserInfo } from './access-control';
 import { parseDocument, detectMimeType } from '@/lib/document-parser';
 import { createChatCompletion } from '@/lib/ai/chat-provider';
 import { generateEmbeddings } from '@/lib/openai';
+import { setDocumentAudience } from '@/lib/knowledge/audience';
 import prisma from '@/lib/db';
 
 interface DomainClassResult {
@@ -108,10 +109,16 @@ export async function handleDocumentUpload(
     const chunksCreated = await createChunks(rawText, document.id, domainIds);
 
     // Mark document as completed
-    await prisma.document.update({
+    const completed = await prisma.document.update({
       where: { id: document.id },
       data: { parseStatus: 'COMPLETED' },
     });
+
+    // Та же сверка, что и в веб-коммите: create-вызовы выше аудиторию не
+    // задают и получают дефолт INTERNAL_ONLY. Пока документ создаётся с тем же
+    // дефолтом, они совпадают, но полагаться на это нельзя — стоит документу
+    // появиться клиентским, и его знания молча остались бы внутренними.
+    await setDocumentAudience(document.id, completed.audience);
 
     // Fetch domain names for summary
     const domains = domainIds.length > 0

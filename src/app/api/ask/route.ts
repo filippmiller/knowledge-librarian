@@ -4,6 +4,7 @@ import {
   answerWithContext,
 } from '@/lib/ai/enhanced-answering-engine';
 import { getCachedAnswer, storeCachedAnswer } from '@/lib/ai/answer-cache';
+import { applyDelivery, resolveDelivery } from '@/lib/ai/delivery';
 import {
   saveChatMessage,
   getOrCreateSession,
@@ -120,7 +121,14 @@ export async function POST(request: NextRequest) {
       const cached = !useConversationContext ? getCachedAnswer(audience, question, clarificationAnswer) : null;
       if (cached) {
         console.log('[ASK] Returning cached answer for:', question.substring(0, 60));
-        return NextResponse.json({ sessionId: currentSessionId, ...cached.result });
+        // Политика доставки применяется и к кэшу: настройки автоответа могли
+        // измениться с момента записи, а отданный без решения ответ потребитель
+        // отправит клиенту как есть.
+        const cachedDelivery = await resolveDelivery(cached.result, audience);
+        return NextResponse.json({
+          sessionId: currentSessionId,
+          ...applyDelivery(cached.result, cachedDelivery, { includeDraft: Boolean(session) }),
+        });
       }
     }
 
@@ -141,25 +149,56 @@ export async function POST(request: NextRequest) {
           includeDebug: includeDebug === true,
         });
     console.log('[ASK] Answer generated successfully');
-    void escalateUnconvincingAIAnswer({
-      question,
-      result,
-      source: 'API',
-      sessionId: currentSessionId,
-    });
 
     // Cache only convincing final answers; weak answers and clarification prompts are skipped.
     if (!includeDebug && !useConversationContext) {
       storeCachedAnswer(audience, question, result, clarificationAnswer);
     }
 
-    // Save assistant message with enhanced metadata
-    await saveChatMessage(currentSessionId, 'ASSISTANT', result.answer, {
+    // Решение о доставке принимается ДО записи в историю. Иначе в историю
+    // ложится сырой черновик, а клиент видит удерживающий текст — и следующий
+    // запрос с useConversationContext подхватывает из истории ровно тот
+    // неподтверждённый факт, который только что удержали.
+    const delivery = await resolveDelivery(result, audience);
+    if (delivery.withheld) {
+      console.warn(
+        '[ASK] Черновик удержан от клиента (decision=%s, confidence=%s, requiresHumanReview=%s):',
+        delivery.decision,
+        result.confidence.toFixed(2),
+        result.requiresHumanReview,
+        question.slice(0, 80)
+      );
+    }
+
+    // Эскалация ПОСЛЕ решения о доставке и с его учётом.
+    //
+    // Удерживающий текст обещает клиенту ответ живого человека. Обычная
+    // эскалация срабатывает только на признаках недоверия к ответу, а уверенный
+    // ответ может быть забракован одними настройками — выключенным автоответом
+    // или поднятым порогом. Без явной причины такой случай не создавал ни
+    // задачи, ни уведомления: клиенту обещали коллегу, а вопрос не получал никто.
+    void escalateUnconvincingAIAnswer({
+      question,
+      result,
+      source: 'API',
+      audience,
+      sessionId: currentSessionId,
+      extraReasons: delivery.withheld
+        ? [`ответ удержан от клиента политикой доставки (${delivery.decision})`]
+        : undefined,
+    });
+
+    // В историю — то, что реально увидел собеседник. Черновик сохраняется
+    // рядом, в метаданных: оператору он нужен, в контекст следующего ответа
+    // попасть не должен.
+    await saveChatMessage(currentSessionId, 'ASSISTANT', delivery.outboundAnswer, {
       confidence: result.confidence,
       confidenceLevel: result.confidenceLevel,
       domainsUsed: result.domainsUsed,
       citationCount: result.citations.length,
       needsClarification: result.needsClarification,
+      delivery: delivery.decision,
+      withheldDraft: delivery.withheld ? delivery.draftAnswer : undefined,
       queryAnalysis: {
         isAmbiguous: result.queryAnalysis.isAmbiguous,
         expandedQueriesCount: result.queryAnalysis.expandedQueries.length,
@@ -169,7 +208,10 @@ export async function POST(request: NextRequest) {
     // Build response with rate limit headers
     const response = NextResponse.json({
       sessionId: currentSessionId,
-      ...result,
+      // Черновик отдаётся только по сессии сотрудника. Аноним не должен
+      // получить текст, который мы только что признали недопустимым для него:
+      // иначе подмена ответа — косметика, а не защита.
+      ...applyDelivery(result, delivery, { includeDraft: Boolean(session) }),
     });
 
     response.headers.set('X-RateLimit-Remaining', String(rateLimitResult.remaining));

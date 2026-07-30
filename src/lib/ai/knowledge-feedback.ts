@@ -10,10 +10,31 @@
 // Human gate ALWAYS: the draft answer is unverified AI knowledge and can be
 // wrong — nothing auto-saves.
 
+import { KnowledgeAudience } from '@prisma/client';
 import prisma from '@/lib/db';
 import type { EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
 import { classifyScenario } from '@/lib/knowledge/scenario-classifier';
 import { isDraftableDraft } from '@/lib/ai/answer-policy';
+import { upsertLearnedQaPair } from '@/lib/knowledge/qa-upsert';
+import { checkClientSafety, type Audience } from '@/lib/knowledge/audience';
+import { extractRiskyClaims } from '@/lib/ai/claim-grounding';
+
+/** Контур, в котором был задан вопрос → метка знания, которую получит пара. */
+function audienceToKnowledge(audience: Audience): KnowledgeAudience {
+  return audience === 'client' ? KnowledgeAudience.CLIENT_SAFE : KnowledgeAudience.INTERNAL_ONLY;
+}
+
+/**
+ * Аудитория черновика. Записывается при создании и читается при утверждении:
+ * между ними проходит человек, и восстановить контур по тексту вопроса нельзя.
+ * Старые черновики поля не имеют — для них безопасный дефолт `internal`,
+ * потому что ошибка в эту сторону сужает ответ, а не выпускает внутренние
+ * факты клиенту.
+ */
+function readDraftAudience(context: unknown): Audience {
+  if (!context || typeof context !== 'object' || Array.isArray(context)) return 'internal';
+  return (context as Record<string, unknown>).audience === 'client' ? 'client' : 'internal';
+}
 
 /** True when the answer is low-trust and worth capturing as a draft rule. */
 export function isLowTrust(result: EnhancedAnswerResult): boolean {
@@ -34,6 +55,9 @@ export async function createKnowledgeGapSuggestion(params: {
   question: string;
   result: EnhancedAnswerResult;
   source: 'WEB' | 'TELEGRAM' | 'API';
+  /** Контур, в котором задан вопрос. Обязателен: без него утверждённая пара
+   *  уходит во внутренние и клиентский контур ничему не учится. */
+  audience: Audience;
   sessionId?: string;
 }): Promise<string | null> {
   try {
@@ -48,11 +72,21 @@ export async function createKnowledgeGapSuggestion(params: {
     const target = normalizeQuestion(params.question);
     const openGaps = await prisma.aIQuestion.findMany({
       where: { issueType: 'knowledge_gap', status: 'OPEN' },
-      select: { question: true },
+      select: { question: true, context: true },
       take: 300,
       orderBy: { createdAt: 'desc' },
     });
-    if (openGaps.some((g) => normalizeQuestion(g.question) === target)) return null;
+    // Дедуп внутри контура: один и тот же вопрос от клиента и от сотрудника —
+    // это два разных черновика с разным составом допустимых фактов.
+    if (
+      openGaps.some(
+        (g) =>
+          normalizeQuestion(g.question) === target &&
+          readDraftAudience(g.context) === params.audience
+      )
+    ) {
+      return null;
+    }
 
     // Draft answer = the answer we already produced.
     const draftAnswer = params.result.answer;
@@ -77,6 +111,7 @@ export async function createKnowledgeGapSuggestion(params: {
         status: 'OPEN',
         context: {
           source: params.source,
+          audience: params.audience,
           sessionId: params.sessionId ?? null,
           answerSource: params.result.answerSource ?? null,
           confidenceLevel: params.result.confidenceLevel,
@@ -122,6 +157,39 @@ export async function approveKnowledgeGap(
   const answer = (opts.answer ?? draft.answer ?? '').trim();
   if (answer.length < 5) throw new Error('answer too short');
   const scenarioKey = opts.scenarioKey !== undefined ? opts.scenarioKey : draft.scenarioKey ?? null;
+  // Контур берётся из черновика, а не угадывается: между созданием и
+  // утверждением проходит человек, и вопрос «клиентский он или внутренний» по
+  // одному тексту уже не восстановить.
+  const audience = audienceToKnowledge(readDraftAudience(aq.context));
+
+  // Оператор вправе отредактировать черновик перед утверждением, и правка не
+  // проходит ни одной проверки движка. Так в базу попадает утверждение, которое
+  // синтез никогда бы не выпустил: адрес госоргана в клиентской паре или цена,
+  // взятая из головы. Пара при этом становится постоянной — её будут выдавать
+  // снова и снова.
+  //
+  // Клиентскую пару с маршрутом наружу отклоняем: она прямо противоречит цели
+  // контура. Про числа только предупреждаем — источников на этом шаге уже нет,
+  // и отличить выдуманную цену от правильной, но отредактированной, нельзя.
+  if (audience === KnowledgeAudience.CLIENT_SAFE) {
+    const safety = checkClientSafety(answer);
+    if (!safety.safe) {
+      throw new Error(
+        `Ответ уводит клиента наружу (${safety.violations.join(', ')}) — как клиентскую пару сохранять нельзя`
+      );
+    }
+  }
+  const editedByOperator = opts.answer !== undefined && opts.answer.trim() !== (draft.answer ?? '').trim();
+  if (editedByOperator) {
+    const claims = extractRiskyClaims(answer);
+    if (claims.length > 0) {
+      console.warn(
+        '[knowledge-feedback] Оператор отредактировал черновик и в ответе есть числа (%s). Источники на этом шаге недоступны — проверить вручную: %s',
+        claims.map((c) => `${c.value}/${c.unit}`).join(', '),
+        question.slice(0, 80)
+      );
+    }
+  }
 
   // Atomic claim + write. `updateMany` with a status guard is the lock: only ONE
   // concurrent approval can flip OPEN→ANSWERED (count === 1); a loser sees
@@ -135,51 +203,36 @@ export async function approveKnowledgeGap(
     });
     if (claim.count !== 1) throw new Error('already resolved');
 
-    const existingQa = await tx.qAPair.findFirst({
-      where: { question, status: 'ACTIVE' },
-      orderBy: { updatedAt: 'desc' },
-    });
-
-    if (existingQa && existingQa.answer.trim() === answer) {
-      await tx.aIQuestion.update({
-        where: { id },
-        data: { response: `approved → existing QAPair ${existingQa.id}` },
-      });
-      return { qaPairId: existingQa.id };
-    }
-
-    if (existingQa) {
-      await tx.qAPair.update({
-        where: { id: existingQa.id },
-        data: { status: 'SUPERSEDED' },
-      });
-    }
-
-    const qa = await tx.qAPair.create({
-      data: {
-        question,
-        answer,
-        status: 'ACTIVE',
-        version: existingQa ? existingQa.version + 1 : 1,
-        supersedesQaId: existingQa?.id,
-        scenarioKey,
-        metadata: {
-          origin: 'ai-suggested',
-          approvedBy: opts.approvedBy,
-          approvedAt: new Date().toISOString(),
-          fromAIQuestion: id,
-        },
+    const upsert = await upsertLearnedQaPair(tx, {
+      question,
+      answer,
+      audience,
+      scenarioKey,
+      metadata: {
+        origin: 'ai-suggested',
+        audience: audience === 'CLIENT_SAFE' ? 'client' : 'internal',
+        approvedBy: opts.approvedBy,
+        approvedAt: new Date().toISOString(),
+        fromAIQuestion: id,
       },
     });
+
+    if (upsert.reused) {
+      await tx.aIQuestion.update({
+        where: { id },
+        data: { response: `approved → existing QAPair ${upsert.qaPairId}` },
+      });
+      return { qaPairId: upsert.qaPairId };
+    }
 
     await tx.knowledgeChange.create({
       data: {
         targetType: 'QA_PAIR',
-        targetId: qa.id,
-        changeType: existingQa ? 'SUPERSEDE' : 'CREATE',
-        oldValue: existingQa ? { question: existingQa.question, answer: existingQa.answer, version: existingQa.version } : undefined,
-        newValue: { question: qa.question, answer: qa.answer, version: qa.version, scenarioKey: qa.scenarioKey },
-        reason: existingQa ? 'Утверждена новая версия ответа через human review' : 'Утверждён новый ответ через human review',
+        targetId: upsert.qaPairId,
+        changeType: upsert.supersededId ? 'SUPERSEDE' : 'CREATE',
+        oldValue: upsert.previous,
+        newValue: { question, answer, version: upsert.version, scenarioKey, audience },
+        reason: upsert.supersededId ? 'Утверждена новая версия ответа через human review' : 'Утверждён новый ответ через human review',
         initiatedBy: 'ADMIN',
         approvedBy: opts.approvedBy,
         status: 'APPROVED',
@@ -189,10 +242,10 @@ export async function approveKnowledgeGap(
 
     await tx.aIQuestion.update({
       where: { id },
-      data: { response: `approved → QAPair ${qa.id}` },
+      data: { response: `approved → QAPair ${upsert.qaPairId}` },
     });
 
-    return { qaPairId: qa.id };
+    return { qaPairId: upsert.qaPairId };
   });
 }
 

@@ -897,10 +897,28 @@ export async function POST(request: NextRequest) {
           },
         });
 
+        // Мини-приложение — внутренний контур, черновик сотруднику показать
+        // можно. Но решение о доставке всё равно прикладываем: без него
+        // интерфейс выдаёт забракованный движком ответ как готовый, и сотрудник
+        // пересылает его клиенту, не зная, что автоответ его бы не отправил.
+        // Ответ собирается тем же `applyDelivery`, что и в `/api/ask`, а не
+        // руками: сегодня контур внутренний и подмены не будет, но стоит
+        // сделать аудиторию настраиваемой — и ручная сборка молча отдала бы
+        // клиенту забракованный черновик. Поле `answer` обязано быть уже
+        // безопасным для своей аудитории в каждом канале.
+        const { resolveDelivery, applyDelivery } = await import('@/lib/ai/delivery');
+        const audience = 'internal' as const;
+        const delivery = await resolveDelivery(result, audience);
+        const delivered = applyDelivery(result, delivery, { includeDraft: true });
+
         return NextResponse.json({
-          answer: result.answer,
+          answer: delivered.answer,
+          delivery: delivered.delivery,
+          answerWithheld: delivered.answerWithheld,
+          draftAnswer: delivered.draftAnswer,
           confidence: result.confidence,
           confidenceLevel: result.confidenceLevel,
+          requiresHumanReview: result.requiresHumanReview,
           citations: result.citations,
           domainsUsed: result.domainsUsed,
           sessionId: session.id,

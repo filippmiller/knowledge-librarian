@@ -598,6 +598,7 @@ export async function handleQuestion(message: TelegramMessage, user: TelegramUse
       question: effectiveQuestion,
       result,
       source: 'TELEGRAM',
+      audience: 'internal',
       userId: user.telegramId,
       sessionId: session.id,
     });
