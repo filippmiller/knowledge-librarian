@@ -4,6 +4,7 @@ import {
   answerWithContext,
 } from '@/lib/ai/enhanced-answering-engine';
 import { getCachedAnswer, storeCachedAnswer } from '@/lib/ai/answer-cache';
+import { applyDelivery, resolveDelivery } from '@/lib/ai/delivery';
 import {
   saveChatMessage,
   getOrCreateSession,
@@ -120,7 +121,14 @@ export async function POST(request: NextRequest) {
       const cached = !useConversationContext ? getCachedAnswer(audience, question, clarificationAnswer) : null;
       if (cached) {
         console.log('[ASK] Returning cached answer for:', question.substring(0, 60));
-        return NextResponse.json({ sessionId: currentSessionId, ...cached.result });
+        // Политика доставки применяется и к кэшу: настройки автоответа могли
+        // измениться с момента записи, а отданный без решения ответ потребитель
+        // отправит клиенту как есть.
+        const cachedDelivery = await resolveDelivery(cached.result, audience);
+        return NextResponse.json({
+          sessionId: currentSessionId,
+          ...applyDelivery(cached.result, cachedDelivery),
+        });
       }
     }
 
@@ -145,6 +153,7 @@ export async function POST(request: NextRequest) {
       question,
       result,
       source: 'API',
+      audience,
       sessionId: currentSessionId,
     });
 
@@ -166,10 +175,24 @@ export async function POST(request: NextRequest) {
       },
     });
 
+    // Решение о доставке принимается здесь, а не оставляется потребителю:
+    // `/api/ask` публичный, и битрикс-интеграция иначе отправила бы клиенту
+    // заглушку «в базе знаний нет данных».
+    const delivery = await resolveDelivery(result, audience);
+    if (delivery.withheld) {
+      console.warn(
+        '[ASK] Черновик удержан от клиента (decision=%s, confidence=%s, requiresHumanReview=%s):',
+        delivery.decision,
+        result.confidence.toFixed(2),
+        result.requiresHumanReview,
+        question.slice(0, 80)
+      );
+    }
+
     // Build response with rate limit headers
     const response = NextResponse.json({
       sessionId: currentSessionId,
-      ...result,
+      ...applyDelivery(result, delivery),
     });
 
     response.headers.set('X-RateLimit-Remaining', String(rateLimitResult.remaining));

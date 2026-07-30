@@ -1,0 +1,114 @@
+/**
+ * Кейсы для проверки заземления числовых утверждений.
+ * Запуск: npx tsx scripts/verify-claim-grounding.ts
+ */
+import { checkClaimGrounding, extractRiskyClaims } from '../src/lib/ai/claim-grounding';
+
+interface Case {
+  name: string;
+  answer: string;
+  sources: string[];
+  expectGrounded: boolean;
+}
+
+const CASES: Case[] = [
+  {
+    name: 'цена взята из источника дословно',
+    answer: 'Нотариальное заверение перевода стоит 1100 рублей за документ.',
+    sources: ['Нотариальное заверение перевода (включая тех. работы) — 1100 руб. / док.'],
+    expectGrounded: true,
+  },
+  {
+    name: 'цена с типографским пробелом в источнике',
+    answer: 'Срочный апостиль ЗАГС СПб — 27500 ₽ за документ.',
+    sources: ['СРОЧНЫЙ АПОСТИЛЬ ЗАГС СПБ (2-3 рабочих дня) — 27 500 руб./док'],
+    expectGrounded: true,
+  },
+  {
+    name: 'цена с пробелом в ответе, слитно в источнике',
+    answer: 'Апостиль на образовательные документы — 12 000 рублей.',
+    sources: ['Апостиль образовательных документов стоит 12000 руб. за документ.'],
+    expectGrounded: true,
+  },
+  {
+    name: 'ПОСЧИТАННЫЙ итог, которого нет в источниках',
+    answer: 'Паспорт на 3 страницы: 440 × 3 = 1320 рублей плюс заверение 1100 рублей, итого 2420 рублей.',
+    sources: ['Стандарт: 440 руб (с НЗ 1540 руб). Нотариальное заверение — 1100 руб. / док.'],
+    expectGrounded: false,
+  },
+  {
+    name: 'ВЫДУМАННАЯ цена',
+    answer: 'Апостиль на справку о несудимости стоит 7500 рублей.',
+    sources: ['Апостиль МВД СПб — 5000 руб./док. Госпошлина 2500 руб.'],
+    expectGrounded: false,
+  },
+  {
+    name: 'подстрока не считается заземлением: 110 внутри 1100',
+    answer: 'Заверение стоит 110 рублей за документ.',
+    sources: ['Нотариальное заверение перевода — 1100 руб. / док.'],
+    expectGrounded: false,
+  },
+  {
+    name: 'срок из источника',
+    answer: 'Стандартный срок апостиля в Минюсте — 3 рабочих дня.',
+    sources: ['На стандартные документы — 3 р.д. Без записи, в рабочие часы.'],
+    expectGrounded: true,
+  },
+  {
+    name: 'ВЫДУМАННЫЙ срок',
+    answer: 'Апостиль будет готов через 7 рабочих дней.',
+    sources: ['На стандартные документы — 3 р.д. Судебные — 30 и более р.д.'],
+    expectGrounded: false,
+  },
+  {
+    name: 'процент предоплаты из источника',
+    answer: 'Для крупных заказов вносится предоплата 70%.',
+    sources: ['Предоплата составляет 60–70% от предварительной стоимости заказа.'],
+    expectGrounded: true,
+  },
+  {
+    name: 'ответ без чисел — проверять нечего',
+    answer: 'Да, мы можем оформить заказ удалённо по скану документа. Пришлите файл.',
+    sources: ['Заказ оформляется удалённо по скану.'],
+    expectGrounded: true,
+  },
+  {
+    name: 'срок хранения из источника',
+    answer: 'Готовые заверенные переводы храним 3 календарных месяца.',
+    sources: ['Заверенные переводы хранятся в офисе до 3 календарных месяцев, затем утилизируются.'],
+    expectGrounded: true,
+  },
+  {
+    name: 'условная страница — число из источника',
+    answer: 'Условная страница — это 1800 знаков с пробелами.',
+    sources: ['1 условная страница (у.с.) = 1800 знаков с пробелами по статистике Word.'],
+    expectGrounded: true,
+  },
+];
+
+let failed = 0;
+for (const c of CASES) {
+  const verdict = checkClaimGrounding(c.answer, c.sources);
+  const ok = verdict.grounded === c.expectGrounded;
+  if (!ok) failed++;
+  const mark = ok ? 'ok  ' : 'FAIL';
+  console.log(`[${mark}] ${c.name}`);
+  console.log(
+    `        утверждений: ${verdict.total}, не подтверждено: ${verdict.ungrounded.length}` +
+      (verdict.ungrounded.length ? ` → ${verdict.ungrounded.map((u) => `${u.value}/${u.kind}`).join(', ')}` : '')
+  );
+  if (!ok) {
+    console.log(`        ОЖИДАЛОСЬ grounded=${c.expectGrounded}, получено ${verdict.grounded}`);
+    console.log(`        ответ: ${c.answer}`);
+  }
+}
+
+console.log(`\nвсего кейсов: ${CASES.length}, провалено: ${failed}`);
+console.log('\nразбор извлечения на смешанном ответе:');
+for (const claim of extractRiskyClaims(
+  'Перевод 440 рублей за страницу, заверение 1100 руб., срок 3 рабочих дня, предоплата 70%.'
+)) {
+  console.log(`  ${claim.kind}: ${claim.value}`);
+}
+
+process.exit(failed > 0 ? 1 : 0);

@@ -19,6 +19,7 @@ import { expandAbbreviations, selectKeyTerms } from '@/lib/knowledge/glossary';
 import { polishCanonicalAnswer } from '@/lib/ai/canonical-answer-polisher';
 import { type QAPair } from '@prisma/client';
 import { verifyAnswer, type ConsistencyReport } from '@/lib/ai/consistency-gate';
+import { checkClaimGrounding } from '@/lib/ai/claim-grounding';
 import {
   admissibleAudiences,
   checkClientSafety,
@@ -449,6 +450,25 @@ function getVoiceAuthority(sourceSpan: unknown): { authorityTag?: string; priori
   return { authorityTag: 'VOICE_AUTHORITY', priority, boost };
 }
 
+/**
+ * Импортированные из переписок Bitrix пары НЕ являются эталонами.
+ *
+ * Каждая из них была верна в своём диалоге, где известен контекст: куда клиент
+ * подаёт документ, из какой он страны, что ему уже сказали раньше. Импорт
+ * оторвал ответ от условия и записал как общее правило. Измерено на проде:
+ * четыре пары с этим тегом отвечают на один и тот же узел «нужен ли оригинал»
+ * взаимоисключающе, и все четыре ACTIVE (docs/bot-audit/01-independent-audit.md).
+ *
+ * Пока у пары нет поля условия применимости, авторитет ей давать нельзя:
+ * буст в ранжировании и подмена ответа целиком превращают частный случай в
+ * утверждение с максимальной уверенностью. Пары остаются в выдаче как обычный
+ * материал для синтеза — знание в них настоящее, но решать по ним нельзя.
+ *
+ * Вернуть авторитет можно по одной паре за раз, когда у неё появится условие
+ * и подпись владельца.
+ */
+const HISTORICAL_IMPORT_HAS_AUTHORITY = false;
+
 function getQaAuthority(metadata: unknown): { authorityTag?: string; origin?: string; boost: number } {
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return { boost: 0 };
   const value = metadata as Record<string, unknown>;
@@ -456,7 +476,9 @@ function getQaAuthority(metadata: unknown): { authorityTag?: string; origin?: st
     return { authorityTag: 'VOICE_ANSWER_AUTHORITY', origin: 'voice-operator', boost: 30 };
   }
   if (value.authorityTag === 'HISTORICAL_ANSWER_AUTHORITY' || value.origin === 'historical-operator') {
-    return { authorityTag: 'HISTORICAL_ANSWER_AUTHORITY', origin: 'historical-operator', boost: 30 };
+    return HISTORICAL_IMPORT_HAS_AUTHORITY
+      ? { authorityTag: 'HISTORICAL_ANSWER_AUTHORITY', origin: 'historical-operator', boost: 30 }
+      : { boost: 0 };
   }
   return { boost: 0 };
 }
@@ -542,15 +564,18 @@ async function findCanonicalQaOverride(
     // последних активных пар: после импорта корпуса старые утверждённые эталоны
     // выпали бы из окна и молча перестали находиться. Пар с авторитетом мало
     // (десятки), поэтому запрос по метаданным дешевле и честнее окна.
+    // Только VOICE: пара, которую оператор утвердил в самом продукте, зная
+    // вопрос целиком. Импорт из переписок (HISTORICAL) сюда не входит —
+    // см. HISTORICAL_IMPORT_HAS_AUTHORITY. Подмена ответа целиком с confidence
+    // 1.0 и requiresHumanReview=false недопустима для утверждения, у которого
+    // потеряно условие применимости.
     const authorityCandidates = await prisma.qAPair.findMany({
       where: {
         status: 'ACTIVE',
         audience: { in: admissibleAudiences(audience) },
         OR: [
           { metadata: { path: ['authorityTag'], equals: 'VOICE_ANSWER_AUTHORITY' } },
-          { metadata: { path: ['authorityTag'], equals: 'HISTORICAL_ANSWER_AUTHORITY' } },
           { metadata: { path: ['origin'], equals: 'voice-operator' } },
-          { metadata: { path: ['origin'], equals: 'historical-operator' } },
         ],
       },
     });
@@ -1210,12 +1235,43 @@ ${fixList}
     logClientSafetyVerdict(clientSafety.violations, rules.map((r) => r.ruleCode).join(', '));
   }
 
+  // Заземление числовых утверждений. Проверяем по ПОЛНОМУ контексту синтеза, а
+  // не по массиву citations: тот обрезан до 200 символов на правило, и цена,
+  // стоящая за обрезом, дала бы ложную тревогу.
+  //
+  // Ловится ровно то, чего не видит ни один другой контроль: число, которого не
+  // было в источниках. Модель могла его сложить (440 × 3 + 1100 = 2420),
+  // перенести из соседней строки прайса или выдумать. Consistency gate этого не
+  // замечает — он проверяет подкреплённость утверждений, а не происхождение цифр.
+  const groundingCorpus = [
+    ...rules.map((r) => `${r.title ?? ''} ${r.body}`),
+    ...chunks.map((c) => c.content),
+    ...qaPairs.map((qa) => qa.answer),
+  ];
+  const grounding = checkClaimGrounding(answer, groundingCorpus);
+  if (!grounding.grounded) {
+    console.warn(
+      '[enhanced-answering] ЗАЗЕМЛЕНИЕ: числа не найдены в источниках (%d из %d) [audience=%s]:',
+      grounding.ungrounded.length,
+      grounding.total,
+      audience,
+      grounding.ungrounded.map((c) => `${c.value} (${c.kind}) ← «${c.context}»`).join(' | ')
+    );
+  }
+
+  // Клиенту неподтверждённое число отправлять нельзя: цена и срок — это
+  // обещание, за которым стоят деньги. Внутреннему контуру ответ отдаётся:
+  // сотрудник видит источники и способен проверить сам, а глушить ему выдачу
+  // означало бы лишить его инструмента.
+  const ungroundedBlocksClient = audience === 'client' && !grounding.grounded;
+
   const requiresHumanReview = Boolean(
     consistency?.verificationFailed ||
     consistency?.unsupported.length ||
     answerSignalsKnowledgeGap(answer) ||
     answerSignalsCompositeCapabilityRisk(question, answer) ||
-    (clientSafety && !clientSafety.safe)
+    (clientSafety && !clientSafety.safe) ||
+    ungroundedBlocksClient
   );
 
   // Build source references from context chunks

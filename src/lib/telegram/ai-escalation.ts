@@ -3,6 +3,7 @@ import prisma from '@/lib/db';
 import { sendMessage, sendInlineKeyboard } from './telegram-api';
 import { createKnowledgeGapSuggestion } from '@/lib/ai/knowledge-feedback';
 import { isClarificationTurn } from '@/lib/ai/answer-policy';
+import type { Audience } from '@/lib/knowledge/audience';
 
 const NOTIFICATION_THROTTLE_MS = 10 * 60 * 1000;
 const recentNotifications = new Map<string, number>();
@@ -11,6 +12,9 @@ export async function escalateUnconvincingAIAnswer(params: {
   question: string;
   result: EnhancedAnswerResult;
   source: 'WEB' | 'TELEGRAM' | 'API';
+  /** Контур, в котором задан вопрос. Определяет метку знания у пары, которая
+   *  получится из черновика после утверждения оператором. */
+  audience: Audience;
   userId?: string;
   sessionId?: string;
 }): Promise<void> {
@@ -24,6 +28,7 @@ export async function escalateUnconvincingAIAnswer(params: {
     question: params.question,
     result: params.result,
     source: params.source,
+    audience: params.audience,
     sessionId: params.sessionId,
   });
   if (gapId) {
@@ -47,6 +52,7 @@ export async function escalateUnconvincingAIAnswer(params: {
         question: params.question,
         context: {
           source: params.source,
+          audience: params.audience,
           userId: params.userId,
           sessionId: params.sessionId,
           reasons,

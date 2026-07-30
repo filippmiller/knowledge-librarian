@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { KnowledgeAudience } from '@prisma/client';
 import prisma from '@/lib/db';
 import { createAuthResponse, getAuthenticatedUser } from '@/lib/auth';
 import { getBotLabCase } from '@/lib/bot-lab/cases';
+import { upsertLearnedQaPair } from '@/lib/knowledge/qa-upsert';
 
 export async function POST(request: NextRequest): Promise<Response> {
   const actor = await getAuthenticatedUser(request);
@@ -37,58 +39,47 @@ export async function POST(request: NextRequest): Promise<Response> {
   const approvedAt = new Date();
 
   const result = await prisma.$transaction(async (tx) => {
-    const existingQa = await tx.qAPair.findFirst({
-      where: { status: 'ACTIVE', question },
-      orderBy: { updatedAt: 'desc' },
-    });
-
-    if (existingQa && existingQa.answer.trim() === answer) {
-      return { qaPairId: existingQa.id, reused: true, version: existingQa.version };
-    }
-
-    if (existingQa) {
-      await tx.qAPair.update({
-        where: { id: existingQa.id },
-        data: { status: 'SUPERSEDED' },
-      });
-    }
-
-    const qa = await tx.qAPair.create({
-      data: {
-        question,
-        answer,
-        status: 'ACTIVE',
-        version: existingQa ? existingQa.version + 1 : 1,
-        supersedesQaId: existingQa?.id,
-        scenarioKey: sourceCase.category ?? null,
-        metadata: {
-          origin: 'historical-operator',
-          authorityTag: 'HISTORICAL_ANSWER_AUTHORITY',
-          confidence: 1.0,
-          approvedBy: `web:${actor.username}`,
-          approvedAt: approvedAt.toISOString(),
-          evalCaseId: sourceCase.id,
-          source: 'bot-lab-historical-card',
-        },
+    // Бот-лаб — внутренний инструмент, и оператор здесь утверждает ТЕКСТ ответа,
+    // а не условие, при котором он верен. Поэтому пара пишется как внутренняя:
+    // выпускать её клиенту без условия применимости нельзя. Явная метка нужна
+    // ещё и затем, чтобы подмена версии не задела одноимённую клиентскую пару —
+    // раньше поиск шёл только по тексту вопроса и гасил её молча.
+    const upsert = await upsertLearnedQaPair(tx, {
+      question,
+      answer,
+      audience: KnowledgeAudience.INTERNAL_ONLY,
+      scenarioKey: sourceCase.category ?? null,
+      metadata: {
+        origin: 'historical-operator',
+        // Тег сохраняет происхождение, но авторитета не даёт: см.
+        // HISTORICAL_IMPORT_HAS_AUTHORITY в enhanced-answering-engine.ts.
+        authorityTag: 'HISTORICAL_ANSWER_AUTHORITY',
+        approvedBy: `web:${actor.username}`,
+        approvedAt: approvedAt.toISOString(),
+        evalCaseId: sourceCase.id,
+        source: 'bot-lab-historical-card',
       },
     });
+
+    if (upsert.reused) {
+      return { qaPairId: upsert.qaPairId, reused: true, version: upsert.version };
+    }
 
     await tx.knowledgeChange.create({
       data: {
         targetType: 'QA_PAIR',
-        targetId: qa.id,
-        changeType: existingQa ? 'SUPERSEDE' : 'CREATE',
-        oldValue: existingQa
-          ? { question: existingQa.question, answer: existingQa.answer, version: existingQa.version }
-          : undefined,
+        targetId: upsert.qaPairId,
+        changeType: upsert.supersededId ? 'SUPERSEDE' : 'CREATE',
+        oldValue: upsert.previous,
         newValue: {
-          question: qa.question,
-          answer: qa.answer,
-          version: qa.version,
-          scenarioKey: qa.scenarioKey,
+          question,
+          answer,
+          version: upsert.version,
+          scenarioKey: sourceCase.category ?? null,
+          audience: KnowledgeAudience.INTERNAL_ONLY,
           authorityTag: 'HISTORICAL_ANSWER_AUTHORITY',
         },
-        reason: existingQa
+        reason: upsert.supersededId
           ? 'Оператор утвердил исторический ответ как эталонный в Bot Decision Lab'
           : 'Оператор сохранил исторический ответ как эталонный в Bot Decision Lab',
         initiatedBy: 'ADMIN',
@@ -98,7 +89,7 @@ export async function POST(request: NextRequest): Promise<Response> {
       },
     });
 
-    return { qaPairId: qa.id, reused: false, version: qa.version };
+    return { qaPairId: upsert.qaPairId, reused: false, version: upsert.version };
   });
 
   return NextResponse.json(
