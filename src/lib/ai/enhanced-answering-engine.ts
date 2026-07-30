@@ -771,12 +771,25 @@ export async function answerQuestionEnhanced(
     }
     return canonicalResult;
   }
-// Short-circuit: if the gate needs clarification, skip retrieval entirely
+  // Детерминированная таблица спрашивается ПЕРВОЙ, до маршрутизатора.
+  //
+  // Раньше её спрашивали только на двух ветках гейта — «нужно уточнение» и
+  // «вне области». Вопросы про справку о несудимости и про диплом уходили по
+  // третьей ветке, `knowledge_lookup`, и таблицу не спрашивали вовсе: ответ
+  // существовал, но до него не доходили. Проверено на проде после деплоя,
+  // диагностика — scripts/diagnose-guardrail-route.ts.
+  //
+  // Территориальность — не мнение поиска, а факт о том, что мы физически можем
+  // сделать. Он не должен зависеть от того, как маршрутизатор классифицировал
+  // формулировку. Таблица молчит везде, где не уверена, поэтому первенство
+  // ничего не отнимает у остальных путей.
+  const territorialGuardrail = buildDeterministicGuardrailResult(question, audience);
+  if (territorialGuardrail) return territorialGuardrail;
+
+  // Short-circuit: if the gate needs clarification, skip retrieval entirely
   // and return a structured clarification response. The mini-app renders this
   // as buttons (Пачка B); legacy clients see the prompt text in `answer`.
   if (scenarioDecision.kind === 'needs_clarification') {
-    const guardrail = buildDeterministicGuardrailResult(question, audience);
-    if (guardrail) return guardrail;
     return buildClarificationResult(question, scenarioDecision);
   }
 
@@ -792,9 +805,7 @@ export async function answerQuestionEnhanced(
   //   3) only genuinely off-topic questions (no bureau keyword: weather,
   //      crypto, …) get the honest "no data" short-circuit, never general_ai.
   if (scenarioDecision.kind === 'out_of_scope') {
-    const guardrail = buildDeterministicGuardrailResult(question, audience);
-    if (guardrail) return guardrail;
-
+    // Таблица уже спрошена выше и промолчала — повторять нечего.
     if (!isBureauTopic(question)) {
       return buildOutOfScopeResult(question, scenarioDecision);
     }
