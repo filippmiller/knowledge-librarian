@@ -15,9 +15,9 @@ export async function POST(request: NextRequest): Promise<Response> {
       where: { isActive: true },
     });
 
-    if (!settings) {
+    if (!settings?.apiKey) {
       return NextResponse.json(
-        { error: 'Настройки ИИ не найдены. Сначала сохраните API ключ.' },
+        { error: 'API ключ не сохранён в настройках. Сначала сохраните ключ.' },
         { status: 404 }
       );
     }

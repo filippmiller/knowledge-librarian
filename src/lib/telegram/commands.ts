@@ -17,12 +17,7 @@ import { answerQuestionEnhanced, type EnhancedAnswerResult } from '@/lib/ai/enha
 import { getCachedAnswer, storeCachedAnswer } from '@/lib/ai/answer-cache';
 import { looksLikeClarificationReply } from '@/lib/ai/answer-policy';
 import { escalateUnconvincingAIAnswer } from './ai-escalation';
-import {
-  shouldAutoAnswer,
-  shouldSendClarification,
-  getAutoAnswerSettings,
-  escalateToHuman,
-} from './auto-answer-policy';
+import { decideDelivery, getAutoAnswerSettings, escalateToHuman } from './auto-answer-policy';
 import { getOrCreateSession, saveChatMessage } from '@/lib/ai/answering-engine';
 import prisma from '@/lib/db';
 
@@ -586,14 +581,10 @@ export async function handleQuestion(message: TelegramMessage, user: TelegramUse
     const result = cached?.result ?? await answerQuestionEnhanced(effectiveQuestion, session.id);
     if (!cached && !resolvingClarification) storeCachedAnswer(question, result);
 
-    // Auto-answer policy: in auto-answer mode we send clarifications and
-    // high-confidence answers automatically; everything else goes to a human.
+    // Auto-answer policy: clarifications and confident answers go to the user,
+    // everything else goes to a human.
     const autoAnswerSettings = await getAutoAnswerSettings();
-    const canAutoAnswer = autoAnswerSettings.enabled;
-
-    if (canAutoAnswer && shouldSendClarification(result)) {
-      // Clarification is a safe interaction, not a factual claim.
-    } else if (!shouldAutoAnswer(result, autoAnswerSettings)) {
+    if (decideDelivery(result, autoAnswerSettings) === 'escalate') {
       await escalateToHuman(chatId, effectiveQuestion, result, user.telegramId);
       return;
     }

@@ -12,6 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { DEFAULT_MIN_CONFIDENCE } from '@/lib/telegram/constants';
 
 interface AISettings {
   id?: string;
@@ -36,7 +37,7 @@ export default function AISettingsPage() {
   const [selectedModel, setSelectedModel] = useState('gpt-4o');
   const [selectedEmbeddingModel, setSelectedEmbeddingModel] = useState('text-embedding-3-small');
   const [autoAnswerEnabled, setAutoAnswerEnabled] = useState(false);
-  const [autoAnswerMinConfidence, setAutoAnswerMinConfidence] = useState(0.7);
+  const [autoAnswerMinConfidence, setAutoAnswerMinConfidence] = useState(DEFAULT_MIN_CONFIDENCE);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   async function fetchSettings() {
@@ -48,7 +49,9 @@ export default function AISettingsPage() {
       setSelectedEmbeddingModel(data.embeddingModel || 'text-embedding-3-small');
       setAutoAnswerEnabled(Boolean(data.autoAnswerEnabled));
       setAutoAnswerMinConfidence(
-        typeof data.autoAnswerMinConfidence === 'number' ? data.autoAnswerMinConfidence : 0.7
+        typeof data.autoAnswerMinConfidence === 'number'
+          ? data.autoAnswerMinConfidence
+          : DEFAULT_MIN_CONFIDENCE
       );
     } catch (error) {
       console.error('Error fetching AI settings:', error);
@@ -324,7 +327,7 @@ export default function AISettingsPage() {
               className="w-full accent-slate-900"
             />
             <p className="text-xs text-gray-500">
-              Рекомендуется 70%. Выше — консервативнее, больше вопросов пойдёт оператору. Ниже — больше автоответов, но выше риск ошибки.
+              Рекомендуется 50% — это нижняя граница «среднего» уровня уверенности движка, то есть нормального ответа из базы знаний. Выше — консервативнее: с 70% и больше бот замолчит почти на всём, кроме идеальных совпадений, и поток уйдёт оператору.
             </p>
           </div>
 
@@ -333,9 +336,12 @@ export default function AISettingsPage() {
             <ul className="list-disc list-inside space-y-0.5">
               <li>ответ требует ручной проверки,</li>
               <li>ответ основан на общих знаниях ИИ,</li>
-              <li>уверенность ниже порога,</li>
-              <li>нужно уточнение у клиента (кроме режима автоответа, где уточнение отправляется).</li>
+              <li>движок оценил свой ответ как «низкий» или «недостаточный»,</li>
+              <li>уверенность ниже порога выше.</li>
             </ul>
+            <p className="pt-1">
+              Уточняющий вопрос с кнопками («Где был выдан документ?») всегда уходит клиенту — независимо от тумблера: это вопрос, а не утверждение.
+            </p>
           </div>
         </CardContent>
       </Card>

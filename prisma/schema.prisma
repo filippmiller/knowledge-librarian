@@ -503,14 +503,18 @@ model TelegramUser {
 model AISettings {
   id                      String    @id @default(cuid())
   provider                String    @default("openai")
-  apiKey                  String // Зашифрованный ключ
+  // Зашифрованный ключ. Опционален: рантайм берёт ключ из OPENAI_API_KEY /
+  // ANTHROPIC_API_KEY, здесь он хранится только для проверки через /verify.
+  apiKey                  String?
   model                   String    @default("gpt-4o")
   embeddingModel          String    @default("text-embedding-3-small")
   isActive                Boolean   @default(true)
   lastVerified            DateTime?
   lastError               String?
   autoAnswerEnabled       Boolean   @default(false)
-  autoAnswerMinConfidence Float     @default(0.7)
+  // Совпадает с CONFIDENCE_THRESHOLD_MEDIUM движка ответов: всё, что движок
+  // сам считает 'medium', — пригодный ответ из базы знаний.
+  autoAnswerMinConfidence Float     @default(0.5)
   createdAt               DateTime  @default(now())
   updatedAt               DateTime  @updatedAt
 }

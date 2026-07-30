@@ -1,7 +1,18 @@
 /**
  * Shared constants for Telegram bot command parsing.
  * Used by voice-handler.ts and message-router.ts
+ *
+ * Client-safe: no server-only imports, so the admin UI can read from here too.
  */
+
+/**
+ * Secondary confidence floor for auto-answering. Mirrors
+ * CONFIDENCE_THRESHOLD_MEDIUM in the answering engine: anything the engine
+ * itself rates 'medium' is a usable knowledge-base answer, so the delivery
+ * policy must not discard it. Shared by the policy, the settings API and the
+ * settings UI so all three cannot drift.
+ */
+export const DEFAULT_MIN_CONFIDENCE = 0.5;
 
 // Keywords that signal "add new knowledge"
 // Matches at START of text: "добавь...", "запомни...", "сохрани..."
