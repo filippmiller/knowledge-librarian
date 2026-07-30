@@ -412,13 +412,32 @@ function rankByQuestion<T>(
  * answer scores confidence 0 from chunks alone and wrongly falls through to
  * general_ai, defeating the self-improving loop.
  */
-function questionTermOverlap(question: string, candidate: string): number {
+/**
+ * Совпадение вопроса с каноническим — по ОБЕИМ сторонам.
+ *
+ * Раньше делили на более короткую сторону, и короткий вопрос совпадал почти с
+ * чем угодно: «сколько стоит апостиль» (3 терма) против «Сколько стоит апостиль
+ * на справку о несудимости из другого региона» даёт 1.0, хотя это разные
+ * вопросы. При пяти канонических парах риск был мал, при ста двадцати двух —
+ * нет, поэтому требуем покрытия и длинной стороны тоже.
+ */
+export function questionTermOverlapForTests(
+  question: string,
+  candidate: string
+): { short: number; long: number } {
+  return questionTermOverlap(question, candidate);
+}
+
+function questionTermOverlap(question: string, candidate: string): { short: number; long: number } {
   const qTerms = new Set(extractSearchTerms(question));
   const cTerms = new Set(extractSearchTerms(candidate));
-  if (qTerms.size === 0 || cTerms.size === 0) return 0;
+  if (qTerms.size === 0 || cTerms.size === 0) return { short: 0, long: 0 };
   let shared = 0;
   for (const t of qTerms) if (cTerms.has(t)) shared++;
-  return shared / Math.min(qTerms.size, cTerms.size);
+  return {
+    short: shared / Math.min(qTerms.size, cTerms.size),
+    long: shared / Math.max(qTerms.size, cTerms.size),
+  };
 }
 
 function getVoiceAuthority(sourceSpan: unknown): { authorityTag?: string; priority?: string; boost: number } {
@@ -519,21 +538,30 @@ async function findCanonicalQaOverride(
   audience: Audience
 ): Promise<QAPair | null> {
   try {
-    const candidates = await prisma.qAPair.findMany({
-      where: { status: 'ACTIVE', audience: { in: admissibleAudiences(audience) } },
-      take: 200,
-      orderBy: { createdAt: 'desc' },
+    // Выборка по authority-маркеру, а не по свежести. Раньше брались 200
+    // последних активных пар: после импорта корпуса старые утверждённые эталоны
+    // выпали бы из окна и молча перестали находиться. Пар с авторитетом мало
+    // (десятки), поэтому запрос по метаданным дешевле и честнее окна.
+    const authorityCandidates = await prisma.qAPair.findMany({
+      where: {
+        status: 'ACTIVE',
+        audience: { in: admissibleAudiences(audience) },
+        OR: [
+          { metadata: { path: ['authorityTag'], equals: 'VOICE_ANSWER_AUTHORITY' } },
+          { metadata: { path: ['authorityTag'], equals: 'HISTORICAL_ANSWER_AUTHORITY' } },
+          { metadata: { path: ['origin'], equals: 'voice-operator' } },
+          { metadata: { path: ['origin'], equals: 'historical-operator' } },
+        ],
+      },
     });
-    const authorityCandidates = candidates.filter((qa) => getQaAuthority(qa.metadata).boost > 0);
     if (authorityCandidates.length === 0) return null;
 
     const ranked = authorityCandidates
-      .map((qa) => ({
-        qa,
-        overlap: questionTermOverlap(question, qa.question),
-      }))
-      .filter((item) => item.overlap >= 0.55)
-      .sort((a, b) => b.overlap - a.overlap);
+      .map((qa) => ({ qa, overlap: questionTermOverlap(question, qa.question) }))
+      // Порог по длинной стороне отсекает главный класс ложных совпадений:
+      // короткий общий вопрос против длинного специфичного канонического.
+      .filter((item) => item.overlap.short >= 0.55 && item.overlap.long >= 0.5)
+      .sort((a, b) => b.overlap.long - a.overlap.long);
 
     return ranked[0]?.qa ?? null;
   } catch (error) {
@@ -935,13 +963,20 @@ export async function answerQuestionEnhanced(
   // already answers this — treat it as authoritative KB evidence so the answer
   // is given confidently from the base and never bounced to general_ai. This is
   // what actually closes the self-improving loop for QA-only answers (no chunks).
+  // Здесь используется покрытие по КОРОТКОЙ стороне сознательно: это не
+  // подмена ответа канонической парой, а лишь признак «в базе уже есть близкий
+  // утверждённый вопрос», который поднимает уверенность и не даёт скатиться в
+  // общие знания. Жёсткая проверка по длинной стороне нужна только там, где
+  // ответ подменяется целиком, — в findCanonicalQaOverride.
   const bestQaMatch = qaPairs.length > 0
-    ? Math.max(...qaPairs.map((qa) => questionTermOverlap(question, qa.question)))
+    ? Math.max(...qaPairs.map((qa) => questionTermOverlap(question, qa.question).short))
     : 0;
   const bestAuthorityQaMatch = qaPairs.length > 0
     ? Math.max(
         ...qaPairs.map((qa) =>
-          getQaAuthority(qa.metadata).boost > 0 ? questionTermOverlap(question, qa.question) : 0
+          getQaAuthority(qa.metadata).boost > 0
+            ? questionTermOverlap(question, qa.question).short
+            : 0
         )
       )
     : 0;
