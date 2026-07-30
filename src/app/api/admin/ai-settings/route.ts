@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/db';
 import { requireAdminAuth } from '@/lib/auth';
 import { encrypt, decrypt, maskApiKey } from '@/lib/crypto';
+import { DEFAULT_MIN_CONFIDENCE } from '@/lib/telegram/constants';
 
 // GET - получить текущие настройки (без полного ключа)
 export async function GET(request: NextRequest): Promise<Response> {
@@ -24,23 +25,24 @@ export async function GET(request: NextRequest): Promise<Response> {
         lastError: null,
         isActive: false,
         autoAnswerEnabled: false,
-        autoAnswerMinConfidence: 0.7,
+        autoAnswerMinConfidence: DEFAULT_MIN_CONFIDENCE,
       });
     }
 
     // Decrypt and mask the API key
     let maskedApiKey = null;
-    try {
-      const decryptedKey = decrypt(settings.apiKey);
-      maskedApiKey = maskApiKey(decryptedKey);
-    } catch {
-      maskedApiKey = 'Ошибка расшифровки';
+    if (settings.apiKey) {
+      try {
+        maskedApiKey = maskApiKey(decrypt(settings.apiKey));
+      } catch {
+        maskedApiKey = 'Ошибка расшифровки';
+      }
     }
 
     return NextResponse.json({
       id: settings.id,
       provider: settings.provider,
-      hasApiKey: true,
+      hasApiKey: Boolean(settings.apiKey),
       maskedApiKey,
       model: settings.model,
       embeddingModel: settings.embeddingModel,
@@ -110,18 +112,13 @@ export async function POST(request: NextRequest): Promise<Response> {
         id: updated.id,
       });
     } else {
-      // Create new settings
-      if (!apiKey) {
-        return NextResponse.json(
-          { error: 'API ключ обязателен для создания настроек' },
-          { status: 400 }
-        );
-      }
-
+      // Create new settings. The API key is optional here — the runtime reads
+      // it from env, and requiring it would make the auto-answer toggle
+      // unsaveable until someone pastes a key, silently keeping the bot mute.
       const created = await prisma.aISettings.create({
         data: {
           provider: 'openai',
-          apiKey: encryptedKey!,
+          apiKey: encryptedKey ?? null,
           model: model || 'gpt-4o',
           embeddingModel: embeddingModel || 'text-embedding-3-small',
           isActive: true,

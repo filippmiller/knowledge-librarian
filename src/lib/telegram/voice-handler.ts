@@ -7,12 +7,7 @@ import { addKnowledge, correctKnowledge } from './knowledge-manager';
 import { answerQuestionEnhanced } from '@/lib/ai/enhanced-answering-engine';
 import { getOrCreateSession, saveChatMessage } from '@/lib/ai/answering-engine';
 import { formatAnswerResponse } from './commands';
-import {
-  shouldAutoAnswer,
-  shouldSendClarification,
-  getAutoAnswerSettings,
-  escalateToHuman,
-} from './auto-answer-policy';
+import { decideDelivery, getAutoAnswerSettings, escalateToHuman } from './auto-answer-policy';
 import { ADD_KEYWORDS, CORRECT_KEYWORDS, PRICE_CHANGE_PATTERN, RULE_LOOKUP_PATTERN, DIRECT_EDIT_PATTERN } from './constants';
 import prisma from '@/lib/db';
 
@@ -171,11 +166,7 @@ export async function handleVoiceMessage(
     const result = await answerQuestionEnhanced(text, session.id);
 
     const autoAnswerSettings = await getAutoAnswerSettings();
-    const canAutoAnswer = autoAnswerSettings.enabled;
-
-    if (canAutoAnswer && shouldSendClarification(result)) {
-      // Clarification is a safe interaction, not a factual claim.
-    } else if (!shouldAutoAnswer(result, autoAnswerSettings)) {
+    if (decideDelivery(result, autoAnswerSettings) === 'escalate') {
       await escalateToHuman(chatId, text, result, user.telegramId);
       return;
     }

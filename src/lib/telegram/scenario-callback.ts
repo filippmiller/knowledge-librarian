@@ -28,12 +28,7 @@ import {
 } from '@/lib/ai/enhanced-answering-engine';
 import { sendMessage, sendInlineKeyboard } from './telegram-api';
 import { formatAnswerResponse } from './commands';
-import {
-  shouldAutoAnswer,
-  shouldSendClarification,
-  getAutoAnswerSettings,
-  escalateToHuman,
-} from './auto-answer-policy';
+import { decideDelivery, getAutoAnswerSettings, escalateToHuman } from './auto-answer-policy';
 import type { TelegramUserInfo } from './access-control';
 
 type ClarificationMeta = {
@@ -114,11 +109,7 @@ export async function handleScenarioCallback(
   const result = await answerQuestionEnhanced(effectiveQuestion, session.id);
 
   const autoAnswerSettings = await getAutoAnswerSettings();
-  const canAutoAnswer = autoAnswerSettings.enabled;
-
-  if (canAutoAnswer && shouldSendClarification(result)) {
-    // Clarification is a safe interaction, not a factual claim.
-  } else if (!shouldAutoAnswer(result, autoAnswerSettings)) {
+  if (decideDelivery(result, autoAnswerSettings) === 'escalate') {
     await escalateToHuman(chatId, effectiveQuestion, result, telegramId);
     return;
   }
