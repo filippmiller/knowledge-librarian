@@ -198,5 +198,6 @@ for (const [i, row] of rows.entries()) {
 }
 
 mkdirSync('docs/bot-audit', { recursive: true });
-writeFileSync('docs/bot-audit/live-30-sample-run.md', lines.join('\n'), 'utf8');
-console.log('\nОтчёт: docs/bot-audit/live-30-sample-run.md');
+const outPath = `docs/bot-audit/live-30-sample-run-${AUDIENCE}.md`;
+writeFileSync(outPath, lines.join('\n'), 'utf8');
+console.log(`\nОтчёт: ${outPath}`);
