@@ -397,9 +397,26 @@ function getQaAuthority(metadata: unknown): { authorityTag?: string; origin?: st
  * The synthesis model may still open with a confident "да" and only later say
  * that availability is not confirmed. Such drafts are useful to an operator,
  * but must never be presented as evidence-complete.
+ *
+ * Russian agreement is the trap here: the model writes "не указано" for a
+ * neuter noun but "не указана стоимость" / "не указаны сроки" for others, and
+ * an earlier neuter-only pattern let a real "в базе знаний не указана
+ * стоимость…" answer through as evidence-complete (prod, 2026-07-30).
+ * Covered by scripts/verify-knowledge-gap-detector.ts.
  */
-function answerSignalsKnowledgeGap(answer: string): boolean {
-  return /(?:в (?:базе знаний|источнике) не указано|не указано,?\s+(?:доступна|можно|есть ли)|не удалось подтвердить|требуется уточнить доступность|уточнения доступности)/iu.test(answer);
+const KNOWLEDGE_GAP_PATTERNS: RegExp[] = [
+  // "в базе знаний / в источниках / в предоставленных материалах не указана стоимость"
+  /в\s+(?:баз[еы]\s+знаний|источник(?:е|ах)|(?:предоставленных\s+)?(?:источниках|материалах|документах))[^.!?]{0,60}?не\s+(?:указан[оаы]?|содержится|упомина(?:ется|ются)|представлен[оаы]?)/iu,
+  // "не указано, доступна ли услуга" — gap about availability rather than a fact
+  /не\s+указан[оаы]?,?\s+(?:доступн|можно|есть\s+ли|как\s+именно|где\s+именно)/iu,
+  // Model punts the whole question back to a human
+  /рекомендуем\s+(?:связаться|уточнить|обратиться)[^.!?]{0,40}(?:напрямую|с\s+компанией|у\s+менеджера)/iu,
+  /не\s+удалось\s+подтвердить/iu,
+  /требуется\s+уточнить\s+доступность|уточнения\s+доступности/iu,
+];
+
+export function answerSignalsKnowledgeGap(answer: string): boolean {
+  return KNOWLEDGE_GAP_PATTERNS.some((pattern) => pattern.test(answer));
 }
 
 /**
