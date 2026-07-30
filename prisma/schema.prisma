@@ -14,6 +14,20 @@ datasource db {
 // CORE KNOWLEDGE OBJECTS
 // ============================================
 
+/// Кому можно показывать знание.
+///
+/// Два контура ответов различаются не формулировкой, а составом допустимых
+/// фактов. Сотруднику нужна вся процедура: куда подавать, часы приёма органа,
+/// внутренняя себестоимость. Клиенту эти же факты показывать нельзя — они
+/// уводят его делать услугу самостоятельно, мимо бюро.
+///
+/// По умолчанию INTERNAL_ONLY: клиент не получает ничего, пока знание не
+/// размечено явно. Ошибка разметки должна приводить к молчанию, а не к утечке.
+enum KnowledgeAudience {
+  INTERNAL_ONLY
+  CLIENT_SAFE
+}
+
 model Document {
   id          String      @id @default(cuid())
   title       String
@@ -25,6 +39,11 @@ model Document {
   parseStatus ParseStatus @default(PENDING)
   parseError  String?
   retryCount  Int         @default(0)
+
+  /// Источник истины по аудитории для всего, что извлечено из документа.
+  /// Значение каскадом проставляется в Rule / QAPair / DocChunk — см.
+  /// setDocumentAudience() в src/lib/knowledge/audience.ts.
+  audience KnowledgeAudience @default(INTERNAL_ONLY)
 
   // Scenario tagging — see src/lib/knowledge/scenarios.ts. Null = universal
   // (cross-service) or not-yet-classified. See scenarioFilterClause() for
@@ -171,6 +190,10 @@ model Rule {
   // or left null (universal cross-service). See src/lib/knowledge/scenarios.ts.
   scenarioKey String?
 
+  /// Денормализовано из Document.audience, чтобы извлечение фильтровало одним
+  /// предикатом без join. Меняется только через setDocumentAudience().
+  audience KnowledgeAudience @default(INTERNAL_ONLY)
+
   // Relations
   document       Document?          @relation(fields: [documentId], references: [id])
   supersedesRule Rule?              @relation("RuleVersions", fields: [supersedesRuleId], references: [id])
@@ -185,6 +208,7 @@ model Rule {
   @@index([ruleCode])
   @@index([documentId])
   @@index([scenarioKey])
+  @@index([audience])
 }
 
 // Q&A pairs extracted from documents
@@ -206,6 +230,9 @@ model QAPair {
   // { origin: 'ai-suggested', approvedBy, approvedAt }
   metadata    Json?
 
+  /// См. Rule.audience. У пар без документа значение задаётся при создании.
+  audience KnowledgeAudience @default(INTERNAL_ONLY)
+
   // Relations
   document     Document?         @relation(fields: [documentId], references: [id])
   rule         Rule?             @relation(fields: [ruleId], references: [id])
@@ -217,6 +244,7 @@ model QAPair {
   @@index([documentId])
   @@index([ruleId])
   @@index([scenarioKey])
+  @@index([audience])
 }
 
 enum KnowledgeStatus {
@@ -240,6 +268,9 @@ model DocChunk {
 
   scenarioKey String?
 
+  /// См. Rule.audience. Фильтруется в сыром SQL векторного поиска.
+  audience KnowledgeAudience @default(INTERNAL_ONLY)
+
   // Relations
   document Document      @relation(fields: [documentId], references: [id], onDelete: Cascade)
   domains  ChunkDomain[]
@@ -247,6 +278,7 @@ model DocChunk {
   @@unique([documentId, chunkIndex])
   @@index([documentId])
   @@index([scenarioKey])
+  @@index([audience])
 }
 
 // ============================================

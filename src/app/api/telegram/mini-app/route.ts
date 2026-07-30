@@ -881,7 +881,7 @@ export async function POST(request: NextRequest) {
         });
 
         const { answerQuestionEnhanced } = await import('@/lib/ai/enhanced-answering-engine');
-        const result = await answerQuestionEnhanced(query);
+        const result = await answerQuestionEnhanced({ question: query, audience: 'internal' });
 
         await prisma.chatMessage.create({
           data: {

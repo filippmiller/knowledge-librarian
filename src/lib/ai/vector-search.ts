@@ -8,6 +8,7 @@
 import prisma from '@/lib/db';
 import { generateEmbeddings, EMBEDDING_DIMENSIONS } from '@/lib/openai';
 import { Prisma } from '@prisma/client';
+import { admissibleAudiences, audienceSqlValues, type Audience } from '@/lib/knowledge/audience';
 
 export interface SearchResult {
   id: string;
@@ -77,12 +78,25 @@ export function resetPgvectorCheck(): void {
 /**
  * Search for similar chunks using pgvector's native cosine similarity
  */
+/**
+ * Фильтр аудитории для сырого SQL. Значения приходят только из enum
+ * KnowledgeAudience через audienceSqlValues(), поэтому интерполяция безопасна —
+ * то же соглашение, что и у scenarioFilter выше.
+ */
+function audienceFilterClause(audience: Audience): string {
+  const list = audienceSqlValues(audience)
+    .map((v) => `'${v}'`)
+    .join(',');
+  return `AND c."audience"::text IN (${list})`;
+}
+
 export async function searchSimilarChunksPgvector(
   queryEmbedding: number[],
   domainSlugs: string[] = [],
   limit: number = 5,
   minSimilarity: number = 0.3,
-  scenarioAncestors: string[] = []
+  scenarioAncestors: string[] = [],
+  audience: Audience = 'internal'
 ): Promise<SearchResult[]> {
   try {
     const embeddingStr = `[${queryEmbedding.join(',')}]`;
@@ -128,6 +142,7 @@ export async function searchSimilarChunksPgvector(
       WHERE c."embeddingVector" IS NOT NULL
       ${Prisma.raw(domainFilter)}
       ${Prisma.raw(scenarioFilter)}
+      ${Prisma.raw(audienceFilterClause(audience))}
       AND 1 - (c."embeddingVector" <=> ${embeddingStr}::vector) >= ${minSimilarity}
       ORDER BY c."embeddingVector" <=> ${embeddingStr}::vector
       LIMIT ${limit}
@@ -172,7 +187,8 @@ async function searchSimilarChunksInMemory(
   queryEmbedding: number[],
   domainSlugs: string[] = [],
   limit: number = 5,
-  scenarioAncestors: string[] = []
+  scenarioAncestors: string[] = [],
+  audience: Audience = 'internal'
 ): Promise<SearchResult[]> {
   const conditions: Prisma.DocChunkWhereInput[] = [];
   if (domainSlugs.length > 0) {
@@ -181,6 +197,8 @@ async function searchSimilarChunksInMemory(
   if (scenarioAncestors.length > 0) {
     conditions.push({ OR: [{ scenarioKey: null }, { scenarioKey: { in: scenarioAncestors } }] });
   }
+  // Тот же фильтр, что в pgvector-пути: резервная ветка не должна быть дырой.
+  conditions.push({ audience: { in: admissibleAudiences(audience) } });
   const whereClause: Prisma.DocChunkWhereInput = conditions.length > 0 ? { AND: conditions } : {};
 
   const chunks = await prisma.docChunk.findMany({
@@ -224,7 +242,8 @@ export async function searchSimilarChunks(
   query: string,
   domainSlugs: string[] = [],
   limit: number = 5,
-  scenarioAncestors: string[] = []
+  scenarioAncestors: string[] = [],
+  audience: Audience = 'internal'
 ): Promise<SearchResult[]> {
   // Generate query embedding
   const [queryEmbedding] = await generateEmbeddings([query]);
@@ -233,14 +252,14 @@ export async function searchSimilarChunks(
 
   if (usePgvector) {
     try {
-      return await searchSimilarChunksPgvector(queryEmbedding, domainSlugs, limit, 0.3, scenarioAncestors);
+      return await searchSimilarChunksPgvector(queryEmbedding, domainSlugs, limit, 0.3, scenarioAncestors, audience);
     } catch {
       // Fallback to in-memory if pgvector fails unexpectedly
       console.warn('[vector-search] Falling back to in-memory search due to pgvector error');
-      return searchSimilarChunksInMemory(queryEmbedding, domainSlugs, limit, scenarioAncestors);
+      return searchSimilarChunksInMemory(queryEmbedding, domainSlugs, limit, scenarioAncestors, audience);
     }
   } else {
-    return searchSimilarChunksInMemory(queryEmbedding, domainSlugs, limit, scenarioAncestors);
+    return searchSimilarChunksInMemory(queryEmbedding, domainSlugs, limit, scenarioAncestors, audience);
   }
 }
 
@@ -252,7 +271,8 @@ export async function searchByKeywords(
   query: string,
   domainSlugs: string[] = [],
   limit: number = 10,
-  scenarioAncestors: string[] = []
+  scenarioAncestors: string[] = [],
+  audience: Audience = 'internal'
 ): Promise<SearchResult[]> {
   // Normalize query for Russian text search
   const normalizedQuery = query
@@ -300,6 +320,7 @@ export async function searchByKeywords(
       WHERE to_tsvector('russian', c.content) @@ plainto_tsquery('russian', ${query})
       ${Prisma.raw(domainFilter)}
       ${Prisma.raw(scenarioFilter)}
+      ${Prisma.raw(audienceFilterClause(audience))}
       ORDER BY rank DESC
       LIMIT ${limit}
     `;
@@ -313,21 +334,22 @@ export async function searchByKeywords(
       }));
     }
   } catch {
-    return searchByKeywordTerms(query, domainSlugs, limit, scenarioAncestors);
+    return searchByKeywordTerms(query, domainSlugs, limit, scenarioAncestors, audience);
   }
 
   // PostgreSQL full-text search is strict about all lexemes in the query.
   // If a user asks "для каких стран требуется КЛ", a chunk titled "страны,
   // для которых нужна КЛ" can miss because "требуется" != "нужна". Fall back
   // to OR-style term matching for recall.
-  return searchByKeywordTerms(query, domainSlugs, limit, scenarioAncestors);
+  return searchByKeywordTerms(query, domainSlugs, limit, scenarioAncestors, audience);
 }
 
 async function searchByKeywordTerms(
   query: string,
   domainSlugs: string[] = [],
   limit: number = 10,
-  scenarioAncestors: string[] = []
+  scenarioAncestors: string[] = [],
+  audience: Audience = 'internal'
 ): Promise<SearchResult[]> {
   const searchTerms = query
     .toLowerCase()
@@ -349,6 +371,10 @@ async function searchByKeywordTerms(
   if (scenarioAncestors.length > 0) {
     fallbackConditions.push({ OR: [{ scenarioKey: null }, { scenarioKey: { in: scenarioAncestors } }] });
   }
+  // Резервные ветки фильтруются так же, как основная: путь, по которому запрос
+  // попадает сюда (пустой полнотекстовый результат или ошибка SQL), не должен
+  // становиться обходом фильтра аудитории.
+  fallbackConditions.push({ audience: { in: admissibleAudiences(audience) } });
   const whereClause: Prisma.DocChunkWhereInput = { AND: fallbackConditions };
 
   const chunks = await prisma.docChunk.findMany({
@@ -386,12 +412,13 @@ export async function hybridSearch(
   domainSlugs: string[] = [],
   limit: number = 5,
   semanticWeight: number = 0.7,
-  scenarioAncestors: string[] = []
+  scenarioAncestors: string[] = [],
+  audience: Audience = 'internal'
 ): Promise<HybridSearchResult[]> {
   // Run both searches in parallel
   const [semanticResults, keywordResults] = await Promise.all([
-    searchSimilarChunks(query, domainSlugs, limit * 2, scenarioAncestors),
-    searchByKeywords(query, domainSlugs, limit * 2, scenarioAncestors),
+    searchSimilarChunks(query, domainSlugs, limit * 2, scenarioAncestors, audience),
+    searchByKeywords(query, domainSlugs, limit * 2, scenarioAncestors, audience),
   ]);
 
   // Build combined results using RRF

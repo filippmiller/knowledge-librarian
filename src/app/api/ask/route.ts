@@ -14,6 +14,8 @@ import {
   RATE_LIMITS,
 } from '@/lib/rate-limiter';
 import { escalateUnconvincingAIAnswer } from '@/lib/telegram/ai-escalation';
+import type { Audience } from '@/lib/knowledge/audience';
+import { getSession } from '@/lib/session';
 
 export async function POST(request: NextRequest) {
   // Rate limiting
@@ -51,17 +53,43 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid request body' }, { status: 400 });
     }
 
-    const { question, sessionId, includeDebug, useConversationContext, clarificationAnswer } =
-      body as {
+    const {
+      question,
+      sessionId,
+      includeDebug,
+      useConversationContext,
+      clarificationAnswer,
+      audience: rawAudience,
+    } = body as {
         question?: unknown;
         sessionId?: string;
         includeDebug?: boolean;
         useConversationContext?: boolean;
         clarificationAnswer?: string;
+        audience?: unknown;
       };
 
     if (!question || typeof question !== 'string') {
       return NextResponse.json({ error: 'Question is required' }, { status: 400 });
+    }
+
+    if (rawAudience !== undefined && rawAudience !== 'internal' && rawAudience !== 'client') {
+      return NextResponse.json(
+        { error: "audience должен быть 'internal' или 'client'" },
+        { status: 400 }
+      );
+    }
+
+    // Этот роут публичный: middleware его не закрывает, и любой внешний вызов
+    // сюда доходит. Поэтому внутренний контур выдаётся ТОЛЬКО по сессии
+    // сотрудника. Аноним получает клиентский контур независимо от того, что
+    // прислал в теле: неавторизованный вызывающий по определению не сотрудник,
+    // а ошибка в эту сторону приводит к менее полному ответу, а не к утечке
+    // адресов госорганов и внутренней себестоимости.
+    const session = await getSession(request);
+    const audience: Audience = session && rawAudience !== 'client' ? 'internal' : 'client';
+    if (!session && rawAudience === 'internal') {
+      console.warn('[ASK] Внутренний контур запрошен без сессии — отдаём клиентский');
     }
 
     // Validate question length
@@ -89,7 +117,7 @@ export async function POST(request: NextRequest) {
 
     // Check shared answer cache first (skip for debug and conversation-context requests).
     if (!includeDebug) {
-      const cached = !useConversationContext ? getCachedAnswer(question, clarificationAnswer) : null;
+      const cached = !useConversationContext ? getCachedAnswer(audience, question, clarificationAnswer) : null;
       if (cached) {
         console.log('[ASK] Returning cached answer for:', question.substring(0, 60));
         return NextResponse.json({ sessionId: currentSessionId, ...cached.result });
@@ -105,8 +133,13 @@ export async function POST(request: NextRequest) {
     // Use conversation context if session exists and flag is set
     console.log('[ASK] Generating answer...');
     const result = useConversationContext && sessionId
-      ? await answerWithContext(effectiveQuestion, currentSessionId, includeDebug === true)
-      : await answerQuestionEnhanced(effectiveQuestion, currentSessionId, includeDebug === true);
+      ? await answerWithContext(effectiveQuestion, currentSessionId, audience, includeDebug === true)
+      : await answerQuestionEnhanced({
+          question: effectiveQuestion,
+          audience,
+          sessionId: currentSessionId,
+          includeDebug: includeDebug === true,
+        });
     console.log('[ASK] Answer generated successfully');
     void escalateUnconvincingAIAnswer({
       question,
@@ -117,7 +150,7 @@ export async function POST(request: NextRequest) {
 
     // Cache only convincing final answers; weak answers and clarification prompts are skipped.
     if (!includeDebug && !useConversationContext) {
-      storeCachedAnswer(question, result, clarificationAnswer);
+      storeCachedAnswer(audience, question, result, clarificationAnswer);
     }
 
     // Save assistant message with enhanced metadata

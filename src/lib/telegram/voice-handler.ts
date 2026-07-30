@@ -87,6 +87,9 @@ export async function handleVoiceMessage(
             confidence: 1.0,
             documentId: existing.documentId,
             supersedesRuleId: existing.id,
+            // Новая версия правила наследует аудиторию предыдущей: редактирование
+            // текста не должно молча делать клиентское правило внутренним.
+            audience: existing.audience,
             sourceSpan: { quote: newBody.slice(0, 200), locationHint: 'Отредактировано голосом' },
           },
         });
@@ -162,7 +165,7 @@ export async function handleVoiceMessage(
     const session = await getOrCreateSession('TELEGRAM', user.telegramId);
     const userMsg = await saveChatMessage(session.id, 'USER', text);
 
-    const result = await answerQuestionEnhanced(text, session.id);
+    const result = await answerQuestionEnhanced({ question: text, audience: 'internal', sessionId: session.id });
 
     const autoAnswerSettings = await getAutoAnswerSettings();
     if (decideDelivery(result, autoAnswerSettings) === 'escalate') {

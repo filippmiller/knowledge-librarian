@@ -1,4 +1,5 @@
 import type { EnhancedAnswerResult } from './enhanced-answering-engine';
+import type { Audience } from '@/lib/knowledge/audience';
 
 const DEFAULT_TTL_MS = 30 * 60 * 1000;
 const MAX_CACHE_ENTRIES = 200;
@@ -6,6 +7,10 @@ const SIMILARITY_THRESHOLD = 0.82;
 
 type CacheEntry = {
   key: string;
+  /** Кому предназначен закэшированный ответ. Внутренний ответ содержит факты,
+   *  недопустимые для клиента, поэтому пересекать аудитории нельзя ни точным
+   *  ключом, ни нечётким совпадением. */
+  audience: Audience;
   normalizedQuestion: string;
   terms: string[];
   result: EnhancedAnswerResult;
@@ -24,19 +29,25 @@ export function normalizeQuestionForCache(question: string): string {
     .trim();
 }
 
-export function getAnswerCacheKey(question: string, clarificationAnswer?: string): string {
+export function getAnswerCacheKey(
+  audience: Audience,
+  question: string,
+  clarificationAnswer?: string
+): string {
   const normalized = normalizeQuestionForCache(question);
   const clarification = clarificationAnswer ? normalizeQuestionForCache(clarificationAnswer) : '';
-  return clarification ? `${normalized}|${clarification}` : normalized;
+  const base = clarification ? `${normalized}|${clarification}` : normalized;
+  return `${audience}::${base}`;
 }
 
 export function getCachedAnswer(
+  audience: Audience,
   question: string,
   clarificationAnswer?: string
 ): { result: EnhancedAnswerResult; cacheHit: 'exact' | 'similar' } | null {
   pruneExpired();
 
-  const key = getAnswerCacheKey(question, clarificationAnswer);
+  const key = getAnswerCacheKey(audience, question, clarificationAnswer);
   const exact = answerCache.get(key);
   if (exact && exact.expiresAt > Date.now()) {
     return { result: markCached(exact.result, 'exact'), cacheHit: 'exact' };
@@ -51,6 +62,8 @@ export function getCachedAnswer(
   let best: { entry: CacheEntry; score: number } | null = null;
   for (const entry of answerCache.values()) {
     if (entry.expiresAt <= Date.now()) continue;
+    // Нечёткое совпадение обходит ключ, поэтому аудиторию проверяем отдельно.
+    if (entry.audience !== audience) continue;
     const score = termSimilarity(terms, entry.terms);
     if (score >= SIMILARITY_THRESHOLD && (!best || score > best.score)) {
       best = { entry, score };
@@ -61,6 +74,7 @@ export function getCachedAnswer(
 }
 
 export function storeCachedAnswer(
+  audience: Audience,
   question: string,
   result: EnhancedAnswerResult,
   clarificationAnswer?: string,
@@ -69,10 +83,11 @@ export function storeCachedAnswer(
   if (!isCacheableAnswer(result)) return false;
 
   pruneExpired();
-  const key = getAnswerCacheKey(question, clarificationAnswer);
+  const key = getAnswerCacheKey(audience, question, clarificationAnswer);
   const normalizedQuestion = normalizeQuestionForCache(question);
   answerCache.set(key, {
     key,
+    audience,
     normalizedQuestion,
     terms: extractCacheTerms(normalizedQuestion),
     result,

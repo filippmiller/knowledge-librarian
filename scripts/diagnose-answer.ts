@@ -64,7 +64,11 @@ async function diagnoseOnce(question: string, runLabel: string): Promise<Enhance
   // Run the gate separately first so we see its raw decision even when the
   // engine later overrides routing (e.g. out_of_scope → general AI fallback).
   const gate = await classifyScenario(question);
-  const result = await answerQuestionEnhanced(question, undefined, /* includeDebug */ true);
+  const result = await answerQuestionEnhanced({
+    question,
+    audience: 'internal',
+    includeDebug: true,
+  });
 
   const lines: string[] = [];
   lines.push(`\n  ── ${runLabel} ──────────────────────────────────────────`);

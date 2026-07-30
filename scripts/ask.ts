@@ -23,7 +23,7 @@ async function main() {
   // sessionId is intentionally omitted — a one-shot diagnostic needs no chat
   // session. (Passing a non-string here is a bug: it flows into Prisma writes on
   // the regeneration path and fails with "sessionId: Expected String or Null".)
-  const r = await answerQuestionEnhanced(q);
+  const r = await answerQuestionEnhanced({ question: q, audience: 'internal' });
   console.log('\n========== РЕЗУЛЬТАТ ==========');
   console.log('ВОПРОС:', q);
   console.log('ИСТОЧНИК:', r.answerSource, '| УВЕРЕННОСТЬ:', Math.round((r.confidence ?? 0) * 100) + '%', '(' + r.confidenceLevel + ')');
