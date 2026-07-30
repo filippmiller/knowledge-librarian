@@ -5,14 +5,19 @@
  * Источник вопросов: docs/email-bot/may2026-knowledge-base-final.json
  * (180 кейсов, добытых из переписки Bitrix за май 2026).
  *
- * Запуск: node scripts/live-corpus-run.mjs [N]
- * По умолчанию N=30. Пейсинг 3.5 с — лимит /api/ask 20 запросов в минуту
- * (src/lib/rate-limiter.ts:117).
+ * Запуск: node scripts/live-corpus-run.mjs [N] [internal|client]
+ * По умолчанию N=30, контур client. Пейсинг 3.5 с — лимит /api/ask 20 запросов
+ * в минуту (src/lib/rate-limiter.ts:117).
+ *
+ * Внутренний контур эндпоинт отдаёт только по сессии сотрудника, поэтому без
+ * cookie запрос всегда обслуживается как клиентский — это и есть проверяемое
+ * поведение.
  */
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 
 const BASE = process.env.ASK_URL ?? 'https://avrora-library-production.up.railway.app/api/ask';
 const SAMPLE_SIZE = Number(process.argv[2] ?? 30);
+const AUDIENCE = process.argv[3] === 'internal' ? 'internal' : 'client';
 const PACE_MS = 3500;
 
 const corpus = JSON.parse(readFileSync('docs/email-bot/may2026-knowledge-base-final.json', 'utf8'));
@@ -26,13 +31,32 @@ function pickSample(items, size) {
     list.push(item);
     byCategory.set(item.category, list);
   }
-  const picked = [];
-  for (const [category, list] of byCategory) {
-    const quota = Math.max(1, Math.round((list.length / items.length) * size));
-    const sorted = [...list].sort((a, b) => (b.freq ?? 0) - (a.freq ?? 0));
-    picked.push(...sorted.slice(0, quota).map((item) => ({ ...item, category })));
+  // Квоты по методу наибольшего остатка: независимое округление давало сумму
+  // больше size, и последующий slice() молча выбрасывал самые мелкие категории
+  // (в первом прогоне так потерялась половина категории location).
+  const entries = [...byCategory.entries()];
+  const exact = entries.map(([c, l]) => ({ c, l, share: (l.length / items.length) * size }));
+  const quotas = exact.map((e) => ({ ...e, base: Math.max(1, Math.floor(e.share)) }));
+  let allocated = quotas.reduce((sum, q) => sum + q.base, 0);
+  const byRemainder = [...quotas].sort(
+    (a, b) => (b.share - Math.floor(b.share)) - (a.share - Math.floor(a.share))
+  );
+  let i = 0;
+  while (allocated < size && byRemainder.length > 0) {
+    const q = byRemainder[i % byRemainder.length];
+    if (q.base < q.l.length) {
+      q.base++;
+      allocated++;
+    }
+    i++;
+    if (i > size * 4) break;
   }
-  return picked.slice(0, size);
+  const picked = [];
+  for (const q of quotas) {
+    const sorted = [...q.l].sort((a, b) => (b.freq ?? 0) - (a.freq ?? 0));
+    picked.push(...sorted.slice(0, q.base).map((item) => ({ ...item, category: q.c })));
+  }
+  return picked;
 }
 
 async function ask(question) {
@@ -40,7 +64,7 @@ async function ask(question) {
   const res = await fetch(BASE, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
-    body: JSON.stringify({ question, includeDebug: true }),
+    body: JSON.stringify({ question, includeDebug: true, audience: AUDIENCE }),
   });
   const ms = Date.now() - started;
   if (!res.ok) return { error: `HTTP ${res.status}`, ms };
@@ -90,7 +114,7 @@ const tally = (fn) => {
 };
 
 const lines = [];
-lines.push('# Прогон 30 реальных вопросов клиентов через живой прод');
+lines.push(`# Прогон реальных вопросов клиентов через живой прод — контур ${AUDIENCE}`);
 lines.push('');
 lines.push(`Источник вопросов: \`docs/email-bot/may2026-knowledge-base-final.json\` (${corpus.length} кейсов из переписки Bitrix, май 2026).`);
 lines.push(`Эндпоинт: \`${BASE}\`. Выборка стратифицирована по категориям, внутри категории — самые частотные вопросы.`);
