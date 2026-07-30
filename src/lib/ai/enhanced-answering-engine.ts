@@ -469,6 +469,15 @@ function getVoiceAuthority(sourceSpan: unknown): { authorityTag?: string; priori
  */
 const HISTORICAL_IMPORT_HAS_AUTHORITY = false;
 
+/** Пара пришла массовым импортом из переписок Bitrix, а не утверждена поштучно. */
+function isHistoricalImport(metadata: unknown): boolean {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return false;
+  const value = metadata as Record<string, unknown>;
+  return (
+    value.authorityTag === 'HISTORICAL_ANSWER_AUTHORITY' || value.origin === 'historical-operator'
+  );
+}
+
 function getQaAuthority(metadata: unknown): { authorityTag?: string; origin?: string; boost: number } {
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return { boost: 0 };
   const value = metadata as Record<string, unknown>;
@@ -704,9 +713,27 @@ export async function answerQuestionEnhanced(
   if (canonicalQa) {
     console.log('[enhanced-answering] Canonical QA override matched:', canonicalQa.id);
     const canonicalResult = await buildCanonicalQaResult(question, canonicalQa, includeDebug);
-    // Ранний возврат минует сигнализацию ниже, поэтому проверяем здесь:
-    // неверно размеченная как CLIENT_SAFE каноническая пара с адресом органа
-    // иначе ушла бы клиенту с уверенностью 1.0 и без ручной проверки.
+
+    // Ранний возврат минует ВСЕ проверки ниже, а ответ здесь получает
+    // confidence 1.0 и requiresHumanReview=false. При этом сам ответ не
+    // дословный: polishCanonicalAnswer переписывает эталон моделью. Поэтому обе
+    // проверки повторяются здесь явно.
+
+    // Числа отполированного ответа сверяются с ИСХОДНОЙ парой: полировка не
+    // имеет права ни изменить цену, ни добавить срок, которого оператор не
+    // называл.
+    const canonicalGrounding = checkClaimGrounding(canonicalResult.answer, [canonicalQa.answer]);
+    if (!canonicalGrounding.grounded) {
+      console.warn(
+        '[enhanced-answering] ПОЛИРОВКА исказила числа канонического ответа (QAPair %s): %s',
+        canonicalQa.id,
+        canonicalGrounding.ungrounded.map((c) => `${c.value}/${c.unit}`).join(', ')
+      );
+      return { ...canonicalResult, requiresHumanReview: true };
+    }
+
+    // Неверно размеченная как CLIENT_SAFE пара с адресом органа иначе ушла бы
+    // клиенту с максимальной уверенностью и без ручной проверки.
     if (audience === 'client') {
       const safety = checkClientSafety(canonicalResult.answer);
       if (!safety.safe) {
@@ -1002,12 +1029,20 @@ export async function answerQuestionEnhanced(
   // утверждённый вопрос», который поднимает уверенность и не даёт скатиться в
   // общие знания. Жёсткая проверка по длинной стороне нужна только там, где
   // ответ подменяется целиком, — в findCanonicalQaOverride.
-  const bestQaMatch = qaPairs.length > 0
-    ? Math.max(...qaPairs.map((qa) => questionTermOverlap(question, qa.question).short))
+  // Импортированные из переписок пары исключены и отсюда. Снять с них
+  // canonical-override и буст +30 было недостаточно: `hasStrongQaMatch` ниже
+  // принудительно поднимает уровень уверенности до medium/high, и одного
+  // дословного совпадения с такой парой хватало, чтобы ответ ушёл клиенту
+  // автоматически — при нулевом числе чанков и без участия человека.
+  // Проверка связности и заземление тут не спасают: обе сверяют ответ с той же
+  // самой парой. См. HISTORICAL_IMPORT_HAS_AUTHORITY.
+  const trustedQaPairs = qaPairs.filter((qa) => !isHistoricalImport(qa.metadata));
+  const bestQaMatch = trustedQaPairs.length > 0
+    ? Math.max(...trustedQaPairs.map((qa) => questionTermOverlap(question, qa.question).short))
     : 0;
-  const bestAuthorityQaMatch = qaPairs.length > 0
+  const bestAuthorityQaMatch = trustedQaPairs.length > 0
     ? Math.max(
-        ...qaPairs.map((qa) =>
+        ...trustedQaPairs.map((qa) =>
           getQaAuthority(qa.metadata).boost > 0
             ? questionTermOverlap(question, qa.question).short
             : 0
@@ -1064,6 +1099,17 @@ export async function answerQuestionEnhanced(
   // Step 9: Build context and generate answer
   console.log('[enhanced-answering] Step 9: Generating answer with confidence level:', confidenceLevel);
   const context = buildEnhancedContext(contextChunks, rules, qaPairs);
+
+  // РОВНО то, что увидела модель. Из всех найденных чанков в промпт уходят
+  // только отобранные `contextChunks`; число из отброшенного чанка модель не
+  // видела, и признавать его источником нельзя — иначе выдумка считается
+  // подтверждённой. Один массив на проверку связности и на заземление чисел,
+  // чтобы они не разъехались в том, что считают источником.
+  const synthesisSources = [
+    ...contextChunks.map((c) => c.content),
+    ...rules.map((r) => `[${r.ruleCode}] ${r.title}: ${r.body}`),
+    ...qaPairs.map((q) => `${q.question} ${q.answer}`),
+  ];
 
   if (confidenceLevel === 'insufficient' && !hasStrongQaMatch && shouldUseGeneralKnowledgeFallback(question)) {
     const guardrail = buildDeterministicGuardrailResult(question, audience);
@@ -1145,12 +1191,7 @@ ${confidenceLevel === 'insufficient'
       // rule, or МЮ prices from R-352/R-353) as hallucinations — and the
       // regeneration step can then strip a CORRECT fact, making the answer wrong
       // ("срок не указан" when it IS specified in a rule).
-      const verificationSources = [
-        ...contextChunks.map((c) => c.content),
-        ...rules.map((r) => `[${r.ruleCode}] ${r.title}: ${r.body}`),
-        ...qaPairs.map((q) => `${q.question} ${q.answer}`),
-      ];
-      consistency = await verifyAnswer(answer, verificationSources);
+      consistency = await verifyAnswer(answer, synthesisSources);
       console.log(`[enhanced-answering] Consistency: ${consistency.claims.length} claims, ${consistency.unsupported.length} unsupported`);
       const detectedUnsupported = consistency.unsupported;
       if (detectedUnsupported.length > 0) {
@@ -1192,7 +1233,7 @@ ${fixList}
             // The revised answer is a new artifact. It must pass the same gate;
             // otherwise one regeneration could silently replace a detected
             // hallucination with a different unsupported claim.
-            consistency = await verifyAnswer(answer, verificationSources);
+            consistency = await verifyAnswer(answer, synthesisSources);
           }
         } catch (e) {
           console.warn('[enhanced-answering] Regeneration failed, keeping original answer:', e);
@@ -1235,20 +1276,15 @@ ${fixList}
     logClientSafetyVerdict(clientSafety.violations, rules.map((r) => r.ruleCode).join(', '));
   }
 
-  // Заземление числовых утверждений. Проверяем по ПОЛНОМУ контексту синтеза, а
-  // не по массиву citations: тот обрезан до 200 символов на правило, и цена,
-  // стоящая за обрезом, дала бы ложную тревогу.
+  // Заземление числовых утверждений. Проверяем по `synthesisSources` — тому,
+  // что реально ушло в промпт. Не по массиву citations: он обрезан до 200
+  // символов на правило, и цена за обрезом дала бы ложную тревогу.
   //
   // Ловится ровно то, чего не видит ни один другой контроль: число, которого не
   // было в источниках. Модель могла его сложить (440 × 3 + 1100 = 2420),
   // перенести из соседней строки прайса или выдумать. Consistency gate этого не
   // замечает — он проверяет подкреплённость утверждений, а не происхождение цифр.
-  const groundingCorpus = [
-    ...rules.map((r) => `${r.title ?? ''} ${r.body}`),
-    ...chunks.map((c) => c.content),
-    ...qaPairs.map((qa) => qa.answer),
-  ];
-  const grounding = checkClaimGrounding(answer, groundingCorpus);
+  const grounding = checkClaimGrounding(answer, synthesisSources);
   if (!grounding.grounded) {
     console.warn(
       '[enhanced-answering] ЗАЗЕМЛЕНИЕ: числа не найдены в источниках (%d из %d) [audience=%s]:',

@@ -69,17 +69,25 @@ export async function resolveDelivery(
  */
 export function applyDelivery(
   result: EnhancedAnswerResult,
-  outcome: DeliveryOutcome
+  outcome: DeliveryOutcome,
+  opts: {
+    /**
+     * Прикладывать ли черновик. Только для авторизованного сотрудника: отдать
+     * его анониму значит вернуть тем же ответом текст, который мы только что
+     * признали для него недопустимым, — тогда подмена превращается в косметику.
+     */
+    includeDraft: boolean;
+  }
 ): EnhancedAnswerResult & {
   delivery: DeliveryDecision;
-  draftAnswer: string;
+  draftAnswer?: string;
   answerWithheld: boolean;
 } {
   return {
     ...result,
     answer: outcome.outboundAnswer,
     delivery: outcome.decision,
-    draftAnswer: outcome.draftAnswer,
+    ...(opts.includeDraft ? { draftAnswer: outcome.draftAnswer } : {}),
     answerWithheld: outcome.withheld,
   };
 }

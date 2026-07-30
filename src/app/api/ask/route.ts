@@ -127,7 +127,7 @@ export async function POST(request: NextRequest) {
         const cachedDelivery = await resolveDelivery(cached.result, audience);
         return NextResponse.json({
           sessionId: currentSessionId,
-          ...applyDelivery(cached.result, cachedDelivery),
+          ...applyDelivery(cached.result, cachedDelivery, { includeDraft: Boolean(session) }),
         });
       }
     }
@@ -162,22 +162,10 @@ export async function POST(request: NextRequest) {
       storeCachedAnswer(audience, question, result, clarificationAnswer);
     }
 
-    // Save assistant message with enhanced metadata
-    await saveChatMessage(currentSessionId, 'ASSISTANT', result.answer, {
-      confidence: result.confidence,
-      confidenceLevel: result.confidenceLevel,
-      domainsUsed: result.domainsUsed,
-      citationCount: result.citations.length,
-      needsClarification: result.needsClarification,
-      queryAnalysis: {
-        isAmbiguous: result.queryAnalysis.isAmbiguous,
-        expandedQueriesCount: result.queryAnalysis.expandedQueries.length,
-      },
-    });
-
-    // Решение о доставке принимается здесь, а не оставляется потребителю:
-    // `/api/ask` публичный, и битрикс-интеграция иначе отправила бы клиенту
-    // заглушку «в базе знаний нет данных».
+    // Решение о доставке принимается ДО записи в историю. Иначе в историю
+    // ложится сырой черновик, а клиент видит удерживающий текст — и следующий
+    // запрос с useConversationContext подхватывает из истории ровно тот
+    // неподтверждённый факт, который только что удержали.
     const delivery = await resolveDelivery(result, audience);
     if (delivery.withheld) {
       console.warn(
@@ -189,10 +177,30 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // В историю — то, что реально увидел собеседник. Черновик сохраняется
+    // рядом, в метаданных: оператору он нужен, в контекст следующего ответа
+    // попасть не должен.
+    await saveChatMessage(currentSessionId, 'ASSISTANT', delivery.outboundAnswer, {
+      confidence: result.confidence,
+      confidenceLevel: result.confidenceLevel,
+      domainsUsed: result.domainsUsed,
+      citationCount: result.citations.length,
+      needsClarification: result.needsClarification,
+      delivery: delivery.decision,
+      withheldDraft: delivery.withheld ? delivery.draftAnswer : undefined,
+      queryAnalysis: {
+        isAmbiguous: result.queryAnalysis.isAmbiguous,
+        expandedQueriesCount: result.queryAnalysis.expandedQueries.length,
+      },
+    });
+
     // Build response with rate limit headers
     const response = NextResponse.json({
       sessionId: currentSessionId,
-      ...applyDelivery(result, delivery),
+      // Черновик отдаётся только по сессии сотрудника. Аноним не должен
+      // получить текст, который мы только что признали недопустимым для него:
+      // иначе подмена ответа — косметика, а не защита.
+      ...applyDelivery(result, delivery, { includeDraft: Boolean(session) }),
     });
 
     response.headers.set('X-RateLimit-Remaining', String(rateLimitResult.remaining));

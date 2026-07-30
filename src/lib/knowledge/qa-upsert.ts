@@ -50,6 +50,18 @@ export async function upsertLearnedQaPair(
 ): Promise<QaUpsertResult> {
   const { question, answer, audience, scenarioKey, metadata } = input;
 
+  // Транзакция сама по себе последовательность «найти → погасить → создать» не
+  // сериализует: на уровне READ COMMITTED два параллельных утверждения одного
+  // вопроса оба не найдут существующую пару и оба создадут ACTIVE-версию, либо
+  // оба погасят одну старую и создадут две вторые версии. Частичного уникального
+  // индекса на активную тройку в схеме нет и объявить его в Prisma нельзя.
+  //
+  // Блокировка по хэшу тождества дешевле индекса и не требует миграции: она
+  // держится до конца транзакции и снимается автоматически, в том числе при
+  // откате. Коллизия хэшей означала бы лишь то, что две несвязанные пары
+  // записываются по очереди, — на корректность это не влияет.
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`qa:${audience}:${scenarioKey ?? ''}:${question}`}))`;
+
   const existing = await tx.qAPair.findFirst({
     where: { question, status: 'ACTIVE', audience, scenarioKey },
     orderBy: { updatedAt: 'desc' },
