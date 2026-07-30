@@ -6,7 +6,6 @@ import { isAdmin, isSuperAdmin } from './access-control';
 import { addKnowledge, correctKnowledge } from './knowledge-manager';
 import { answerQuestionEnhanced } from '@/lib/ai/enhanced-answering-engine';
 import { getOrCreateSession, saveChatMessage } from '@/lib/ai/answering-engine';
-import { formatAnswerResponse } from './commands';
 import { decideDelivery, getAutoAnswerSettings, escalateToHuman } from './auto-answer-policy';
 import { ADD_KEYWORDS, CORRECT_KEYWORDS, PRICE_CHANGE_PATTERN, RULE_LOOKUP_PATTERN, DIRECT_EDIT_PATTERN } from './constants';
 import prisma from '@/lib/db';
@@ -161,7 +160,7 @@ export async function handleVoiceMessage(
     await sendTypingIndicator(chatId);
 
     const session = await getOrCreateSession('TELEGRAM', user.telegramId);
-    await saveChatMessage(session.id, 'USER', text);
+    const userMsg = await saveChatMessage(session.id, 'USER', text);
 
     const result = await answerQuestionEnhanced(text, session.id);
 
@@ -171,15 +170,22 @@ export async function handleVoiceMessage(
       return;
     }
 
+    // Same metadata shape as the text path: a voice question can also land on a
+    // scenario clarification, and without the anchor the follow-up (tapped
+    // button or typed reply) has nothing to reconstruct the original from.
     await saveChatMessage(session.id, 'ASSISTANT', result.answer, {
       confidence: result.confidence,
       confidenceLevel: result.confidenceLevel,
       domainsUsed: result.domainsUsed,
       citationCount: result.citations.length,
+      scenarioKey: result.scenarioKey,
+      scenarioClarification: result.scenarioClarification,
+      originalQuestion: text,
+      originalQuestionAt: userMsg.createdAt.toISOString(),
     });
 
-    const response = formatAnswerResponse(result);
-    await sendMessage(chatId, response);
+    const { sendClarificationOrAnswer } = await import('./scenario-callback');
+    await sendClarificationOrAnswer(chatId, result);
   } catch (error) {
     console.error('[voice-handler] Error:', error);
     await sendMessage(chatId, 'Ошибка при обработке голосового сообщения. Попробуйте позже.');
