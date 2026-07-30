@@ -1476,21 +1476,39 @@ ${fixList}
  * клиент получает передачу коллеге. Как только правило «что мы предлагаем
  * вместо» появится в базе, здесь встанет продающий ответ.
  */
+/**
+ * Клиентский вариант текста, если ветка его написала.
+ *
+ * Прежде клиенту глушился ЛЮБОЙ детерминированный ответ — и это было верно,
+ * пока все ветки писались для сотрудника: их текст содержит «ставится по месту
+ * выдачи», то есть отправляет клиента делать услугу самостоятельно.
+ *
+ * Но ветки территориальности пишут клиенту прямо, и глушить их — терять самое
+ * ценное. Ответ «да, диплом из любого региона апостилируем здесь» — это заказ;
+ * заменять его на «уточню у коллеги» значит своими руками отдавать клиента
+ * думать дальше. Поэтому ветка объявляет клиентский текст явно, а всё, что его
+ * не объявило, по-прежнему удерживается.
+ */
+const CLIENT_ANSWER_KEY = '__clientAnswer';
+
+type GuardrailWithClientText = EnhancedAnswerResult & { [CLIENT_ANSWER_KEY]?: string };
+
 function buildDeterministicGuardrailResult(
   question: string,
   audience: Audience
 ): EnhancedAnswerResult | null {
-  const result = buildInternalGuardrailResult(question);
+  const result = buildInternalGuardrailResult(question) as GuardrailWithClientText | null;
   if (!result) return null;
-  if (audience !== 'client') return result;
 
-  // Текст guardrail'а написан для сотрудника и содержит «ставится по месту
-  // выдачи» — то есть отправляет клиента делать услугу самостоятельно.
-  // Отдавать его наружу нельзя даже как черновик: потребитель API может взять
-  // поле answer напрямую. Подменяем на удерживающий текст и помечаем на
-  // ручной разбор — оператор увидит сам вопрос и продаст решение.
+  const { [CLIENT_ANSWER_KEY]: clientAnswer, ...clean } = result;
+  if (audience !== 'client') return clean;
+
+  if (clientAnswer) return { ...clean, answer: clientAnswer };
+
+  // Клиентского варианта нет — текст написан для сотрудника, наружу нельзя
+  // даже как черновик: потребитель API может взять поле answer напрямую.
   return {
-    ...result,
+    ...clean,
     answer:
       'Такой случай нужно разобрать индивидуально — уточню детали и вернусь с решением и стоимостью.',
     confidenceLevel: 'low',
@@ -1498,21 +1516,31 @@ function buildDeterministicGuardrailResult(
   };
 }
 
-/** Точка входа для тестов: см. scripts/verify-territorial-guardrail.ts. */
+/** Точки входа для тестов: см. scripts/verify-territorial-guardrail.ts. */
 export function buildInternalGuardrailResultForTests(
   question: string
 ): EnhancedAnswerResult | null {
   return buildInternalGuardrailResult(question);
 }
 
+export function buildDeterministicGuardrailResultForTests(
+  question: string,
+  audience: Audience
+): EnhancedAnswerResult | null {
+  return buildDeterministicGuardrailResult(question, audience);
+}
+
 /** Общая обвязка детерминированного ответа: разная у веток только суть. */
 function buildGuardrailShell(
   question: string,
   answer: string,
-  quotes: string[]
+  quotes: string[],
+  /** Текст для клиента. Без него клиенту уйдёт удерживающая фраза. */
+  clientAnswer?: string
 ): EnhancedAnswerResult {
   return {
     answer,
+    ...(clientAnswer ? { [CLIENT_ANSWER_KEY]: clientAnswer } : {}),
     confidence: 0.9,
     confidenceLevel: 'medium',
     needsClarification: false,
@@ -1607,9 +1635,23 @@ function buildInternalGuardrailResult(question: string): EnhancedAnswerResult | 
       ...(authority.footnote ? ['', authority.footnote] : []),
     ].join('\n');
 
-    return buildGuardrailShell(question, answer, [
-      'Территориальный признак органа апостилирования (тетрадь стажёра, с. 10): апостилируются только документы, выданные в регионе обращения.',
-    ]);
+    // Клиенту то же самое, но без слов, которыми мы отправляем его делать
+    // услугу самостоятельно: ни «по месту выдачи», ни названий органов с их
+    // порядком приёма. Только то, что делаем МЫ.
+    const clientAnswer = [
+      'Оригинал такого документа апостилируется только в том регионе, где он был выдан, поэтому с оригиналом здесь мы работать не сможем.',
+      '',
+      'Зато можем решить иначе: наш нотариус снимет с документа копию, и апостиль поставим уже на неё — это полностью наша работа, вам никуда ехать не нужно. Вариант подходит, если принимающая сторона допускает апостиль на копию, а не на оригинал.',
+      '',
+      'Пришлите, пожалуйста, скан документа и скажите, для какой страны он готовится — проверим требования и назову стоимость и срок.',
+    ].join('\n');
+
+    return buildGuardrailShell(
+      question,
+      answer,
+      ['Территориальный признак органа апостилирования (тетрадь стажёра, с. 10): апостилируются только документы, выданные в регионе обращения.'],
+      clientAnswer
+    );
   }
 
   // Обратный случай и главный по деньгам: образовательный комитет
@@ -1636,9 +1678,25 @@ function buildInternalGuardrailResult(question: string): EnhancedAnswerResult | 
       ...(authority.footnote ? ['', authority.footnote] : []),
     ].join('\n');
 
-    return buildGuardrailShell(question, answer, [
-      'Образовательный комитет НЕ имеет территориального признака: апостилируются документы, выданные в любом ином регионе (тетрадь стажёра, с. 10).',
-    ]);
+    // Клиентский вариант — это заказ, а не справка. Тот же положительный
+    // ответ, но без названия органа и его порядка приёма: клиенту незачем
+    // знать, куда мы понесём документ, ему важно, что мы это сделаем.
+    const clientAnswer = [
+      'Да, регион не помеха: диплом или аттестат, выданный в любом городе России, мы апостилируем здесь — везти документ обратно не нужно.',
+      '',
+      `Срок обычно ${authority.deadline.replace('официальный срок комитета 45 рабочих дней; на практике ', '')} — по факту быстрее официального норматива.`,
+      '',
+      'Что понадобится: сам документ обязательно с приложением — без него в приёме откажут. Важно заранее сказать, если вы уже подавали заявку через Госуслуги или сами оплачивали пошлину: в этом случае документ не примут.',
+      '',
+      'Пришлите скан диплома с приложением — посчитаю точную стоимость и срок.',
+    ].join('\n');
+
+    return buildGuardrailShell(
+      question,
+      answer,
+      ['Образовательный комитет НЕ имеет территориального признака: апостилируются документы, выданные в любом ином регионе (тетрадь стажёра, с. 10).'],
+      clientAnswer
+    );
   }
 
   if (!mentionsApostille || !mentionsSpb || !mentionsMoscow || !asksHowOrCan || mentionsEducation) {
