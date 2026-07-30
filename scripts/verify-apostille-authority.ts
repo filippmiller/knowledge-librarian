@@ -16,8 +16,13 @@ import {
 } from '../src/lib/knowledge/apostille-authority';
 
 let failed = 0;
+// Счётчик обязан считать сам, а не складываться из констант: прежняя версия
+// печатала «32/32», хотя проверок было 30. Тест, который врёт о собственном
+// объёме, скрывает ровно то, ради чего написан.
+let total = 0;
 
 function check(name: string, actual: unknown, expected: unknown): void {
+  total++;
   const ok = JSON.stringify(actual) === JSON.stringify(expected);
   if (!ok) failed++;
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}`);
@@ -80,13 +85,41 @@ check('названы оба региона → решения НЕТ, идём 
 const noDoc = resolveApostilleTerritoriality('Сколько стоит апостиль?');
 check('тип документа неизвестен → решения НЕТ', noDoc.kind, 'unknown');
 
+console.log('\n=== Регрессии из ревью Kimi (все воспроизводились на живом коде) ===');
+
+// Половина названий городов — ещё и русские фамилии и имена.
+const surname = resolveApostilleTerritoriality('Справка о несудимости, выданная Иванову Ивану Ивановичу');
+check('фамилия «Иванову» больше не читается как город Иваново', surname.kind, 'unknown');
+
+const firstName = resolveApostilleTerritoriality('Апостиль на справку о несудимости для Владимира Петрова');
+check('имя «Владимира» больше не читается как город Владимир', firstName.kind, 'unknown');
+
+check('«в Иваново» — это всё-таки город', detectIssuingRegion('документ выдан в Иваново'), 'other');
+check('«во Владимире» — это всё-таки город', detectIssuingRegion('свидетельство выдано во Владимире'), 'other');
+check('«из Москвы» — предлог на месте', detectIssuingRegion('документ из Москвы'), 'other');
+
+// Нотариальные копия и перевод апостилируются Минюстом, а не по документу,
+// копией которого являются.
+const notarialTranslation = resolveApostilleTerritoriality(
+  'Апостиль на нотариальный перевод диплома, выданного в Саратове'
+);
+check('нотариальный перевод диплома → Минюст, а не образование',
+  notarialTranslation.kind === 'reject_original' ? notarialTranslation.authority.key : notarialTranslation.kind,
+  'min_justice');
+
+const notarialCopy = resolveApostilleTerritoriality('Апостиль на нотариальную копию аттестата из Перми');
+check('нотариальная копия аттестата → Минюст, а не образование',
+  notarialCopy.kind === 'reject_original' ? notarialCopy.authority.key : notarialCopy.kind,
+  'min_justice');
+
+check('сам диплом по-прежнему идёт в образовательный комитет',
+  classifyApostilleDocument('Апостиль на диплом, выданный в Саратове'), 'education');
+
 console.log('\n=== Свойства органов по тетради ===');
 check('у образовательного комитета территориальности НЕТ', APOSTILLE_AUTHORITIES.education.territorial, false);
 check('у МВД территориальность ЕСТЬ', APOSTILLE_AUTHORITIES.mvd.territorial, true);
 check('у Минюста территориальность ЕСТЬ', APOSTILLE_AUTHORITIES.min_justice.territorial, true);
 check('у Архива ЗАГС территориальность ЕСТЬ', APOSTILLE_AUTHORITIES.zags.territorial, true);
 
-const total =
-  DOC_CASES.length + REGION_CASES.length + 10 + 4;
 console.log(`\n${total - failed}/${total} прошло`);
 if (failed > 0) process.exit(1);
