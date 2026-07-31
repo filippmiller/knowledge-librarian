@@ -11,6 +11,7 @@ const navigation = [
   { name: 'Домены', href: '/admin/domains' },
   { name: 'Предложения доменов', href: '/admin/domain-suggestions' },
   { name: 'Правила', href: '/admin/rules' },
+  { name: 'Тарифы', href: '/admin/tariffs' },
   { name: 'Вопросы и ответы', href: '/admin/qa' },
   { name: 'Лаборатория бота', href: '/admin/bot-lab' },
   { name: 'Голосовые правила', href: '/admin/voice-training' },
