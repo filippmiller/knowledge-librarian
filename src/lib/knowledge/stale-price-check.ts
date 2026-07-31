@@ -54,10 +54,25 @@ function normalizeAmount(raw: string): number {
  * прайсом, и второй источник названий разошёлся бы с первым.
  */
 function serviceKeywords(tariff: TariffRecord): string[] {
-  return tariff.serviceName
-    .toLowerCase()
-    .split(/[^а-яёa-z0-9]+/u)
-    .filter((w) => w.length >= 5);
+  const words = tariff.serviceName.toLowerCase().split(/[^а-яёa-z0-9]+/u);
+  const long = words.filter((w) => w.length >= 5);
+
+  // Тот же вырожденный случай, что и в опознании услуги (tariff-lookup.ts):
+  // у «Перевода виз» различительное слово короче порога, остаётся общее
+  // «перевод», и тогда ЛЮБОЕ предложение ответа со словом «перевод» и суммой
+  // сверялось бы с ценой визы — 100 ₽. Всё, кроме сотни, объявлялось бы
+  // устаревшей ценой. На корпусе это не выстрелило только потому, что в
+  // ответах операторов сверяемых сумм нет вовсе.
+  //
+  // Порог возврата — ДВЕ буквы, а не три. У «Апостиль МЮ МО (1 р.д.)»
+  // различают орган и регион именно двухбуквенные «МЮ» и «МО»; без них строка
+  // сводится к слову «апостиль» и притягивает любое предложение про апостиль с
+  // суммой. Измерено: на 156 сохранённых ответах бота проверка так сверила
+  // ПИТЕРСКИЙ апостиль с МОСКОВСКОЙ ценой и выдала находку, которой нет.
+  // Ложная тревога стоит автономности — при неопознанной услуге надо молчать.
+  if (long.length >= 2) return long;
+  const rescued = words.filter((w) => w.length >= 2 && w.length < 5 && !/\d/u.test(w));
+  return [...new Set([...long, ...rescued])];
 }
 
 export function checkStalePrice(answer: string, tariffs: TariffRecord[]): StalePriceVerdict {
@@ -102,6 +117,16 @@ export function checkStalePrice(answer: string, tariffs: TariffRecord[]): StaleP
     // допускает любую сумму сверху — сверять её нечем.
     if (named.some((t) => t.amountKind !== 'FIXED')) continue;
 
+    // Названное количество превращает цену за единицу в сумму заказа.
+    //
+    // «Сканирование обойдётся в 200 рублей за 5 страниц» — верный ответ при
+    // цене 40 ₽ за страницу, а сторож объявлял его устаревшей ценой: 200 в
+    // прайсе не значится. Дефект предсказан аудитом Codex и воспроизведён
+    // запуском. Кратность допускается ТОЛЬКО когда в предложении названо
+    // количество: иначе «нотариальное заверение перевода — 2200 рублей»
+    // (ровно два тарифа по 1100) перестало бы быть ошибкой.
+    const quantity = /\d+\s*(?:страниц|листов|документ|экземпляр|копи|виз|штук|шт\b)/iu.test(sentence);
+
     let m: RegExpExecArray | null;
     re.lastIndex = 0;
     while ((m = re.exec(sentence)) !== null) {
@@ -109,6 +134,12 @@ export function checkStalePrice(answer: string, tariffs: TariffRecord[]): StaleP
       if (!Number.isFinite(amount) || amount === 0) continue;
       checked += 1;
       if (allowed.has(amount)) continue;
+      if (
+        quantity &&
+        [...allowed].some((unit) => unit > 0 && amount > unit && amount % unit === 0)
+      ) {
+        continue;
+      }
       findings.push({
         amount,
         sentence: sentence.trim(),
