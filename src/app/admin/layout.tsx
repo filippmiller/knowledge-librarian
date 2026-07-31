@@ -43,7 +43,7 @@ export default function AdminLayout({
       <div className="pointer-events-none absolute inset-0 bg-grid opacity-30" />
       <div className="relative">
         <header className="border-b border-white/70 bg-white/75 backdrop-blur">
-          <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
+          <div className="mx-auto flex h-16 max-w-[120rem] items-center justify-between px-4 sm:px-6 lg:px-8">
             <Link href="/admin" className="font-display text-lg font-semibold text-slate-900">
               Библиотека знаний
             </Link>
@@ -54,7 +54,12 @@ export default function AdminLayout({
               >
                 Песочница
               </Link>
-              <Button                variant="ghost"                size="sm"                onClick={handleLogout}                className="gap-2 text-slate-600 hover:text-slate-900"              >
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleLogout}
+                className="gap-2 text-slate-600 hover:text-slate-900"
+              >
                 <LogOut className="h-4 w-4" />
                 Выйти
               </Button>
@@ -63,7 +68,7 @@ export default function AdminLayout({
         </header>
 
         <nav className="border-b border-white/70 bg-white/70 backdrop-blur">
-          <div className="mx-auto max-w-7xl px-4 py-3 sm:px-6 lg:px-8">
+          <div className="mx-auto max-w-[120rem] px-4 py-3 sm:px-6 lg:px-8">
             <div className="flex flex-wrap gap-2">
               {navigation.map((item) => (
                 <Link
@@ -83,7 +88,7 @@ export default function AdminLayout({
           </div>
         </nav>
 
-        <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+        <main className="mx-auto max-w-[120rem] px-4 py-8 sm:px-6 lg:px-8">
           {children}
         </main>
       </div>
