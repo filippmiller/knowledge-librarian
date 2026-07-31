@@ -522,6 +522,10 @@ model TelegramUser {
   role       TelegramUserRole @default(USER)
   grantedBy  String? // telegramId of who granted access
   isActive   Boolean          @default(true)
+  // Получать ли рассылки бота: эскалации, отчёты /report, просьбы /helpme.
+  // Отдельно от роли намеренно: «не беспокоить» и «лишить прав управлять базой
+  // знаний» — разные решения, и первое не должно тянуть за собой второе.
+  notificationsEnabled Boolean @default(true)
   createdAt  DateTime         @default(now())
   updatedAt  DateTime         @updatedAt
 

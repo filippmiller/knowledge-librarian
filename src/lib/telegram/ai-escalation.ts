@@ -141,7 +141,7 @@ async function sendKnowledgeGapForApproval(
 
 async function getSuperAdminTelegramIds(): Promise<string[]> {
   const dbSuperAdmins = await prisma.telegramUser.findMany({
-    where: { isActive: true, role: 'SUPER_ADMIN' },
+    where: { isActive: true, notificationsEnabled: true, role: 'SUPER_ADMIN' },
     select: { telegramId: true },
   });
   const ids = dbSuperAdmins.map((admin) => admin.telegramId);
