@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -92,6 +92,7 @@ export default function TariffsPage() {
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [page, setPage] = useState(1);
 
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<TariffDTO | null>(null);
@@ -132,8 +133,13 @@ export default function TariffsPage() {
 
       const response = await fetch(`/api/tariffs?${params.toString()}`);
       const payload = await response.json();
-      if (Array.isArray(payload?.items)) setData(payload);
-      else setData({ items: [], total: 0, page: 1, pageSize: PAGE_SIZE, pageCount: 1 });
+      if (Array.isArray(payload?.items)) {
+        // Страница 1 — новый набор фильтров, начинаем заново. Дальше дописываем:
+        // 1622 строки листать кнопками неудобно, а грузить разом — тяжело.
+        setData((prev) =>
+          payload.page > 1 ? { ...payload, items: [...prev.items, ...payload.items] } : payload
+        );
+      } else setData({ items: [], total: 0, page: 1, pageSize: PAGE_SIZE, pageCount: 1 });
     } catch (error) {
       console.error('Error fetching tariffs:', error);
     } finally {
@@ -144,6 +150,23 @@ export default function TariffsPage() {
   useEffect(() => {
     load();
   }, [load, refreshKey]);
+
+  // Догрузка при прокрутке до конца списка. Наблюдатель пересоздаётся при смене
+  // условий, иначе он держал бы устаревшее замыкание на номер страницы.
+  useEffect(() => {
+    const node = sentinelRef.current;
+    if (!node) return;
+    const hasMore = data.items.length < data.total;
+    if (!hasMore || loading) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) setPage((p) => p + 1);
+      },
+      { rootMargin: '400px' }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [data.items.length, data.total, loading]);
 
   function openCreate(defaults?: TariffFormDefaults) {
     setEditing(null);
@@ -177,9 +200,6 @@ export default function TariffsPage() {
       setArchiveBusy(false);
     }
   }
-
-  const from = data.total === 0 ? 0 : (data.page - 1) * data.pageSize + 1;
-  const to = Math.min(data.total, data.page * data.pageSize);
 
   return (
     <div>
@@ -308,11 +328,10 @@ export default function TariffsPage() {
                         с первого взгляда; раньше она была шестой из одиннадцати и
                         уезжала за правый край вместе с горизонтальной прокруткой. */}
                     <TableRow>
-                      <TableHead className="w-[34%]">Услуга</TableHead>
+                      <TableHead className="w-[38%]">Услуга</TableHead>
                       <TableHead className="w-32 text-right">Цена</TableHead>
                       <TableHead className="w-36">Срок</TableHead>
-                      <TableHead className="w-28">Орган</TableHead>
-                      <TableHead className="w-44">Условия</TableHead>
+                      <TableHead className="w-56">Условия</TableHead>
                       <TableHead className="w-44">Раздел</TableHead>
                       <TableHead className="w-32">Контур</TableHead>
                       <TableHead className="w-32">Период</TableHead>
@@ -323,8 +342,11 @@ export default function TariffsPage() {
                   <TableBody>
                     {data.items.map((t) => (
                       <TableRow key={t.id}>
-                        <TableCell className="align-top">
+                        <TableCell className="align-top whitespace-normal">
                           <div className="font-medium break-words">{t.serviceName}</div>
+                          {t.authority ? (
+                            <div className="text-xs text-gray-500">{t.authority}</div>
+                          ) : null}
                           <div
                             className="mt-0.5 text-xs text-gray-400"
                             title={`Источник: ${t.sourceFile}`}
@@ -347,12 +369,18 @@ export default function TariffsPage() {
                             {UNIT_LABEL[t.unit]}
                           </div>
                         </TableCell>
-                        <TableCell className="align-top text-sm">{t.termText ?? '—'}</TableCell>
-                        <TableCell className="align-top text-sm">{t.authority ?? '—'}</TableCell>
-                        <TableCell className="align-top max-w-56 text-xs text-gray-600">
+                        <TableCell className="align-top text-sm whitespace-normal">
+                          {t.termText ?? '—'}
+                        </TableCell>
+                        {/* Условия бывают до 117 символов. Показываем одну строку,
+                            полный текст — подсказкой при наведении. */}
+                        <TableCell
+                          className="align-top overflow-hidden text-xs text-ellipsis text-gray-600"
+                          title={t.conditions ?? undefined}
+                        >
                           {t.conditions ?? '—'}
                         </TableCell>
-                        <TableCell className="align-top text-sm text-gray-600">
+                        <TableCell className="align-top text-sm whitespace-normal text-gray-600">
                           {SECTION_LABEL[t.section]}
                         </TableCell>
                         <TableCell className="align-top">
@@ -399,32 +427,17 @@ export default function TariffsPage() {
                 </Table>
               </div>
 
-              <div className="flex items-center justify-between text-sm text-gray-600">
-                <div>
-                  Показано {from}–{to} из {data.total}
-                </div>
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={data.page <= 1}
-                    onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  >
-                    Назад
-                  </Button>
-                  <span>
-                    Страница {data.page} из {data.pageCount}
-                  </span>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={data.page >= data.pageCount}
-                    onClick={() => setPage((p) => p + 1)}
-                  >
-                    Вперёд
-                  </Button>
-                </div>
+              <div
+                ref={sentinelRef}
+                className="py-4 text-center text-sm text-gray-500"
+              >
+                {data.items.length < data.total
+                  ? loading
+                    ? 'Загружаю…'
+                    : `Показано ${data.items.length} из ${data.total}`
+                  : `Все ${data.total} строк показаны`}
               </div>
+
             </>
           )}
         </TabsContent>
