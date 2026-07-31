@@ -23,6 +23,8 @@ import {
   TriangleAlert,
   XCircle,
 } from 'lucide-react';
+// Только тип: значение сюда тянуть нельзя — модуль политики ходит в базу.
+import type { DeliveryDecision } from '@/lib/telegram/auto-answer-policy';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -55,6 +57,12 @@ interface DatasetSummary {
 
 interface BotResult {
   sessionId: string;
+  /** Решение серверной политики доставки. Единственный источник — `/api/ask`. */
+  delivery?: DeliveryDecision;
+  /** Текст ответа подменён удерживающим: черновик клиенту показывать нельзя. */
+  answerWithheld?: boolean;
+  /** Забракованный черновик. Приходит только по сессии сотрудника. */
+  draftAnswer?: string;
   answer: string;
   confidence: number;
   confidenceLevel: string;
@@ -122,74 +130,64 @@ const sourceLabels: Record<string, string> = {
   deterministic_guardrail: 'Детерминированное правило',
 };
 
-function deriveDecision(result: BotResult | null, selectedCase: BotCase | null) {
-  if (!result) {
+/**
+ * Показ решения о доставке. Здесь ТОЛЬКО оформление — никаких порогов.
+ *
+ * Раньше на этом месте жила `deriveDecision`: копия политики отправки, считанная
+ * в браузере по своим порогам 0.5 и 0.7 и по своим семи исходам. Серверная
+ * политика (`decideDelivery`) знает три исхода и другие условия, и две копии
+ * успели разойтись — песочница показывала «черновик готов», когда прод удержал
+ * бы ответ. Инструмент, который врёт о поведении бота, хуже отсутствующего.
+ *
+ * Теперь решение приходит с сервера полем `delivery`, а бейдж `UI-DERIVED`
+ * снят: показывать нечего, кроме того, что реально произошло.
+ */
+const DELIVERY_VIEW: Record<
+  DeliveryDecision,
+  { title: string; description: string; tone: string; icon: typeof Activity }
+> = {
+  answer: {
+    title: 'Ответ уходит собеседнику',
+    description: 'Политика доставки пропустила ответ: автоответ включён, уверенность выше порога, ручная проверка не потребовалась.',
+    tone: 'emerald',
+    icon: CheckCircle2,
+  },
+  clarify: {
+    title: 'Уточняющий вопрос',
+    description: 'Сценарный гейт не смог выбрать одну процедуру и задаёт вопрос собеседнику. Уточнение уходит независимо от тумблера автоответа: это вопрос, а не утверждение о фактах.',
+    tone: 'sky',
+    icon: MessageSquareText,
+  },
+  escalate: {
+    title: 'Передано оператору',
+    description: 'Политика доставки забраковала ответ. Клиенту вместо черновика уходит удерживающий текст.',
+    tone: 'rose',
+    icon: ShieldAlert,
+  },
+};
+
+const NOT_RUN_VIEW = {
+  title: 'Запуск не выполнен',
+  description: 'Выберите кейс и запустите анализ.',
+  tone: 'slate',
+  icon: Activity,
+};
+
+function deliveryView(result: BotResult | null) {
+  if (!result) return { code: 'NOT_RUN', ...NOT_RUN_VIEW };
+  // Ответ без поля `delivery` — это старый или чужой источник данных. Молча
+  // подставлять сюда собственную догадку нельзя: ровно так и появилась вторая
+  // копия политики.
+  if (!result.delivery) {
     return {
-      code: 'NOT_RUN',
-      title: 'Запуск не выполнен',
-      description: 'Выберите кейс и запустите анализ.',
-      tone: 'slate',
-      icon: Activity,
-    };
-  }
-  if (
-    result.requiresHumanReview ||
-    result.consistency?.verificationFailed ||
-    (result.consistency?.unsupportedCount ?? 0) > 0
-  ) {
-    return {
-      code: 'REVIEW_REQUIRED',
-      title: 'Требуется проверка оператором',
-      description: result.consistency?.verificationFailed
-        ? 'Автоматическая проверка доказательств не завершилась. Ответ нельзя считать подтверждённым.'
-        : 'Одно или несколько утверждений ответа не подтверждены источниками.',
-      tone: 'rose',
-      icon: ShieldAlert,
-    };
-  }
-  if (selectedCase?.price_dependent) {
-    return {
-      code: 'LIVE_DATA_REQUIRED',
-      title: 'Нужен живой расчёт',
-      description: 'Можно использовать только политику расчёта. Сумму и срок должен подтвердить оператор или калькулятор.',
-      tone: 'amber',
-      icon: CircleDollarSign,
-    };
-  }
-  if (result.needsClarification) {
-    return {
-      code: 'CLARIFY',
-      title: 'Уточнить у клиента',
-      description: result.suggestedClarification || 'Контекста недостаточно для безопасного ответа.',
-      tone: 'sky',
-      icon: MessageSquareText,
-    };
-  }
-  if (result.confidence < 0.5) {
-    return {
-      code: 'ESCALATE',
-      title: 'Передать оператору',
-      description: 'Уверенность ниже безопасного порога или движок запросил ручную проверку.',
-      tone: 'rose',
-      icon: ShieldAlert,
-    };
-  }
-  if (result.confidence < 0.7 || (result.citations.length === 0 && result.answerSource !== 'deterministic_guardrail')) {
-    return {
-      code: 'DRAFT_WITH_WARNING',
-      title: 'Черновик — проверить факты',
-      description: 'Ответ можно использовать как основу, но его источники или уверенность недостаточны для отправки без проверки.',
+      code: 'НЕТ РЕШЕНИЯ',
+      title: 'Сервер не вернул решение о доставке',
+      description: 'Ответ пришёл без поля delivery. Показывать здесь собственную оценку нельзя — она разойдётся с продом.',
       tone: 'amber',
       icon: TriangleAlert,
     };
   }
-  return {
-    code: 'DRAFT_READY',
-    title: 'Черновик готов к проверке',
-    description: 'Уверенность достаточная, ответ поддержан источниками. Auto-send в песочнице отключён.',
-    tone: 'emerald',
-    icon: CheckCircle2,
-  };
+  return { code: result.delivery, ...DELIVERY_VIEW[result.delivery] };
 }
 
 function cleanMarkdown(value: string): string {
@@ -282,7 +280,7 @@ export default function BotLabPage() {
     });
   }, [cases, category, risk, search]);
 
-  const decision = deriveDecision(result, evaluationCase);
+  const decision = deliveryView(result);
   const DecisionIcon = decision.icon;
   const intent = typeof result?.debug?.intentClassification === 'string'
     ? result.debug.intentClassification
@@ -571,7 +569,7 @@ export default function BotLabPage() {
         <aside className="min-w-0 space-y-4">
           <Card className="gap-0 overflow-hidden rounded-3xl border-slate-800 bg-slate-950 py-0 text-white shadow-elevated">
             <CardHeader className="border-b border-white/10 pb-5">
-              <div className="mb-3 flex items-center justify-between"><div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-cyan-300"><BrainCircuit className="size-4" /> Решение</div><Badge variant="outline" className="border-white/15 bg-white/5 font-mono text-[9px] text-slate-400">UI-DERIVED</Badge></div>
+              <div className="mb-3 flex items-center justify-between"><div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-cyan-300"><BrainCircuit className="size-4" /> Решение</div><Badge variant="outline" className="border-white/15 bg-white/5 font-mono text-[9px] text-emerald-300">С СЕРВЕРА</Badge></div>
               <div className={cn('grid size-11 place-items-center rounded-2xl', decision.tone === 'emerald' && 'bg-emerald-500/15 text-emerald-300', decision.tone === 'amber' && 'bg-amber-500/15 text-amber-300', decision.tone === 'rose' && 'bg-rose-500/15 text-rose-300', decision.tone === 'sky' && 'bg-sky-500/15 text-sky-300', decision.tone === 'slate' && 'bg-white/10 text-slate-300')}><DecisionIcon className="size-5" /></div>
               <CardTitle className="mt-4 text-xl leading-7 text-white">{decision.title}</CardTitle>
               <p className="text-xs leading-5 text-slate-400">{decision.description}</p>
@@ -582,6 +580,21 @@ export default function BotLabPage() {
                 <div className="rounded-xl border border-white/10 bg-white/5 p-3"><div className="text-[9px] uppercase tracking-wider text-slate-500">Источник</div><div className="mt-1 text-slate-200">{result?.answerSource ? sourceLabels[result.answerSource] : '—'}</div></div>
                 <div className="rounded-xl border border-white/10 bg-white/5 p-3"><div className="text-[9px] uppercase tracking-wider text-slate-500">Сценарий</div><div className="mt-1 line-clamp-2 text-slate-200">{result?.scenarioLabel || result?.scenarioKey || 'Не выбран'}</div></div>
               </div>
+              {/* Подмена текста — это то, что клиент увидит вместо черновика.
+                  Оператору важно видеть обе версии рядом, иначе непонятно, что
+                  именно забраковано. */}
+              {result?.answerWithheld ? (
+                <div className="rounded-xl border border-rose-400/30 bg-rose-500/10 p-3">
+                  <div className="text-[9px] uppercase tracking-wider text-rose-300">Клиенту ушёл удерживающий текст</div>
+                  <p className="mt-1 line-clamp-3 text-xs leading-5 text-slate-300">{result.answer}</p>
+                  {result.draftAnswer ? (
+                    <>
+                      <div className="mt-3 text-[9px] uppercase tracking-wider text-slate-500">Забракованный черновик</div>
+                      <p className="mt-1 line-clamp-4 text-xs leading-5 text-slate-400">{result.draftAnswer}</p>
+                    </>
+                  ) : null}
+                </div>
+              ) : null}
             </CardContent>
           </Card>
 
@@ -596,11 +609,11 @@ export default function BotLabPage() {
                 { label: 'Query expansion', value: result?.queryAnalysis?.expandedQueries?.length ? `${result.queryAnalysis.expandedQueries.length} вариантов` : 'Нет вариантов', actual: Boolean(result?.queryAnalysis) },
                 { label: 'Retrieval', value: result ? `${chunks.length} показано · ${result.debug?.searchStats?.totalChunksSearched ?? '—'} просмотрено` : 'Не запущено', actual: Boolean(result?.debug) },
                 { label: 'Evidence', value: result ? `${result.citations.length} цитат` : 'Не запущено', actual: Boolean(result) },
-                { label: 'Final action', value: decision.code, actual: Boolean(result), derived: true },
+                { label: 'Решение доставки', value: decision.code, actual: Boolean(result) },
               ].map((step, index) => (
                 <div key={step.label} className="grid grid-cols-[22px_minmax(0,1fr)] gap-2">
                   <div className="flex flex-col items-center"><div className={cn('grid size-5 place-items-center rounded-full border text-[9px]', step.actual ? 'border-cyan-300 bg-cyan-50 text-cyan-800' : 'border-slate-200 bg-white text-slate-400')}>{index + 1}</div>{index < 7 ? <div className="min-h-7 w-px flex-1 bg-slate-200" /> : null}</div>
-                  <div className="pb-3"><div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">{step.label}{step.derived ? <Badge variant="outline" className="h-4 bg-white px-1 text-[7px]">UI</Badge> : null}</div><div className="mt-0.5 line-clamp-3 text-xs leading-5 text-slate-700">{step.value}</div></div>
+                  <div className="pb-3"><div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">{step.label}</div><div className="mt-0.5 line-clamp-3 text-xs leading-5 text-slate-700">{step.value}</div></div>
                 </div>
               ))}
               {intentReasoning ? <div className="rounded-2xl bg-cyan-50 p-3 text-xs leading-5 text-cyan-900"><span className="font-semibold">Почему intent:</span> {intentReasoning}</div> : null}

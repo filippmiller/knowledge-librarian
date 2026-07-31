@@ -76,3 +76,6 @@ docs/bot-audit/.rerun-progress.log
 docs/bot-audit/.autonomy-150-results*.jsonl
 docs/bot-audit/.autonomy-150-progress*.log
 docs/bot-audit/.tariff-shadow-results.jsonl
+
+# Рабочие деревья подагентов — временные, в репозиторий не идут.
+.claude/worktrees/
