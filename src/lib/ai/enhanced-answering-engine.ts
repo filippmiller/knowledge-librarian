@@ -28,7 +28,7 @@ import {
   checkCertificationPriceAttribution,
   type PriceContradiction,
 } from '@/lib/knowledge/certification-price';
-import type { AnswerReasons, ReasonDetail } from '@/lib/ai/answer-reasons';
+import { HUMAN_REVIEW_ORDER, type AnswerReasons, type HumanReviewReason, type ReasonDetail } from '@/lib/ai/answer-reasons';
 import { getTariffs } from '@/lib/knowledge/tariff-store';
 import { buildTariffContext } from '@/lib/knowledge/tariff-context';
 import { lookupTariffForQuestion, describeTariff } from '@/lib/knowledge/tariff-lookup';
@@ -1508,50 +1508,77 @@ ${fixList}
   // Причины собираются ЗДЕСЬ ЖЕ, из тех же выражений, а не отдельной функцией:
   // объяснение, посчитанное второй раз, разойдётся с решением, которое оно
   // объясняет. Ровно так у песочницы появилась вторая копия политики отправки.
-  const humanReviewReasons: ReasonDetail[] = [];
-  if (consistency?.verificationFailed) {
-    humanReviewReasons.push({ reason: 'consistency_failed', detail: 'проверка утверждений не завершилась' });
-  }
-  if (consistency?.unsupported.length) {
-    humanReviewReasons.push({
-      reason: 'unsupported_claims',
-      detail: consistency.unsupported.map((c) => `«${c.claim}»`).join('; '),
-    });
-  }
-  if (answerSignalsKnowledgeGap(answer)) {
-    humanReviewReasons.push({ reason: 'knowledge_gap_phrase', detail: 'ответ признаёт отсутствие данных' });
-  }
-  if (answerSignalsCompositeCapabilityRisk(question, answer)) {
-    humanReviewReasons.push({
-      reason: 'composite_capability_risk',
-      detail: 'утверждение о возможности без прямого подтверждения',
-    });
-  }
-  if (clientSafety && !clientSafety.safe) {
-    humanReviewReasons.push({ reason: 'client_safety', detail: clientSafety.violations.join('; ') });
-  }
-  if (ungroundedBlocksClient) {
-    humanReviewReasons.push({
-      reason: 'ungrounded_numbers',
-      detail: grounding.ungrounded.map((c) => `${c.value} (${c.kind})`).join('; '),
-    });
-  }
-  if (!priceAttribution.consistent) {
-    humanReviewReasons.push({
-      reason: 'price_attribution',
-      detail: priceAttribution.contradictions
-        .map((c) => `${c.serviceLabel}: назвал ${c.claimed}, прайс ${c.expected}`)
-        .join('; '),
-    });
-  }
-  if (!stalePrice.ok) {
-    humanReviewReasons.push({
-      reason: 'stale_price',
-      detail: stalePrice.findings
-        .map((f) => `${f.amount} ₽ при «${f.serviceHint}», действует ${f.currentAmounts.join(', ')}`)
-        .join('; '),
-    });
-  }
+  // РЕЕСТР КОНТРОЛЕЙ. Тип `Record<HumanReviewReason, …>` обязывает: добавили
+  // значение в перечисление причин — компилятор потребует и проверку, забыли
+  // проверку — сборка не пройдёт.
+  //
+  // Так было не всегда. Сначала стояли восемь отдельных `if`, а флаг выводился
+  // из длины списка причин, и я считал это защитой: контроль без причины
+  // окажется бездействующим, а не молча работающим. Аудит Codex перевернул
+  // довод — для контроля БЕЗОПАСНОСТИ «бездействующий» означает молча снятую
+  // защиту, и это хуже, чем защита без объяснения. Реестр убирает саму
+  // возможность: проверка и её причина — одна запись.
+  //
+  // Каждая проверка возвращает либо находку с подробностью для оператора, либо
+  // `null`. Подробность — не название класса, а то, что именно найдено: без неё
+  // нельзя отличить спасённого клиента от зря удержанного верного ответа.
+  const HUMAN_REVIEW_CHECKS: Record<HumanReviewReason, () => ReasonDetail | null> = {
+    consistency_failed: () =>
+      consistency?.verificationFailed
+        ? { reason: 'consistency_failed', detail: 'проверка утверждений не завершилась' }
+        : null,
+    unsupported_claims: () =>
+      consistency?.unsupported.length
+        ? {
+            reason: 'unsupported_claims',
+            detail: consistency.unsupported.map((c) => `«${c.claim}»`).join('; '),
+          }
+        : null,
+    knowledge_gap_phrase: () =>
+      answerSignalsKnowledgeGap(answer)
+        ? { reason: 'knowledge_gap_phrase', detail: 'ответ признаёт отсутствие данных' }
+        : null,
+    composite_capability_risk: () =>
+      answerSignalsCompositeCapabilityRisk(question, answer)
+        ? {
+            reason: 'composite_capability_risk',
+            detail: 'утверждение о возможности без прямого подтверждения',
+          }
+        : null,
+    client_safety: () =>
+      clientSafety && !clientSafety.safe
+        ? { reason: 'client_safety', detail: clientSafety.violations.join('; ') }
+        : null,
+    ungrounded_numbers: () =>
+      ungroundedBlocksClient
+        ? {
+            reason: 'ungrounded_numbers',
+            detail: grounding.ungrounded.map((c) => `${c.value} (${c.kind})`).join('; '),
+          }
+        : null,
+    price_attribution: () =>
+      priceAttribution.consistent
+        ? null
+        : {
+            reason: 'price_attribution',
+            detail: priceAttribution.contradictions
+              .map((c) => `${c.serviceLabel}: назвал ${c.claimed}, прайс ${c.expected}`)
+              .join('; '),
+          },
+    stale_price: () =>
+      stalePrice.ok
+        ? null
+        : {
+            reason: 'stale_price',
+            detail: stalePrice.findings
+              .map((f) => `${f.amount} ₽ при «${f.serviceHint}», действует ${f.currentAmounts.join(', ')}`)
+              .join('; '),
+          },
+  };
+
+  const humanReviewReasons = HUMAN_REVIEW_ORDER.map((reason) => HUMAN_REVIEW_CHECKS[reason]()).filter(
+    (item): item is ReasonDetail => item !== null
+  );
 
   const requiresHumanReview = humanReviewReasons.length > 0;
 

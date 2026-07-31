@@ -525,6 +525,11 @@ export function checkCertificationPriceAttribution(answer: string): PriceAttribu
     // FOREIGN_SECTION.
     if (FOREIGN_SECTION.test(sentence)) continue;
     const services = matchServices(sentence);
+    // Тема, унаследованная от ПРЕДЫДУЩИХ предложений. Обновляется в конце
+    // разбора, а не здесь: иначе явное упоминание, стоящее ПОЗЖЕ числа в том же
+    // предложении, задним числом меняло бы тему более раннего фрагмента.
+    // Найдено аудитом Codex.
+    const inheritedService = carriedService;
     const explicit = services.filter((s) => !isBareMention(s.text));
     if (explicit.length > 0) carriedService = explicit[explicit.length - 1].service;
     if (services.length === 0) continue;
@@ -552,14 +557,15 @@ export function checkCertificationPriceAttribution(answer: string): PriceAttribu
       // «срочное заверение — 300 ₽ за СТРАНИЦУ» при заверении перевода за
       // ДОКУМЕНТ. Тема из предыдущего предложения — копия, у неё страница.
       const bare = isBareMention(matched.text);
-      const unitFitsCarried =
-        carriedService !== null &&
+      const unitFitsInherited =
+        inheritedService !== null &&
         price.unit !== null &&
         price.unit !== matched.service.price?.unit &&
-        (carriedService.price?.unit === price.unit ||
-          CERTIFICATION_SERVICES.find((s) => s.key === carriedService?.urgentVariantKey)?.price
+        (inheritedService.price?.unit === price.unit ||
+          CERTIFICATION_SERVICES.find((s) => s.key === inheritedService?.urgentVariantKey)?.price
             ?.unit === price.unit);
-      const owner = bare && unitFitsCarried && carriedService ? { ...matched, service: carriedService } : matched;
+      const owner =
+        bare && unitFitsInherited && inheritedService ? { ...matched, service: inheritedService } : matched;
 
       // Услуга названа и правее числа — какая из двух его хозяйка, по тексту не
       // определить. Не объявляем противоречие: это цена ложных тревог.

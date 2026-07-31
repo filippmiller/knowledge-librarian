@@ -36,6 +36,25 @@ export type HumanReviewReason =
   /** Сумма не совпадает с действующим прайсом. */
   | 'stale_price';
 
+/**
+ * Порядок опроса контролей. Он же порядок показа оператору.
+ *
+ * Список задан явно, а не выведен из `Object.keys` реестра: порядок ключей
+ * объекта — вещь случайная, а оператор читает причины сверху вниз и первую
+ * считает главной. Сначала подтверждённость утверждений, потом безопасность
+ * клиентского контура, в конце деньги.
+ */
+export const HUMAN_REVIEW_ORDER: HumanReviewReason[] = [
+  'consistency_failed',
+  'unsupported_claims',
+  'knowledge_gap_phrase',
+  'composite_capability_risk',
+  'client_safety',
+  'ungrounded_numbers',
+  'price_attribution',
+  'stale_price',
+];
+
 export const HUMAN_REVIEW_LABELS: Record<HumanReviewReason, string> = {
   consistency_failed: 'Проверка утверждений не завершилась',
   unsupported_claims: 'Утверждения не подтверждены источниками',
