@@ -248,22 +248,27 @@ export function isSuperAdmin(role: TelegramUserRole): boolean {
 }
 
 /**
- * Get Telegram IDs of all active admins (ADMIN + SUPER_ADMIN).
+ * Кому шлём рассылки администраторам (ADMIN + SUPER_ADMIN).
+ *
+ * Эта функция и две соседние отбирают ПОЛУЧАТЕЛЕЙ СООБЩЕНИЙ, а не тех, кому
+ * что-то позволено. Права проверяются отдельно (`isAdmin`, `isSuperAdmin`),
+ * поэтому отключить человеку уведомления можно, не трогая его роль.
  */
 export async function getAdminTelegramIds(): Promise<string[]> {
   const admins = await prisma.telegramUser.findMany({
-    where: { isActive: true, role: { in: ['ADMIN', 'SUPER_ADMIN'] } },
+    where: { isActive: true, notificationsEnabled: true, role: { in: ['ADMIN', 'SUPER_ADMIN'] } },
     select: { telegramId: true },
   });
   return admins.map((a) => a.telegramId);
 }
 
 /**
- * Get Telegram IDs of all active users (all roles).
+ * Кому шлём рассылку «прошу помощи у коллег» — всем активным сотрудникам,
+ * кроме отписавшихся.
  */
 export async function getAllActiveTelegramIds(): Promise<string[]> {
   const users = await prisma.telegramUser.findMany({
-    where: { isActive: true },
+    where: { isActive: true, notificationsEnabled: true },
     select: { telegramId: true },
   });
   return users.map((u) => u.telegramId);
