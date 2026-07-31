@@ -68,3 +68,9 @@ tmp-upload/
 scratchpad/
 
 docs/bot-audit/.rerun-progress.log
+
+# Сырые ответы прода из диагностических прогонов — не в репозиторий.
+.probe/
+docs/bot-audit/.autonomy-150-results.jsonl
+docs/bot-audit/.rerun-progress.log
+docs/bot-audit/.autonomy-150-results*.jsonl
