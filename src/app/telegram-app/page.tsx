@@ -10,6 +10,7 @@ import {
   WifiOff, Calendar, FileSearch, MoreHorizontal, Check, Upload, FolderOpen,
   Plus, PlayCircle, DatabaseIcon
 } from 'lucide-react';
+import { DocumentQuoteView } from '@/components/document-quote-view';
 
 // Theme Context
 const ThemeContext = createContext({
@@ -279,15 +280,6 @@ export default function TelegramMiniApp() {
       window.Telegram.WebApp.setBackgroundColor(shouldBeDark ? '#1f2937' : '#f5f5f5');
     }
   }, [theme]);
-
-  // Auto-scroll to highlighted quote in document viewer
-  useEffect(() => {
-    if (docViewer?.quote) {
-      setTimeout(() => {
-        document.getElementById('doc-highlight')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }, 100);
-    }
-  }, [docViewer]);
 
   // Restore scroll position when returning from rule detail to list
   useEffect(() => {
@@ -1636,16 +1628,6 @@ export default function TelegramMiniApp() {
   // Document viewer overlay
   if (docViewer) {
     const { title, text, quote } = docViewer;
-    // Split text at the quote to highlight it
-    let before = text, highlighted = '', after = '';
-    if (quote) {
-      const idx = text.indexOf(quote);
-      if (idx !== -1) {
-        before = text.slice(0, idx);
-        highlighted = text.slice(idx, idx + quote.length);
-        after = text.slice(idx + quote.length);
-      }
-    }
     return (
       <ThemeContext.Provider value={{ theme, isDark, setTheme }}>
         <div className={`min-h-screen flex flex-col ${isDark ? 'bg-gray-900' : 'bg-gray-50'}`}>
@@ -1659,22 +1641,7 @@ export default function TelegramMiniApp() {
           </div>
           {/* Document text */}
           <div className="flex-1 overflow-auto p-4">
-            <div className={`rounded-xl p-4 text-sm whitespace-pre-wrap leading-relaxed font-mono ${isDark ? 'bg-gray-800 text-gray-200' : 'bg-white text-gray-800'}`}>
-              {highlighted ? (
-                <>
-                  <span>{before}</span>
-                  <span
-                    id="doc-highlight"
-                    className="bg-yellow-300 dark:bg-yellow-600 text-gray-900 dark:text-white px-0.5 rounded"
-                  >
-                    {highlighted}
-                  </span>
-                  <span>{after}</span>
-                </>
-              ) : (
-                <span>{text}</span>
-              )}
-            </div>
+            <DocumentQuoteView text={text} quote={quote} />
           </div>
         </div>
       </ThemeContext.Provider>

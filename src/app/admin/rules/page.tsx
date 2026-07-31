@@ -1,7 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
+import { RuleSourceDialog } from './rule-source-dialog';
 import {
   Table,
   TableBody,
@@ -38,6 +39,9 @@ export default function RulesPage() {
   const [rules, setRules] = useState<Rule[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('ACTIVE');
+  const [sourceRuleId, setSourceRuleId] = useState<string | null>(null);
+  // Кнопка, с которой открыли модалку: на неё возвращаем фокус после закрытия.
+  const sourceTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const fetchRules = useCallback(async () => {
     try {
@@ -114,7 +118,17 @@ export default function RulesPage() {
               {rules.map((rule) => (
                 <TableRow key={rule.id}>
                   <TableCell>
-                    <code className="text-sm font-mono">{rule.ruleCode}</code>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        sourceTriggerRef.current = event.currentTarget;
+                        setSourceRuleId(rule.id);
+                      }}
+                      className="rounded font-mono text-sm text-blue-600 underline underline-offset-2 hover:text-blue-800 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:outline-none"
+                      title="Показать документ-источник и место в нём"
+                    >
+                      {rule.ruleCode}
+                    </button>
                   </TableCell>
                   <TableCell>
                     <div className="font-medium">{rule.title}</div>
@@ -149,6 +163,12 @@ export default function RulesPage() {
           </Table>
         </div>
       )}
+
+      <RuleSourceDialog
+        ruleId={sourceRuleId}
+        onClose={() => setSourceRuleId(null)}
+        restoreFocusRef={sourceTriggerRef}
+      />
     </div>
   );
 }
