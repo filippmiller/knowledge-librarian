@@ -3,7 +3,7 @@
  * Run: railway run npx tsx scripts/audit-extraction-contract.ts
  * Writes nothing. Only SELECTs.
  */
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, Prisma } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
@@ -130,7 +130,7 @@ async function main() {
 
   // ---------- DocChunk ----------
   const chunkTotal = await prisma.docChunk.count();
-  const chunkNoEmbedding = await prisma.docChunk.count({ where: { embedding: { equals: null } } });
+  const chunkNoEmbedding = await prisma.docChunk.count({ where: { embedding: { equals: Prisma.DbNull } } });
   const chunkScenarioNull = await prisma.docChunk.count({ where: { scenarioKey: null } });
   const chunkByAudience = await prisma.docChunk.groupBy({ by: ['audience'], _count: true });
   const chunkPerDoc = await prisma.$queryRawUnsafe<{ documentId: string; n: bigint }[]>(

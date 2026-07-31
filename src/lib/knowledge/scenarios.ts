@@ -236,6 +236,37 @@ export function scenarioFilterClause(chosenKey: ScenarioKey): Prisma.RuleWhereIn
   return { OR: [{ scenarioKey: null }, { scenarioKey: { in: chain } }] };
 }
 
+/**
+ * Лексический признак верхнеуровневого сценария в тексте вопроса.
+ *
+ * Нужен там, где классификатор сценария вернул «не знаю». Раньше в этом случае
+ * фильтр снимался ЦЕЛИКОМ, и правила, действующие только внутри одного
+ * сценария, попадали в любой ответ. Так правило «перевод подшивается к
+ * нотариальной копии или апостилированному оригиналу» — верное для апостиля —
+ * оказалось в ответе про посольство, где это ложь.
+ *
+ * Почему не «при неизвестном сценарии допускать только универсальные правила»,
+ * как напрашивается: замер показал, что классификатор узнаёт сценарий лишь в 14
+ * случаях из 35 вопросов про апостиль. Такое правило отняло бы у 60% апостильных
+ * вопросов все 255 апостильных правил — лечение хуже болезни.
+ *
+ * Слово же в вопросе есть всегда, когда речь об этой услуге: все 35 вопросов
+ * содержат «апостил». Поэтому признак лексический, а не модельный.
+ */
+const SCENARIO_LEXICAL_TRIGGERS: Record<string, RegExp> = {
+  apostille: /апостил|легализац/iu,
+};
+
+/**
+ * Какие корневые сценарии допустимы для вопроса, когда классификатор промолчал.
+ * Возвращает ключи корней, чьё слово в вопросе прозвучало.
+ */
+export function lexicallyAdmissibleScenarioRoots(question: string): string[] {
+  return Object.entries(SCENARIO_LEXICAL_TRIGGERS)
+    .filter(([, pattern]) => pattern.test(question))
+    .map(([root]) => root);
+}
+
 /** Validation — run at startup to catch typos that would otherwise break
  *  retrieval silently. Call from app bootstrap. */
 export function assertTaxonomyConsistency(): void {
