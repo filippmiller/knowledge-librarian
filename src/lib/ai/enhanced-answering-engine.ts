@@ -14,7 +14,7 @@ import prisma from '@/lib/db';
 import { hybridSearch, HybridSearchResult } from './vector-search';
 import { expandQuery, ExpandedQueries, ExtractedEntities, extractEntities } from './query-expansion';
 import { classifyScenario, type ScenarioDecision } from '@/lib/knowledge/scenario-classifier';
-import { ancestorsOf } from '@/lib/knowledge/scenarios';
+import { ancestorsOf, lexicallyAdmissibleScenarioRoots } from '@/lib/knowledge/scenarios';
 import { expandAbbreviations, selectKeyTerms } from '@/lib/knowledge/glossary';
 import { polishCanonicalAnswer } from '@/lib/ai/canonical-answer-polisher';
 import { type QAPair } from '@prisma/client';
@@ -606,6 +606,25 @@ function logPriceContradictions(contradictions: PriceContradiction[], sourceHint
   }
 }
 
+/**
+ * Отбор по сценарию, когда классификатор промолчал.
+ *
+ * Ключ сценария хранится путём через точку («apostille.zags.spb»), поэтому
+ * принадлежность корню проверяется префиксом. Пустой список корней означает, что
+ * в вопросе не прозвучало ни одной услуги со своим сценарием, — тогда
+ * допускаются только универсальные правила.
+ */
+function buildLexicalScenarioWhere(question: string) {
+  const roots = lexicallyAdmissibleScenarioRoots(question);
+  if (roots.length === 0) return { scenarioKey: null };
+  return {
+    OR: [
+      { scenarioKey: null },
+      ...roots.map((root) => ({ scenarioKey: { startsWith: root } })),
+    ],
+  };
+}
+
 export function answerSignalsKnowledgeGap(answer: string): boolean {
   return KNOWLEDGE_GAP_PATTERNS.some((pattern) => pattern.test(answer));
 }
@@ -997,9 +1016,14 @@ export async function answerQuestionEnhanced(
   // false sense of precision. Intent classification still returns domains
   // for logging/debugging purposes, but they no longer gate retrieval.
   console.log('[enhanced-answering] Step 5: Fetching rules and QA pairs...');
+  // Сценарий известен — обычный фильтр по цепочке предков. Сценарий НЕ известен —
+  // раньше фильтр снимался целиком, и правило, верное только внутри одного
+  // сценария, попадало в любой ответ (правило про апостиль в ответе про
+  // посольство). Теперь при молчании классификатора допускаются универсальные
+  // правила плюс те сценарии, чьё слово прозвучало в самом вопросе.
   const scenarioWhere = scenarioAncestors.length > 0
     ? { OR: [{ scenarioKey: null }, { scenarioKey: { in: scenarioAncestors } }] }
-    : {};
+    : buildLexicalScenarioWhere(question);
   // Клиентское извлечение физически не видит внутренних знаний — фильтр стоит
   // здесь, а не на выходе. Вырезать фразы из готового ответа было бы хрупко:
   // модель перескажет тот же факт другими словами.
