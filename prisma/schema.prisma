@@ -59,6 +59,7 @@ model Document {
   stagedExtractions  StagedExtraction[]
   processingAttempts ProcessingAttempt[]
   revisions          DocumentRevision[]
+  tariffs            Tariff[]
 
   @@index([parseStatus])
   @@index([scenarioKey])
@@ -228,16 +229,16 @@ model QAPair {
 
   // Provenance for AI-suggested, admin-approved pairs:
   // { origin: 'ai-suggested', approvedBy, approvedAt }
-  metadata    Json?
+  metadata Json?
 
   /// См. Rule.audience. У пар без документа значение задаётся при создании.
   audience KnowledgeAudience @default(INTERNAL_ONLY)
 
   // Relations
-  document     Document?         @relation(fields: [documentId], references: [id])
-  rule         Rule?             @relation(fields: [ruleId], references: [id])
-  supersedesQa QAPair?           @relation("QAVersions", fields: [supersedesQaId], references: [id])
-  supersededBy QAPair[]          @relation("QAVersions")
+  document     Document?  @relation(fields: [documentId], references: [id])
+  rule         Rule?      @relation(fields: [ruleId], references: [id])
+  supersedesQa QAPair?    @relation("QAVersions", fields: [supersedesQaId], references: [id])
+  supersededBy QAPair[]   @relation("QAVersions")
   domains      QADomain[]
 
   @@index([status])
@@ -597,16 +598,16 @@ enum FeedbackType {
 // produce the most hallucinations and whether regeneration actually fixes
 // them. See src/lib/ai/consistency-gate.ts.
 model HallucinationLog {
-  id                  String   @id @default(cuid())
-  sessionId           String?
-  question            String   @db.Text
-  scenarioKey         String?
-  initialAnswer       String   @db.Text
-  regeneratedAnswer   String?  @db.Text
-  unsupportedClaims   Json // Array<{ claim, reasoning?, supported: false }>
-  unsupportedCount    Int
-  regenerated         Boolean  @default(false)
-  createdAt           DateTime @default(now())
+  id                String   @id @default(cuid())
+  sessionId         String?
+  question          String   @db.Text
+  scenarioKey       String?
+  initialAnswer     String   @db.Text
+  regeneratedAnswer String?  @db.Text
+  unsupportedClaims Json // Array<{ claim, reasoning?, supported: false }>
+  unsupportedCount  Int
+  regenerated       Boolean  @default(false)
+  createdAt         DateTime @default(now())
 
   @@index([scenarioKey])
   @@index([createdAt])
@@ -847,4 +848,181 @@ model NotificationLog {
   @@index([telegramId])
   @@index([isRead])
   @@index([sentAt])
+}
+
+// ============================================
+// ТАРИФНАЯ СЕТКА
+// ============================================
+//
+// Единственный источник цен. Цены жили текстом внутри правил, и это дважды
+// дало клиенту неверную цифру: «260 вместо 1100» (цена приписана не той услуге)
+// и «20 000 вместо 22 000» (активным остался прошлогодний прайс).
+//
+// Модель восстановлена интроспекцией продовой базы после того, как определение
+// было стёрто из файла схемы `git reset --hard` во время параллельной работы.
+// Данные при этом не пострадали.
+
+// ============================================
+// ТАРИФНАЯ СЕТКА
+// ============================================
+
+/// Раздел прайса. Значения повторяют нумерованные заголовки самих прайс-листов,
+/// а не выдуманную классификацию: по разделу восстанавливается страница бумаги,
+/// с которой строка снята.
+enum TariffSection {
+  TRANSLATION // языковая матрица «Прайс на перевод и заверение»
+  CERTIFICATION // заверение и допуслуги, там же
+  APOSTILLE_SPB
+  APOSTILLE_EDUCATION
+  APOSTILLE_MOSCOW
+  CONSULAR_LEGALIZATION
+  CHAMBER_OF_COMMERCE
+  VITAL_RECORDS_SPB
+  VITAL_RECORDS_URGENT
+  CRIMINAL_RECORD
+  CRIMINAL_RECORD_APOSTILLE
+  NOSTRIFICATION
+}
+
+/// Чем является число в строке прайса.
+///
+/// Механически сверять с ответом бота можно только FIXED. «от 60 руб.» и
+/// «70% от стоимости 1 у.с.» — не цены, а правила расчёта: сверка «от 60» с
+/// ответом «80 рублей» объявила бы противоречием верный ответ.
+enum TariffAmountKind {
+  FIXED
+  FROM // нижняя граница: «от 60 руб. за страницу А4»
+  PERCENT_OF_BASE // «70% от стоимости 1 у.с.»
+  PERCENT_SURCHARGE // «+10% от стоимости»
+}
+
+/// Единица, в которой назначена цена.
+///
+/// Единица — часть цены, а не оформление: «260» без «за страницу» уже дважды
+/// уходило клиенту как цена за документ (docs/bot-audit/06-price-table-and-source-routes.md).
+/// Словарь совпадает с `PriceUnit` в src/lib/knowledge/certification-price.ts.
+enum TariffUnit {
+  DOCUMENT
+  PAGE
+  CONDITIONAL_PAGE // условная страница = 1800 знаков с пробелами
+  MARK // отметка
+  VISA
+  PERCENT
+}
+
+/// Срок из шапки языковой матрицы. Пять колонок-сроков одинаковы во всех трёх
+/// категориях, поэтому это перечисление, а не текст; человеческая формулировка
+/// лежит рядом в `termText`.
+enum TariffTurnaround {
+  STANDARD
+  IN_1_DAY // ЧЕРЕЗ 1 ДЕНЬ
+  NEXT_DAY // НА СЛЕД. ДЕНЬ
+  SAME_DAY // В ДЕНЬ ПРИЕМА
+  TWO_HOURS
+}
+
+/// Направление перевода. Категория 1 существует только в FROM_FOREIGN — перевод
+/// НА язык считается начиная со 2 категории (оговорка под таблицей 1 категории).
+enum TranslationDirection {
+  FROM_FOREIGN
+  TO_FOREIGN
+}
+
+/// Единственный источник правды по ценам.
+///
+/// До этой таблицы цены жили текстом в 400+ правилах базы знаний, и бот дважды
+/// назвал клиенту цену чужой услуги: «нотариальное заверение перевода — 260 ₽
+/// за страницу», тогда как 260 ₽/стр — заверение КОПИИ, а перевода — 1100 ₽ за
+/// документ. Пока цена — текст, такая подмена неотличима от верного ответа.
+///
+/// Одна строка = одна ячейка прайса. Плоская услуга («Апостиль МЮ СПб») и
+/// клетка языковой матрицы («английский, 1 категория, стандарт, с НЗ») лежат в
+/// одной таблице: у них общий набор обязательных признаков (цена, единица,
+/// срок, дата действия, контур), а различаются только необязательными.
+model Tariff {
+  /// Слова, которыми услугу называет клиент, а прайс — нет. Без них строка
+  /// находится только по словам официального названия.
+  synonyms String[] @default([])
+
+  id String @id @default(cuid())
+
+  /// Ключ строки в прайсе, устойчивый к перезапуску импорта и к перестановке
+  /// строк в документе. Собирается из смысловых признаков, а не из номера
+  /// строки: иначе вставка одной услуги в середину прайса переписала бы цены
+  /// всем следующим. Кириллица в ключе допустима намеренно — ключ должен
+  /// читаться глазами при разборе инцидента.
+  naturalKey String @unique
+
+  section      TariffSection
+  /// Заголовок раздела дословно из документа. null там, где у таблицы своего
+  /// заголовка нет (таблица заверения озаглавлена только «Наименование услуги»).
+  sectionTitle String?
+  /// Название услуги. Для плоских услуг — дословно ячейка прайса; для матрицы
+  /// собирается из шапок таблицы (язык, категория, направление, срок).
+  serviceName  String
+
+  /// Орган или место подачи: «МЮ СПб», «ЗАГС МО», «МЮ + МИД + Посольство».
+  authority  String?
+  /// Срок дословно: «1 – 1,5 недели», «8-9 р.д.», «СТАНДАРТ». Не разбирается в
+  /// число намеренно — «1 – 1,5 недели» числом не является, а округление срока
+  /// в большую или меньшую сторону меняет обещание клиенту.
+  termText   String?
+  /// Условия оказания: доверенность, состав приложений, пропускная способность.
+  conditions String?
+
+  amount        Decimal?         @db.Decimal(12, 2)
+  amountKind    TariffAmountKind @default(FIXED)
+  percent       Decimal?         @db.Decimal(6, 2)
+  /// От чего считается процент: «стоимости 1 у.с.», «стоимости».
+  percentBase   String?
+  /// Разовый тариф поверх поштучной цены: «1000 руб. тариф + 260 руб./стр».
+  baseFeeAmount Decimal?         @db.Decimal(12, 2)
+  unit          TariffUnit
+  currency      String           @default("RUB")
+  /// Цена дословно как в прайсе. Всё, что не влезло в разбор (например «А4» в
+  /// «от 60 руб. за страницу А4»), сохраняется здесь и не теряется.
+  priceText     String
+
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+
+  /// Контур: клиентский прайс или внутренний. По умолчанию INTERNAL_ONLY —
+  /// ошибка разметки обязана приводить к молчанию, а не к утечке внутренней
+  /// себестоимости клиенту.
+  audience KnowledgeAudience @default(INTERNAL_ONLY)
+
+  /// Оговорка, без которой цену называть нельзя: «цены не включают перевод,
+  /// пересылку, консульский сбор». Хранится на строке, а не рядом с разделом,
+  /// потому что теряется именно при выдаче одной строки.
+  footnote String?
+
+  // Признаки языковой матрицы. Null у плоских услуг.
+  language           String?
+  complexityCategory Int?
+  direction          TranslationDirection?
+  turnaround         TariffTurnaround?
+  /// Колонка «вкл. НЗ» первой категории: цена перевода вместе с нотариальным
+  /// заверением. Отдельная строка, а не вычисление на лету — надбавка задана
+  /// прайсом, а не формулой, и зависит от срока: 1100 ₽ на обычных сроках и
+  /// 1250 ₽ (срочное заверение) на «в день приёма» и «два часа».
+  includesNotary     Boolean               @default(false)
+
+  sourceFile String
+  documentId String?
+  document   Document? @relation(fields: [documentId], references: [id], onDelete: SetNull)
+
+  /// Порядок строки в исходном документе — чтобы админка показывала прайс так,
+  /// как он напечатан на бумаге.
+  sortOrder Int     @default(0)
+  isActive  Boolean @default(true)
+
+  updatedBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([audience])
+  @@index([documentId])
+  @@index([effectiveFrom])
+  @@index([language, complexityCategory, direction, turnaround])
+  @@index([section, isActive])
 }
