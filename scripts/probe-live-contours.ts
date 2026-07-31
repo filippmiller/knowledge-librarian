@@ -186,6 +186,15 @@ async function runClient(question: string, tariffs: TariffRecord[]): Promise<Con
   }
 }
 
+/**
+ * Кейсы, которые переспрашивать не нужно.
+ *
+ * Сбойный контур сделанным НЕ считается. Сбои здесь массовые и внешние — за
+ * первый заход на 30 кейсов сеть и база уронили 8 внутренних и 6 клиентских
+ * запросов. Если писать их в «сделано», повторный запуск молча пройдёт мимо, и
+ * возобновляемость окажется только на бумаге: дыры в замере останутся навсегда,
+ * а отчёт будет выглядеть полным.
+ */
 function loadDone(): Map<number, Row> {
   const done = new Map<number, Row>();
   if (!existsSync(RESULTS)) return done;
@@ -193,7 +202,9 @@ function loadDone(): Map<number, Row> {
     if (!line.trim()) continue;
     try {
       const row = JSON.parse(line) as Row;
-      done.set(row.n, row);
+      const internalOk = ONLY === 'client' || row.internal?.status === 'ok';
+      const clientOk = ONLY === 'internal' || row.client?.status === 'ok';
+      if (internalOk && clientOk) done.set(row.n, row);
     } catch {
       // Оборванная последняя строка после Ctrl-C — вопрос переспросим.
     }
@@ -219,7 +230,13 @@ function loadAllParts(): Row[] {
       if (!line.trim()) continue;
       try {
         const row = JSON.parse(line) as Row;
-        rows.set(row.n, row);
+        // Повтор сбойного кейса дописывается в конец, и по номеру строк
+        // становится две. Побеждает та, где успешных контуров больше, а не
+        // просто последняя: иначе неудачный повтор затёр бы удачный первый заход.
+        const score = (r: Row) =>
+          (r.internal?.status === 'ok' ? 1 : 0) + (r.client?.status === 'ok' ? 1 : 0);
+        const existing = rows.get(row.n);
+        if (!existing || score(row) >= score(existing)) rows.set(row.n, row);
       } catch {
         /* оборванная строка */
       }
