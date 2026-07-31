@@ -1251,11 +1251,22 @@ export async function answerQuestionEnhanced(
   if (confidenceLevel === 'insufficient' && !hasStrongQaMatch) {
     const priced = lookupTariffForQuestion(question, tariffs);
     if (priced.kind === 'single' || priced.kind === 'variants') {
+      // Клиенту перечень вариантов не выкладывается. Владелец бюро: «Ну смысл
+      // говорить цену нот. зав. и срочного, если непонятно, какой документ и
+      // какая общая цена. Человек так запутается». Сотруднику наоборот нужен
+      // весь список — он считает сам.
+      const listVariants = priced.kind === 'variants' && audience === 'internal';
       const body =
         priced.kind === 'single'
           ? describeTariff(priced.tariff)
-          : `${priced.service} — цена зависит от срока:\n${priced.tariffs.map(describeTariff).join('\n\n')}`;
-      console.log('[enhanced-answering] Ответ из прайса:', priced.kind === 'single' ? priced.tariff.serviceName : priced.service);
+          : listVariants
+            ? `${priced.service} — цена зависит от срока:\n${priced.tariffs.map(describeTariff).join('\n\n')}`
+            : `${priced.service} — цена зависит от срока: от ${formatAmountRange(priced.tariffs)}. Скажите, к какому числу нужно, — назову точную сумму.`;
+
+      console.log(
+        '[enhanced-answering] Ответ из прайса:',
+        priced.kind === 'single' ? priced.tariff.serviceName : priced.service
+      );
       return buildGuardrailShell(
         question,
         `${body}\n\nЕсли нужен точный расчёт по вашему пакету документов — напишите, что именно нужно перевести и заверить.`,
@@ -1677,6 +1688,19 @@ export function buildDeterministicGuardrailResultForTests(
   audience: Audience
 ): EnhancedAnswerResult | null {
   return buildDeterministicGuardrailResult(question, audience);
+}
+
+/**
+ * Границы цены по вариантам одной услуги — для клиента, которому перечень
+ * вариантов не выкладывается.
+ */
+function formatAmountRange(tariffs: { amount: number | null }[]): string {
+  const amounts = tariffs.map((t) => t.amount).filter((a): a is number => a !== null);
+  if (amounts.length === 0) return 'уточню';
+  const min = Math.min(...amounts);
+  const max = Math.max(...amounts);
+  const money = (n: number) => `${n.toLocaleString('ru-RU')} ₽`;
+  return min === max ? money(min) : `${money(min)} до ${money(max)}`;
 }
 
 /** Общая обвязка детерминированного ответа: разная у веток только суть. */
