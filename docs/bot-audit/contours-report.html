@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><title>Контуры бота — прогон по корпусу</title>
+<style>
+ body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:24px;color:#111;background:#fafafa}
+ h1{font-size:20px} h2{font-size:15px;margin-top:28px}
+ table{border-collapse:collapse;width:100%;background:#fff}
+ th,td{border:1px solid #e3e3e3;padding:8px;vertical-align:top;font-size:12px;text-align:left}
+ th{background:#f3f4f6;position:sticky;top:0}
+ td.q{max-width:280px} .small{font-size:11px;line-height:1.45;margin-top:3px}
+ .muted{color:#888} .fail{background:#fff1f1;color:#a12}
+ .badge{display:inline-block;padding:1px 7px;border-radius:9px;font-weight:600;font-size:11px}
+ .badge.ok{background:#dcfce7;color:#14532d} .badge.hold{background:#fee2e2;color:#7f1d1d}
+ .badge.clarify{background:#dbeafe;color:#1e3a8a}
+ .blocker{color:#92400e} .reason{color:#7c2d12} .stale{color:#9f1239;font-weight:600}
+ .answer{white-space:pre-wrap;margin-top:6px;padding:6px;background:#f8f8f8;border-radius:5px;max-width:420px}
+ .sum{background:#fff;border:1px solid #e3e3e3;padding:12px;border-radius:6px;margin:10px 0}
+ details summary{cursor:pointer;color:#2563eb;font-size:11px;margin-top:4px}
+</style></head><body>
+<h1>Контуры бота — прогон по корпусу</h1>
+<div class="sum">
+ <div>строк: <b>3</b> · ревизия: <b>f65aa85+грязное</b></div>
+ <div>ответ уходит: сотруднику <b>0</b>, клиенту <b>0</b> из 3</div>
+ <div>контуры разошлись в решении: <b>0</b></div>
+ <div class="small muted">Прогон идёт с флагом sandbox: эскалация и черновики пробелов знаний не создаются.</div>
+</div>
+<table>
+<thead><tr><th>#</th><th class="q">Вопрос клиента</th><th>Прайс</th><th>Сотрудник</th><th>Клиент</th></tr></thead>
+<tbody>
+<tr>
+ <td>1<div class="small muted">×11</div></td>
+ <td class="q">Как рассчитывается стоимость письменного перевода и что такое условная страница?<div class="small muted">pricing_policy · живой расчёт</div>
+   <details><summary>ответ оператора</summary><div class="answer">Стоимость перевода считается по объёму в условных страницах: 1 условная страница (у.с.) = 1800 знаков с пробелами по статистике Word — это отраслевой стандарт всех бюро переводов. Считается именно по знакам, а не по числу листов А4 или размеру шрифта, поэтому число условных страниц не всегда совпадает с числом физических листов документа. Предварительный расчёт делается по исходному тексту, а окончательная стоимость — по количеству знаков в готовом переводе на нужном языке; от предварительной она обычно отличается незначительно. На итоговую цену также влияют язык и срочность.</div></details></td>
+ <td class="small">—</td>
+ <td class="fail">не ответил<div class="small">TypeError: terminated</div></td>
+ <td class="muted">не гонялся</td>
+</tr>
+<tr>
+ <td>2<div class="small muted">×10</div></td>
+ <td class="q">Нужна ли предоплата для запуска заказа в работу и можно ли оплатить частями?<div class="small muted">policy · живой расчёт</div>
+   <details><summary>ответ оператора</summary><div class="answer">Да, агентство работает по предоплате — оплата при получении невозможна. Для запуска заказа в работу вносится предоплата: можно внести полную или частичную сумму (часто 60–70% от предварительной стоимости, например 70% для крупных заказов), остаток доплачивается по готовности заказа любым удобным способом. Заказ запускается только после подтверждения оплаты.</div></details></td>
+ <td class="small">—</td>
+ <td><div class="badge hold">escalate</div><div class="small">0% · —</div><div class="small blocker">Движок сам оценил ответ как слабый</div><details><summary>ответ</summary><div class="answer">В базе знаний нет данных по этому вопросу. Уточните, пожалуйста, о какой услуге идёт речь — апостиль, перевод, нотариальное заверение?</div></details></td>
+ <td class="muted">не гонялся</td>
+</tr>
+<tr>
+ <td>3<div class="small muted">×9</div></td>
+ <td class="q">В какие часы можно вносить оплату и когда заказ запускается в работу?<div class="small muted">policy</div>
+   <details><summary>ответ оператора</summary><div class="answer">Оплату просят вносить только в рабочие часы офиса (как правило с 9:00 до 19:00; в части офисов с 10:00 до 18:00 по московскому времени). Заказ запускается в работу только после подтверждения оплаты (скрин/чек/квитанция от клиента). При оплате после рабочего времени заказ запускается позже.</div></details></td>
+ <td class="small">—</td>
+ <td><div class="badge hold">escalate</div><div class="small">0% · —</div><div class="small blocker">Движок сам оценил ответ как слабый</div><details><summary>ответ</summary><div class="answer">В базе знаний нет данных по этому вопросу. Уточните, пожалуйста, о какой услуге идёт речь — апостиль, перевод, нотариальное заверение?</div></details></td>
+ <td class="muted">не гонялся</td>
+</tr>
+</tbody></table></body></html>
