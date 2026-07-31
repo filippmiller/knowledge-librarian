@@ -28,6 +28,10 @@ import {
   checkCertificationPriceAttribution,
   type PriceContradiction,
 } from '@/lib/knowledge/certification-price';
+import { getTariffs } from '@/lib/knowledge/tariff-store';
+import { buildTariffContext } from '@/lib/knowledge/tariff-context';
+import { lookupTariffForQuestion, describeTariff } from '@/lib/knowledge/tariff-lookup';
+import { checkStalePrice } from '@/lib/knowledge/stale-price-check';
 import {
   resolveSourceDocumentRoute,
   SOURCE_DOCUMENT_ROUTES,
@@ -182,7 +186,9 @@ const ENHANCED_ANSWERING_PROMPT = `Ты — ИИ-библиотекарь зна
 
 4. **НЕ СМЕШИВАЙ** факты из разных цитат в один: если цитата 1 говорит "Вторник 10-12", а цитата 2 "Четверг 14-16", пиши их раздельно с указанием источника, не склеивай в "Вторник-четверг 10-16".
 
-5. **НЕ РЕДАКТИРУЙ ПРАВИЛА**: не предупреждай "цена может быть устаревшей", не добавляй юридических оговорок, которых нет в источнике.
+5. **НЕ ДОБАВЛЯЙ ЮРИДИЧЕСКИХ ОГОВОРОК**, которых нет в источнике.
+
+5а. **ЦЕНА — ТОЛЬКО ИЗ РАЗДЕЛА «ДЕЙСТВУЮЩИЙ ПРАЙС»**, если он приведён. Числа из правил и документов устаревают: прошлогодний прайс остался в базе активным, и из-за этого клиенту называли 20 000 ₽ вместо 22 000 ₽. Если услуга есть в прайсе — цена берётся ОТТУДА, даже когда в правиле стоит другая. Если услуги в прайсе нет — цену не называй и скажи, что её посчитает менеджер.
 
 6. **Цитируй точно**: если факт важен — приведи дословно из цитаты в кавычках "...".
 
@@ -220,19 +226,25 @@ const CLIENT_ANSWERING_PROMPT = `Ты — менеджер бюро перево
 Для клиента ты просто знающий менеджер. У тебя нет источников, документов, правил и базы — точнее, клиент о них знать не должен. Поэтому в ответе НЕ СУЩЕСТВУЕТ таких оборотов:
 «в цитатах», «в источниках», «в наших источниках», «в базе знаний», «в материалах», «согласно правилу», «по документу», «данных нет», «информация отсутствует».
 
-Чего не знаешь — просто НЕ УПОМИНАЙ. Не сообщай клиенту о пробеле, переходи к тому, что можешь предложить.
+Запрет касается ФОРМУЛИРОВКИ, а не честности. Чего не знаешь — говори словами менеджера: «уточню и напишу», «посчитаю и пришлю», «нужно посмотреть документ». Придумывать вместо этого НЕЛЬЗЯ, и молча обходить пробел, продолжая уверенно говорить, — тоже нельзя: клиент примет выдумку за обещание, за которым стоят его деньги и сроки.
 
 В примерах ниже цены и сроки намеренно не указаны: подставляй ТОЛЬКО те числа, которые приведены в сведениях ниже. Если их там нет — строй фразу без чисел.
 
 Плохо: «График работы МинЮста в цитатах не указан. Но я могу помочь с апостилем.»
+Плохо: «МинЮст принимает по будням с 10 до 17.» — если графика в сведениях нет, это выдумка.
 Хорошо: «График приёма уточню и напишу отдельно. По апостилю могу сказать сразу — вот сроки и стоимость: …»
 
 Плохо: «В наших источниках нет подтверждённых данных о вашем случае.»
 Хорошо: «Ваш случай разберу индивидуально — уточню детали и вернусь с решением и стоимостью.»
 
+Плохо: «Ориентировочно это будет около 5000 рублей.» — «ориентировочно» и «около» запрещены: названная цифра станет обещанием.
+Хорошо: «Точную сумму посчитаю по документу — пришлите скан, отвечу с ценой и сроком.»
+
 ═══ ОСТАЛЬНЫЕ ЗАПРЕТЫ ═══
 
 1. **НЕ ВЫДУМЫВАЙ** цены, сроки, адреса, телефоны. Называй только те числа, которые прямо приведены ниже. Нет числа — не оценивай «примерно» и не называй вовсе.
+
+1а. **ЦЕНА — ТОЛЬКО ИЗ РАЗДЕЛА «ДЕЙСТВУЮЩИЙ ПРАЙС»**, если он приведён. Остальные сведения содержат цены, которые могли устареть; прайс сверен с подписанным документом и старше их всех. Услуги нет в прайсе — цену не называй, скажи, что посчитаешь по документу.
 
 2. **НЕ ОТПРАВЛЯЙ КЛИЕНТА НАРУЖУ.** Никогда не пиши, где и как получить услугу самостоятельно: не давай адреса, телефоны и часы приёма госорганов, не пиши «подайте документы туда», «обратитесь в МВД», «ставится по месту выдачи», «уточните в министерстве». Мы не справочное бюро. Упоминать орган можно только как то, куда МЫ подаём за клиента.
 
@@ -1209,7 +1221,15 @@ export async function answerQuestionEnhanced(
 
   // Step 9: Build context and generate answer
   console.log('[enhanced-answering] Step 9: Generating answer with confidence level:', confidenceLevel);
-  const context = buildEnhancedContext(contextChunks, rules, qaPairs);
+  // Прайс к вопросу. Сбой чтения сетки не должен ронять ответ: `getTariffs`
+  // возвращает пустой список, и блок просто не появляется.
+  const tariffs = await getTariffs(audience);
+  const tariffContext = buildTariffContext(question, tariffs);
+  if (tariffContext.count > 0) {
+    console.log(`[enhanced-answering] Прайс: ${tariffContext.count} строк в контекст синтеза`);
+  }
+
+  const context = buildEnhancedContext(contextChunks, rules, qaPairs, tariffContext.block);
 
   // РОВНО то, что увидела модель. Из всех найденных чанков в промпт уходят
   // только отобранные `contextChunks`; число из отброшенного чанка модель не
@@ -1217,10 +1237,32 @@ export async function answerQuestionEnhanced(
   // подтверждённой. Один массив на проверку связности и на заземление чисел,
   // чтобы они не разъехались в том, что считают источником.
   const synthesisSources = [
+    ...tariffContext.sources,
     ...contextChunks.map((c) => c.content),
     ...rules.map((r) => `[${r.ruleCode}] ${r.title}: ${r.body}`),
     ...qaPairs.map((q) => `${q.question} ${q.answer}`),
   ];
+
+  // База знаний ничего не нашла — но услуга могла быть названа целиком, и тогда
+  // цена в прайсе есть. Ветка стоит ИМЕННО ЗДЕСЬ, а не выше: она не имеет права
+  // перебить найденный базой ответ, потому что строка прайса — это цена, а не
+  // ответ на вопрос целиком. Перед общими знаниями она законна: там альтернатива
+  // — модель без источников вовсе.
+  if (confidenceLevel === 'insufficient' && !hasStrongQaMatch) {
+    const priced = lookupTariffForQuestion(question, tariffs);
+    if (priced.kind === 'single' || priced.kind === 'variants') {
+      const body =
+        priced.kind === 'single'
+          ? describeTariff(priced.tariff)
+          : `${priced.service} — цена зависит от срока:\n${priced.tariffs.map(describeTariff).join('\n\n')}`;
+      console.log('[enhanced-answering] Ответ из прайса:', priced.kind === 'single' ? priced.tariff.serviceName : priced.service);
+      return buildGuardrailShell(
+        question,
+        `${body}\n\nЕсли нужен точный расчёт по вашему пакету документов — напишите, что именно нужно перевести и заверить.`,
+        [priced.kind === 'single' ? describeTariff(priced.tariff) : priced.tariffs.map(describeTariff).join(' | ')]
+      );
+    }
+  }
 
   if (confidenceLevel === 'insufficient' && !hasStrongQaMatch && shouldUseGeneralKnowledgeFallback(question)) {
     const guardrail = buildDeterministicGuardrailResult(question, audience);
@@ -1423,6 +1465,28 @@ ${fixList}
     logPriceContradictions(priceAttribution.contradictions, rules.map((r) => r.ruleCode).join(', '));
   }
 
+  // Сверка названных сумм с прайсом — последний рубеж.
+  //
+  // Проверка приписки выше знает только таблицу заверения; здесь сверяется весь
+  // прайс. Признак ошибки узкий и потому надёжный: сумма НЕ встречается среди
+  // действующих цен той услуги, которая названа в том же предложении. Замер:
+  // 29 подложенных ошибок из 29 пойманы, ложных тревог на 156 сохранённых
+  // ответах бота — ноль (`scripts/verify-stale-price.ts`,
+  // `scripts/audit-stale-price-fp.ts`).
+  //
+  // Вердикт действует на оба контура: назвать клиенту прошлогоднюю цену
+  // сотрудник не вправе так же, как и бот.
+  const stalePrice = checkStalePrice(answer, tariffs);
+  if (!stalePrice.ok) {
+    console.warn(
+      '[enhanced-answering] ПРАЙС: сумма не найдена среди действующих цен услуги [audience=%s]: %s',
+      audience,
+      stalePrice.findings
+        .map((f) => `${f.amount} ₽ при «${f.serviceHint}» (действует ${f.currentAmounts.join(', ')})`)
+        .join(' | ')
+    );
+  }
+
   const requiresHumanReview = Boolean(
     consistency?.verificationFailed ||
     consistency?.unsupported.length ||
@@ -1430,7 +1494,8 @@ ${fixList}
     answerSignalsCompositeCapabilityRisk(question, answer) ||
     (clientSafety && !clientSafety.safe) ||
     ungroundedBlocksClient ||
-    !priceAttribution.consistent
+    !priceAttribution.consistent ||
+    !stalePrice.ok
   );
 
   // Build source references from context chunks
@@ -2210,9 +2275,18 @@ function generateClarificationQuestion(
 function buildEnhancedContext(
   chunks: HybridSearchResult[],
   rules: { ruleCode: string; title: string; body: string; sourceSpan?: unknown }[],
-  qaPairs: { question: string; answer: string }[]
+  qaPairs: { question: string; answer: string }[],
+  tariffBlock: string = ''
 ): string {
   let context = '';
+
+  // Прайс идёт ПЕРВЫМ и с явным указанием приоритета. Цены живут ещё и текстом
+  // внутри правил, где они устаревают: «20 000 вместо 22 000» — это ровно
+  // прошлогодний прайс, оставшийся активным в базе знаний. Пока дублирование не
+  // снесено, побеждать должна таблица, сверенная с бумагой.
+  if (tariffBlock) {
+    context += `${tariffBlock}\n\n`;
+  }
 
   // Put document chunks FIRST since they're semantically matched to the question
   if (chunks.length > 0) {
