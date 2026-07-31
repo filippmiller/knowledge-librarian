@@ -28,6 +28,7 @@ import {
   checkCertificationPriceAttribution,
   type PriceContradiction,
 } from '@/lib/knowledge/certification-price';
+import type { AnswerReasons, ReasonDetail } from '@/lib/ai/answer-reasons';
 import { getTariffs } from '@/lib/knowledge/tariff-store';
 import { buildTariffContext } from '@/lib/knowledge/tariff-context';
 import { lookupTariffForQuestion, describeTariff } from '@/lib/knowledge/tariff-lookup';
@@ -82,6 +83,12 @@ export interface EnhancedAnswerResult {
       avgSimilarity: number;
       maxSimilarity: number;
     };
+    /**
+     * Почему ответ получился таким: какие контроли сработали, что из прайса
+     * ушло в промпт, какие числа не заземлились. Только при `includeDebug` —
+     * в обычном ответе это лишний вес.
+     */
+    reasons?: AnswerReasons;
   };
   clarificationQuestion?: {
     question: string;
@@ -1498,16 +1505,68 @@ ${fixList}
     );
   }
 
-  const requiresHumanReview = Boolean(
-    consistency?.verificationFailed ||
-    consistency?.unsupported.length ||
-    answerSignalsKnowledgeGap(answer) ||
-    answerSignalsCompositeCapabilityRisk(question, answer) ||
-    (clientSafety && !clientSafety.safe) ||
-    ungroundedBlocksClient ||
-    !priceAttribution.consistent ||
-    !stalePrice.ok
-  );
+  // Причины собираются ЗДЕСЬ ЖЕ, из тех же выражений, а не отдельной функцией:
+  // объяснение, посчитанное второй раз, разойдётся с решением, которое оно
+  // объясняет. Ровно так у песочницы появилась вторая копия политики отправки.
+  const humanReviewReasons: ReasonDetail[] = [];
+  if (consistency?.verificationFailed) {
+    humanReviewReasons.push({ reason: 'consistency_failed', detail: 'проверка утверждений не завершилась' });
+  }
+  if (consistency?.unsupported.length) {
+    humanReviewReasons.push({
+      reason: 'unsupported_claims',
+      detail: consistency.unsupported.map((c) => `«${c.claim}»`).join('; '),
+    });
+  }
+  if (answerSignalsKnowledgeGap(answer)) {
+    humanReviewReasons.push({ reason: 'knowledge_gap_phrase', detail: 'ответ признаёт отсутствие данных' });
+  }
+  if (answerSignalsCompositeCapabilityRisk(question, answer)) {
+    humanReviewReasons.push({
+      reason: 'composite_capability_risk',
+      detail: 'утверждение о возможности без прямого подтверждения',
+    });
+  }
+  if (clientSafety && !clientSafety.safe) {
+    humanReviewReasons.push({ reason: 'client_safety', detail: clientSafety.violations.join('; ') });
+  }
+  if (ungroundedBlocksClient) {
+    humanReviewReasons.push({
+      reason: 'ungrounded_numbers',
+      detail: grounding.ungrounded.map((c) => `${c.value} (${c.kind})`).join('; '),
+    });
+  }
+  if (!priceAttribution.consistent) {
+    humanReviewReasons.push({
+      reason: 'price_attribution',
+      detail: priceAttribution.contradictions
+        .map((c) => `${c.serviceLabel}: назвал ${c.claimed}, прайс ${c.expected}`)
+        .join('; '),
+    });
+  }
+  if (!stalePrice.ok) {
+    humanReviewReasons.push({
+      reason: 'stale_price',
+      detail: stalePrice.findings
+        .map((f) => `${f.amount} ₽ при «${f.serviceHint}», действует ${f.currentAmounts.join(', ')}`)
+        .join('; '),
+    });
+  }
+
+  const requiresHumanReview = humanReviewReasons.length > 0;
+
+  const answerReasons: AnswerReasons = {
+    humanReview: humanReviewReasons,
+    tariffContext: { sections: tariffContext.sections, rows: tariffContext.count },
+    // Незаземлённые числа показываются ВСЕГДА, а не только когда они удержали
+    // ответ: внутреннему контуру они ответ не блокируют, но сотруднику знать о
+    // них надо — он отправляет этот текст клиенту своими руками.
+    ungroundedValues: grounding.ungrounded.map((c) => `${c.value} ${c.unit ?? ''}`.trim()),
+    stalePrices: stalePrice.findings.map((f) => `${f.amount} ₽ при «${f.serviceHint}»`),
+    priceContradictions: priceAttribution.contradictions.map(
+      (c) => `${c.serviceLabel}: ${c.claimed} против ${c.expected}`
+    ),
+  };
 
   // Build source references from context chunks
   const primarySource = primaryDocId ? {
@@ -1618,6 +1677,7 @@ ${fixList}
         avgSimilarity,
         maxSimilarity: chunks[0]?.combinedScore || 0,
       },
+      reasons: answerReasons,
     };
   }
 

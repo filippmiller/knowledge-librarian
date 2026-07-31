@@ -17,3 +17,28 @@ export type DeliveryDecision = 'clarify' | 'answer' | 'escalate';
 export function isDeliveryDecision(value: unknown): value is DeliveryDecision {
   return value === 'clarify' || value === 'answer' || value === 'escalate';
 }
+
+/**
+ * Что помешало отправить ответ. Порядок значений — порядок проверок в политике:
+ * возвращается ПЕРВАЯ сработавшая причина, а не все сразу. Так и принимается
+ * решение, и объяснение обязано совпадать с ним, а не быть полнее.
+ */
+export type AutoAnswerBlocker =
+  /** Тумблер автоответа в настройках выключен. Ответ может быть отличным. */
+  | 'auto_answer_disabled'
+  /** Сработал один из контролей качества — какой именно, см. `humanReviewReasons`. */
+  | 'human_review_required'
+  /** Ответ собран из общих знаний модели, а не из базы знаний. */
+  | 'general_ai_source'
+  /** Движок сам оценил свой ответ как слабый. */
+  | 'confidence_level_too_low'
+  /** Уверенность ниже порога, выставленного оператором в настройках. */
+  | 'below_min_confidence';
+
+export const AUTO_ANSWER_BLOCKER_LABELS: Record<AutoAnswerBlocker, string> = {
+  auto_answer_disabled: 'Автоответ выключен в настройках — дело не в качестве ответа',
+  human_review_required: 'Сработал контроль качества',
+  general_ai_source: 'Ответ из общих знаний модели, а не из базы знаний',
+  confidence_level_too_low: 'Движок сам оценил ответ как слабый',
+  below_min_confidence: 'Уверенность ниже порога из настроек',
+};

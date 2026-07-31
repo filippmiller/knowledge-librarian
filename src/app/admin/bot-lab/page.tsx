@@ -24,7 +24,13 @@ import {
   XCircle,
 } from 'lucide-react';
 // Только тип: значение сюда тянуть нельзя — модуль политики ходит в базу.
-import { isDeliveryDecision, type DeliveryDecision } from '@/lib/ai/delivery-decision';
+import {
+  AUTO_ANSWER_BLOCKER_LABELS,
+  isDeliveryDecision,
+  type AutoAnswerBlocker,
+  type DeliveryDecision,
+} from '@/lib/ai/delivery-decision';
+import { HUMAN_REVIEW_LABELS, type AnswerReasons } from '@/lib/ai/answer-reasons';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -63,6 +69,8 @@ interface BotResult {
   answerWithheld?: boolean;
   /** Забракованный черновик. Приходит только по сессии сотрудника. */
   draftAnswer?: string;
+  /** Что помешало отправить ответ. `null` — ничто не помешало. */
+  deliveryBlocker?: AutoAnswerBlocker | null;
   answer: string;
   confidence: number;
   confidenceLevel: string;
@@ -110,6 +118,7 @@ interface BotResult {
       avgSimilarity?: number;
       maxSimilarity?: number;
     };
+    reasons?: AnswerReasons;
   };
 }
 
@@ -601,6 +610,52 @@ export default function BotLabPage() {
                   внутренним: `/api/ask` при админской сессии и без явной
                   аудитории выбирает `internal`. Блок оживёт, когда рядом
                   появится клиентский контур. Найдено аудитом Codex. */}
+              {/* Почему решение такое. Без этого «передано оператору» выглядит
+                  одинаково и когда ответ плох, и когда просто выключен тумблер
+                  автоответа — а это два разных вывода и два разных действия. */}
+              {result?.deliveryBlocker ? (
+                <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+                  <div className="text-[9px] uppercase tracking-wider text-slate-500">Что помешало отправить</div>
+                  <div className="mt-1 text-xs leading-5 text-slate-200">
+                    {AUTO_ANSWER_BLOCKER_LABELS[result.deliveryBlocker]}
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Какой именно контроль сработал. Восемь контролей взводят
+                  ручную проверку, и до этой выкладки в записи оставался только
+                  факт «взведён», без причины: отличить спасённого клиента от
+                  зря удержанного верного ответа было нечем. */}
+              {result?.debug?.reasons?.humanReview.length ? (
+                <div className="space-y-2 rounded-xl border border-amber-400/30 bg-amber-500/10 p-3">
+                  <div className="text-[9px] uppercase tracking-wider text-amber-300">
+                    Сработавшие контроли · {result.debug.reasons.humanReview.length} из 8
+                  </div>
+                  {result.debug.reasons.humanReview.map((item) => (
+                    <div key={item.reason}>
+                      <div className="text-xs font-medium text-slate-200">{HUMAN_REVIEW_LABELS[item.reason]}</div>
+                      <div className="mt-0.5 text-[11px] leading-4 text-slate-400">{item.detail}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              {result?.debug?.reasons ? (
+                <div className="rounded-xl border border-white/10 bg-white/5 p-3 text-xs text-slate-300">
+                  <div className="text-[9px] uppercase tracking-wider text-slate-500">Прайс в промпте</div>
+                  <div className="mt-1">
+                    {result.debug.reasons.tariffContext.rows > 0
+                      ? `${result.debug.reasons.tariffContext.rows} строк · ${result.debug.reasons.tariffContext.sections.join(', ')}`
+                      : 'не подавался — вопрос не про деньги либо раздел не опознан'}
+                  </div>
+                  {result.debug.reasons.ungroundedValues.length ? (
+                    <div className="mt-2 text-[11px] text-amber-300">
+                      Числа не из источников: {result.debug.reasons.ungroundedValues.join(' · ')}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
               {result?.answerWithheld ? (
                 <div className="max-h-72 overflow-y-auto rounded-xl border border-rose-400/30 bg-rose-500/10 p-3">
                   <div className="text-[9px] uppercase tracking-wider text-rose-300">Собеседнику ушёл удерживающий текст</div>

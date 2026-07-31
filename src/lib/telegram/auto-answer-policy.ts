@@ -3,7 +3,7 @@ import type { EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
 import { sendMessage } from './telegram-api';
 import { getAdminTelegramIds } from './access-control';
 import { DEFAULT_MIN_CONFIDENCE } from './constants';
-import type { DeliveryDecision } from '@/lib/ai/delivery-decision';
+import type { AutoAnswerBlocker, DeliveryDecision } from '@/lib/ai/delivery-decision';
 
 export interface AutoAnswerSettings {
   enabled: boolean;
@@ -33,15 +33,37 @@ export { DEFAULT_MIN_CONFIDENCE };
  * - the answer came from general AI knowledge (unverified),
  * - the engine rated its own answer low/insufficient.
  */
+/**
+ * Что именно помешало отправить ответ. `null` — ничто не помешало.
+ *
+ * Это ЕДИНСТВЕННАЯ реализация условий: `shouldAutoAnswer` теперь спрашивает её,
+ * а не повторяет проверки. Иначе объяснение разошлось бы с решением, которое
+ * оно объясняет, — та же болезнь, что была у песочницы со второй копией
+ * политики, только незаметнее.
+ *
+ * Причина нужна оператору: без неё «передано оператору» одинаково выглядит и
+ * когда ответ плох, и когда просто выключен тумблер автоответа. Это два разных
+ * вывода и два разных следующих действия.
+ */
+export function explainAutoAnswer(
+  result: EnhancedAnswerResult,
+  settings: AutoAnswerSettings
+): AutoAnswerBlocker | null {
+  if (!settings.enabled) return 'auto_answer_disabled';
+  if (result.requiresHumanReview) return 'human_review_required';
+  if (result.answerSource === 'general_ai') return 'general_ai_source';
+  if (result.confidenceLevel === 'low' || result.confidenceLevel === 'insufficient') {
+    return 'confidence_level_too_low';
+  }
+  if (result.confidence < settings.minConfidence) return 'below_min_confidence';
+  return null;
+}
+
 export function shouldAutoAnswer(
   result: EnhancedAnswerResult,
   settings: AutoAnswerSettings
 ): boolean {
-  if (!settings.enabled) return false;
-  if (result.requiresHumanReview) return false;
-  if (result.answerSource === 'general_ai') return false;
-  if (result.confidenceLevel === 'low' || result.confidenceLevel === 'insufficient') return false;
-  return result.confidence >= settings.minConfidence;
+  return explainAutoAnswer(result, settings) === null;
 }
 
 /**
