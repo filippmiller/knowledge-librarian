@@ -52,6 +52,27 @@ interface ListResponse {
   pageCount: number;
 }
 
+/**
+ * Короткая запись цены для таблицы: только сумма.
+ *
+ * Полная формулировка прайса («440 ₽ за 1 условную страницу (1800 знаков с
+ * пробелами)») в ячейке растягивала колонку и наезжала на название услуги.
+ * Единица показана отдельной строкой, полный текст — в подсказке.
+ */
+function compactPrice(t: {
+  amount: number | null;
+  amountKind: string;
+  percent: number | null;
+  priceLabel: string;
+}): string {
+  if (t.amountKind === 'PERCENT_OF_BASE' || t.amountKind === 'PERCENT_SURCHARGE') {
+    return t.percent !== null ? `${t.percent}%` : t.priceLabel;
+  }
+  if (t.amount === null) return t.priceLabel;
+  const sum = t.amount.toLocaleString('ru-RU');
+  return t.amountKind === 'FROM' ? `от ${sum} ₽` : `${sum} ₽`;
+}
+
 export default function TariffsPage() {
   const [facets, setFacets] = useState<Facets>({ languages: [], categories: [], sections: [] });
   const [data, setData] = useState<ListResponse>({
@@ -281,29 +302,29 @@ export default function TariffsPage() {
           ) : (
             <>
               <div className="overflow-x-auto rounded-lg border bg-white">
-                <Table>
+                <Table className="w-full table-fixed">
                   <TableHeader>
                     {/* Цена — вторая колонка. В таблице цен цена обязана читаться
                         с первого взгляда; раньше она была шестой из одиннадцати и
                         уезжала за правый край вместе с горизонтальной прокруткой. */}
                     <TableRow>
-                      <TableHead>Услуга</TableHead>
-                      <TableHead className="text-right whitespace-nowrap">Цена</TableHead>
-                      <TableHead>Срок</TableHead>
-                      <TableHead>Орган</TableHead>
-                      <TableHead>Условия</TableHead>
-                      <TableHead>Раздел</TableHead>
-                      <TableHead>Контур</TableHead>
-                      <TableHead>Период</TableHead>
-                      <TableHead>Активность</TableHead>
-                      <TableHead />
+                      <TableHead className="w-[34%]">Услуга</TableHead>
+                      <TableHead className="w-32 text-right">Цена</TableHead>
+                      <TableHead className="w-36">Срок</TableHead>
+                      <TableHead className="w-28">Орган</TableHead>
+                      <TableHead className="w-44">Условия</TableHead>
+                      <TableHead className="w-44">Раздел</TableHead>
+                      <TableHead className="w-32">Контур</TableHead>
+                      <TableHead className="w-32">Период</TableHead>
+                      <TableHead className="w-28">Активность</TableHead>
+                      <TableHead className="w-40" />
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {data.items.map((t) => (
                       <TableRow key={t.id}>
                         <TableCell className="align-top">
-                          <div className="max-w-[26rem] font-medium">{t.serviceName}</div>
+                          <div className="font-medium break-words">{t.serviceName}</div>
                           <div
                             className="mt-0.5 text-xs text-gray-400"
                             title={`Источник: ${t.sourceFile}`}
@@ -312,9 +333,19 @@ export default function TariffsPage() {
                             {t.updatedBy ? `, ${t.updatedBy}` : ''}
                           </div>
                         </TableCell>
-                        <TableCell className="align-top text-right whitespace-nowrap">
-                          <div className="text-base font-semibold text-gray-900">{t.priceLabel}</div>
-                          <div className="text-xs text-gray-500">{UNIT_LABEL[t.unit]}</div>
+                        {/* В ячейке цены — только сумма. Полная формулировка прайса
+                            («440 ₽ за 1 условную страницу (1800 знаков с пробелами)»)
+                            растягивала колонку и наезжала на название услуги. */}
+                        <TableCell className="align-top text-right">
+                          <div
+                            className="text-base font-semibold whitespace-nowrap text-gray-900"
+                            title={t.priceText}
+                          >
+                            {compactPrice(t)}
+                          </div>
+                          <div className="text-xs break-words text-gray-500">
+                            {UNIT_LABEL[t.unit]}
+                          </div>
                         </TableCell>
                         <TableCell className="align-top text-sm">{t.termText ?? '—'}</TableCell>
                         <TableCell className="align-top text-sm">{t.authority ?? '—'}</TableCell>
