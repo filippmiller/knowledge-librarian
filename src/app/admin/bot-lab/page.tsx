@@ -24,7 +24,7 @@ import {
   XCircle,
 } from 'lucide-react';
 // Только тип: значение сюда тянуть нельзя — модуль политики ходит в базу.
-import type { DeliveryDecision } from '@/lib/telegram/auto-answer-policy';
+import { isDeliveryDecision, type DeliveryDecision } from '@/lib/ai/delivery-decision';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -142,9 +142,11 @@ const sourceLabels: Record<string, string> = {
  * Теперь решение приходит с сервера полем `delivery`, а бейдж `UI-DERIVED`
  * снят: показывать нечего, кроме того, что реально произошло.
  */
+type DecisionTone = 'emerald' | 'amber' | 'rose' | 'sky' | 'slate';
+
 const DELIVERY_VIEW: Record<
   DeliveryDecision,
-  { title: string; description: string; tone: string; icon: typeof Activity }
+  { title: string; description: string; tone: DecisionTone; icon: typeof Activity }
 > = {
   answer: {
     title: 'Ответ уходит собеседнику',
@@ -167,26 +169,33 @@ const DELIVERY_VIEW: Record<
 };
 
 const NOT_RUN_VIEW = {
+  code: 'NOT_RUN',
   title: 'Запуск не выполнен',
   description: 'Выберите кейс и запустите анализ.',
-  tone: 'slate',
+  tone: 'slate' as DecisionTone,
   icon: Activity,
 };
 
+/**
+ * Код исхода — латиница и то же слово, что вернул сервер: он попадает в шаг
+ * «Решение доставки» и в глаза читается вместе с логами. Русская строка на этом
+ * месте выглядела бы как ещё одно значение перечисления, которым не является.
+ */
+const NO_DECISION_VIEW = {
+  code: 'MISSING',
+  title: 'Сервер не вернул решение о доставке',
+  description: 'Ответ пришёл без распознанного поля delivery. Показывать здесь собственную оценку нельзя — она разойдётся с продом.',
+  tone: 'amber' as DecisionTone,
+  icon: TriangleAlert,
+};
+
 function deliveryView(result: BotResult | null) {
-  if (!result) return { code: 'NOT_RUN', ...NOT_RUN_VIEW };
-  // Ответ без поля `delivery` — это старый или чужой источник данных. Молча
-  // подставлять сюда собственную догадку нельзя: ровно так и появилась вторая
-  // копия политики.
-  if (!result.delivery) {
-    return {
-      code: 'НЕТ РЕШЕНИЯ',
-      title: 'Сервер не вернул решение о доставке',
-      description: 'Ответ пришёл без поля delivery. Показывать здесь собственную оценку нельзя — она разойдётся с продом.',
-      tone: 'amber',
-      icon: TriangleAlert,
-    };
-  }
+  if (!result) return NOT_RUN_VIEW;
+  // Значение проверяется, а не берётся на веру: неизвестный код с сервера дал
+  // бы `undefined` из таблицы и уронил бы рендер целиком. И подставлять вместо
+  // него собственную догадку тоже нельзя — ровно так и появилась вторая копия
+  // политики.
+  if (!isDeliveryDecision(result.delivery)) return NO_DECISION_VIEW;
   return { code: result.delivery, ...DELIVERY_VIEW[result.delivery] };
 }
 
@@ -329,7 +338,10 @@ export default function BotLabPage() {
       const response = await fetch('/api/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: trimmedQuestion, includeDebug: true }),
+        // `sandbox` глушит побочные действия: прогон оператора не должен
+        // создавать черновик пробела знаний и слать уведомление супер-админам.
+        // Признаётся сервером только по сессии сотрудника.
+        body: JSON.stringify({ question: trimmedQuestion, includeDebug: true, sandbox: true }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Не удалось получить ответ');
@@ -432,7 +444,7 @@ export default function BotLabPage() {
         <div>
           <div className="mb-2 flex flex-wrap items-center gap-2">
             <Badge className="bg-cyan-100 text-cyan-900"><FlaskConical className="size-3" /> Песочница · обучение</Badge>
-            <Badge variant="outline" className="bg-white/70 text-slate-600">Никаких отправок в Bitrix</Badge>
+            <Badge variant="outline" className="bg-white/70 text-slate-600">Ничего не отправляется и не уведомляется</Badge>
           </div>
           <h1 className="font-display text-3xl font-semibold tracking-tight text-slate-950">Bot Decision Lab</h1>
           <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">Проверяйте реальные обезличенные вопросы, сравнивайте ответ бота с эталоном оператора и разбирайте каждый шаг решения.</p>
@@ -581,16 +593,22 @@ export default function BotLabPage() {
                 <div className="rounded-xl border border-white/10 bg-white/5 p-3"><div className="text-[9px] uppercase tracking-wider text-slate-500">Сценарий</div><div className="mt-1 line-clamp-2 text-slate-200">{result?.scenarioLabel || result?.scenarioKey || 'Не выбран'}</div></div>
               </div>
               {/* Подмена текста — это то, что клиент увидит вместо черновика.
-                  Оператору важно видеть обе версии рядом, иначе непонятно, что
-                  именно забраковано. */}
+                  Оператору важно видеть обе версии целиком, поэтому здесь нет
+                  обрезки по строкам: обрезанный черновик нельзя сверить.
+
+                  СЕГОДНЯ ЭТОТ БЛОК В ПЕСОЧНИЦЕ НЕ ПОЯВЛЯЕТСЯ. `resolveDelivery`
+                  подменяет текст только клиентскому контуру, а песочница ходит
+                  внутренним: `/api/ask` при админской сессии и без явной
+                  аудитории выбирает `internal`. Блок оживёт, когда рядом
+                  появится клиентский контур. Найдено аудитом Codex. */}
               {result?.answerWithheld ? (
-                <div className="rounded-xl border border-rose-400/30 bg-rose-500/10 p-3">
-                  <div className="text-[9px] uppercase tracking-wider text-rose-300">Клиенту ушёл удерживающий текст</div>
-                  <p className="mt-1 line-clamp-3 text-xs leading-5 text-slate-300">{result.answer}</p>
+                <div className="max-h-72 overflow-y-auto rounded-xl border border-rose-400/30 bg-rose-500/10 p-3">
+                  <div className="text-[9px] uppercase tracking-wider text-rose-300">Собеседнику ушёл удерживающий текст</div>
+                  <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-slate-300">{cleanMarkdown(result.answer)}</p>
                   {result.draftAnswer ? (
                     <>
                       <div className="mt-3 text-[9px] uppercase tracking-wider text-slate-500">Забракованный черновик</div>
-                      <p className="mt-1 line-clamp-4 text-xs leading-5 text-slate-400">{result.draftAnswer}</p>
+                      <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-slate-400">{cleanMarkdown(result.draftAnswer)}</p>
                     </>
                   ) : null}
                 </div>

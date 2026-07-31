@@ -61,6 +61,7 @@ export async function POST(request: NextRequest) {
       useConversationContext,
       clarificationAnswer,
       audience: rawAudience,
+      sandbox: rawSandbox,
     } = body as {
         question?: unknown;
         sessionId?: string;
@@ -68,6 +69,7 @@ export async function POST(request: NextRequest) {
         useConversationContext?: boolean;
         clarificationAnswer?: string;
         audience?: unknown;
+        sandbox?: unknown;
       };
 
     if (!question || typeof question !== 'string') {
@@ -91,6 +93,23 @@ export async function POST(request: NextRequest) {
     const audience: Audience = session && rawAudience !== 'client' ? 'internal' : 'client';
     if (!session && rawAudience === 'internal') {
       console.warn('[ASK] Внутренний контур запрошен без сессии — отдаём клиентский');
+    }
+
+    // Прогон в песочнице: ответ считается как обычно, но побочные действия не
+    // выполняются.
+    //
+    // Найдено аудитом Codex. `/admin/bot-lab` бьёт в этот же роут, и КАЖДЫЙ
+    // прогон оператора создавал черновик пробела знаний и слал супер-админам
+    // сообщение в Телеграм. Песочница, на которой написано «никаких отправок»,
+    // на деле спамила единственному получателю уведомлений и засоряла очередь
+    // `AIQuestion` вопросами, которых никто не задавал.
+    //
+    // Флаг признаётся ТОЛЬКО по сессии сотрудника: иначе любой анонимный
+    // вызывающий глушил бы эскалацию настоящих клиентских вопросов, прислав
+    // `sandbox: true`.
+    const sandbox = rawSandbox === true && Boolean(session);
+    if (rawSandbox === true && !session) {
+      console.warn('[ASK] sandbox запрошен без сессии — игнорирую, эскалация остаётся');
     }
 
     // Validate question length
@@ -177,16 +196,20 @@ export async function POST(request: NextRequest) {
     // ответ может быть забракован одними настройками — выключенным автоответом
     // или поднятым порогом. Без явной причины такой случай не создавал ни
     // задачи, ни уведомления: клиенту обещали коллегу, а вопрос не получал никто.
-    void escalateUnconvincingAIAnswer({
-      question,
-      result,
-      source: 'API',
-      audience,
-      sessionId: currentSessionId,
-      extraReasons: delivery.withheld
-        ? [`ответ удержан от клиента политикой доставки (${delivery.decision})`]
-        : undefined,
-    });
+    if (sandbox) {
+      console.log('[ASK] Песочница: эскалация и черновик пробела знаний пропущены');
+    } else {
+      void escalateUnconvincingAIAnswer({
+        question,
+        result,
+        source: 'API',
+        audience,
+        sessionId: currentSessionId,
+        extraReasons: delivery.withheld
+          ? [`ответ удержан от клиента политикой доставки (${delivery.decision})`]
+          : undefined,
+      });
+    }
 
     // В историю — то, что реально увидел собеседник. Черновик сохраняется
     // рядом, в метаданных: оператору он нужен, в контекст следующего ответа

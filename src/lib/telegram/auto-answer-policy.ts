@@ -3,14 +3,19 @@ import type { EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
 import { sendMessage } from './telegram-api';
 import { getAdminTelegramIds } from './access-control';
 import { DEFAULT_MIN_CONFIDENCE } from './constants';
+import type { DeliveryDecision } from '@/lib/ai/delivery-decision';
 
 export interface AutoAnswerSettings {
   enabled: boolean;
   minConfidence: number;
 }
 
-/** What the bot does with an engine result on Telegram. */
-export type DeliveryDecision = 'clarify' | 'answer' | 'escalate';
+/**
+ * Что бот делает с результатом движка. Сам тип живёт в отдельном модуле без
+ * зависимостей: его импортирует и браузер, а этот модуль ходит в базу.
+ * Реэкспорт оставлен, чтобы не переписывать десяток мест вызова.
+ */
+export type { DeliveryDecision };
 
 export { DEFAULT_MIN_CONFIDENCE };
 
