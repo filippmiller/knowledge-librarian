@@ -283,14 +283,16 @@ export default function TariffsPage() {
               <div className="overflow-x-auto rounded-lg border bg-white">
                 <Table>
                   <TableHeader>
+                    {/* Цена — вторая колонка. В таблице цен цена обязана читаться
+                        с первого взгляда; раньше она была шестой из одиннадцати и
+                        уезжала за правый край вместе с горизонтальной прокруткой. */}
                     <TableRow>
-                      <TableHead>Раздел</TableHead>
                       <TableHead>Услуга</TableHead>
-                      <TableHead>Орган</TableHead>
+                      <TableHead className="text-right whitespace-nowrap">Цена</TableHead>
                       <TableHead>Срок</TableHead>
+                      <TableHead>Орган</TableHead>
                       <TableHead>Условия</TableHead>
-                      <TableHead>Цена</TableHead>
-                      <TableHead>Единица</TableHead>
+                      <TableHead>Раздел</TableHead>
                       <TableHead>Контур</TableHead>
                       <TableHead>Период</TableHead>
                       <TableHead>Активность</TableHead>
@@ -300,29 +302,28 @@ export default function TariffsPage() {
                   <TableBody>
                     {data.items.map((t) => (
                       <TableRow key={t.id}>
-                        <TableCell className="align-top text-sm text-gray-600">
-                          {SECTION_LABEL[t.section]}
-                        </TableCell>
                         <TableCell className="align-top">
-                          <div className="font-medium">{t.serviceName}</div>
-                          <div className="mt-0.5 text-xs text-gray-500">
-                            Источник: {t.sourceFile}
-                          </div>
-                          <div className="text-xs text-gray-400">
-                            Изменено: {formatDateRu(t.updatedAt)}
+                          <div className="max-w-[26rem] font-medium">{t.serviceName}</div>
+                          <div
+                            className="mt-0.5 text-xs text-gray-400"
+                            title={`Источник: ${t.sourceFile}`}
+                          >
+                            {formatDateRu(t.updatedAt)}
                             {t.updatedBy ? `, ${t.updatedBy}` : ''}
                           </div>
                         </TableCell>
-                        <TableCell className="align-top text-sm">{t.authority ?? '—'}</TableCell>
+                        <TableCell className="align-top text-right whitespace-nowrap">
+                          <div className="text-base font-semibold text-gray-900">{t.priceLabel}</div>
+                          <div className="text-xs text-gray-500">{UNIT_LABEL[t.unit]}</div>
+                        </TableCell>
                         <TableCell className="align-top text-sm">{t.termText ?? '—'}</TableCell>
+                        <TableCell className="align-top text-sm">{t.authority ?? '—'}</TableCell>
                         <TableCell className="align-top max-w-56 text-xs text-gray-600">
                           {t.conditions ?? '—'}
                         </TableCell>
-                        <TableCell className="align-top">
-                          <div className="font-medium">{t.priceLabel}</div>
-                          <div className="text-xs text-gray-500">{t.priceText}</div>
+                        <TableCell className="align-top text-sm text-gray-600">
+                          {SECTION_LABEL[t.section]}
                         </TableCell>
-                        <TableCell className="align-top text-sm">{UNIT_LABEL[t.unit]}</TableCell>
                         <TableCell className="align-top">
                           <Badge variant={t.audience === 'CLIENT_SAFE' ? 'default' : 'secondary'}>
                             {AUDIENCE_LABEL[t.audience]}
