@@ -67,15 +67,25 @@ function unitAfter(sentence: string, from: number): TariffUnitKey | null {
 }
 
 /**
- * Ключевые слова услуги для сопоставления с предложением ответа.
+ * Варианты слов, любой из которых считается названием услуги: слова самого
+ * названия — ОДНИМ вариантом, и каждый синоним — своим отдельным вариантом.
  *
- * Берутся из самой сетки, а не пишутся руками: список услуг меняется вместе с
- * прайсом, и второй источник названий разошёлся бы с первым. Отбор общий с
- * опознанием услуги по вопросу — см. `service-terms.ts`: два разных понимания
- * одной строки прайса разъезжались бы молча.
+ * Название и синонимы не сливаются в один мешок слов: синоним — это цельная
+ * альтернативная формулировка («заверить перевод у нотариуса»), а не довесок
+ * опциональных слов к названию. Слияние позволило бы предложению набрать
+ * совпадение из слов ДВУХ разных фраз, не содержащих полностью ни одну из них.
+ *
+ * Синонимы обязательны здесь ровно по той причине, по которой их завели для
+ * `tariff-lookup.ts`: грубый стемминг связывает «заверение» и «заверения», но
+ * не «заверение» и «заверить» — у существительного и глагола разные корни, и
+ * никакая нормализация их не сведёт (см. `tariff-lookup.ts`). Список синонимов
+ * — ОДИН на сетку, `scripts/seed-tariff-synonyms.ts`, и уже содержит нужные
+ * глагольные формы: правка синонима лечит опознание сразу everywhere, а не
+ * только здесь.
  */
-function serviceKeywords(tariff: TariffRecord): string[] {
-  return serviceTerms(tariff.serviceName);
+function serviceKeywordVariants(tariff: TariffRecord): string[][] {
+  const variants = [serviceTerms(tariff.serviceName), ...(tariff.synonyms ?? []).map(serviceTerms)];
+  return variants.filter((words) => words.length > 0);
 }
 
 export function checkStalePrice(answer: string, tariffs: TariffRecord[]): StalePriceVerdict {
@@ -93,10 +103,9 @@ export function checkStalePrice(answer: string, tariffs: TariffRecord[]): StaleP
 
     // Услуга из сетки, названная в этом предложении. Без неё число не привязано
     // ни к чему, и требовать его присутствия в сетке нельзя.
-    const named = tariffs.filter((t) => {
-      const words = serviceKeywords(t);
-      return words.length > 0 && words.every((w) => lower.includes(w));
-    });
+    const named = tariffs.filter((t) =>
+      serviceKeywordVariants(t).some((words) => words.every((w) => lower.includes(w)))
+    );
     if (named.length === 0) continue;
 
     // Названо несколько РАЗНЫХ услуг — какая из них хозяйка числа, по тексту не
