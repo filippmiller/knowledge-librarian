@@ -1030,3 +1030,46 @@ model Tariff {
   @@index([language, complexityCategory, direction, turnaround])
   @@index([section, isActive])
 }
+
+/// Ответ, не ушедший собеседнику, и вердикт человека о нём.
+///
+/// Недостающий контур системы. Восемь контролей качества удерживают ответы, но
+/// узнать, СПАСЛИ они клиента или отняли верный ответ, было нечем: оператор
+/// разбирал эскалацию, а его вывод никуда не записывался. Частота срабатывания
+/// контроля не отличает верную тревогу от ложной, и без этой таблицы любое
+/// решение «ослабить контроль» или «добавить контроль» принимается вслепую.
+/// Найдено независимым аудитом Kimi K3.
+///
+/// Строка пишется в момент удержания, вердикт проставляется позже — одной
+/// кнопкой под сообщением об эскалации.
+model HeldAnswer {
+  id       String @id @default(cuid())
+  question String @db.Text
+  /// Черновик, который забраковали. Именно его оценивает человек.
+  draftAnswer String @db.Text
+  audience String
+  /// Канал: API, TELEGRAM, MINI_APP.
+  source   String
+  /// Решение политики доставки на момент удержания.
+  delivery String
+  /// Первая помеха из политики: выключенный автоответ, низкая уверенность и т.д.
+  blocker  String?
+  /// Сработавшие контроли целиком: [{ reason, detail }]. Не первая, а ВСЕ —
+  /// иначе статистика превратится в статистику приоритетов `if`.
+  reasons  Json
+  confidence      Float
+  confidenceLevel String
+  answerSource    String?
+  sessionId       String?
+
+  /// Вердикт человека о черновике: correct | wrong | partial. `null` — ещё не смотрели.
+  verdict   String?
+  verdictBy String?
+  verdictAt DateTime?
+  comment   String?  @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([verdict])
+}

@@ -2,6 +2,7 @@ import { sendMessage, sendTypingIndicator, answerCallbackQuery } from './telegra
 import type { TelegramUpdate, TelegramMessage, TelegramCallbackQuery } from './telegram-api';
 import { handleScenarioCallback } from './scenario-callback';
 import { handleKnowledgeGapCallback } from './knowledge-gap-callback';
+import { handleHeldVerdictCallback } from './held-verdict-callback';
 import { checkAccess, isAdmin, isSuperAdmin } from './access-control';
 import type { TelegramUserInfo } from './access-control';
 import {
@@ -60,6 +61,11 @@ async function handleCallback(cq: TelegramCallbackQuery): Promise<void> {
 
   if (data.startsWith('kg:')) {
     await handleKnowledgeGapCallback(chatId, telegramId, data.slice(3), accessResult.user);
+    return;
+  }
+
+  if (data.startsWith('hv:')) {
+    await handleHeldVerdictCallback(chatId, telegramId, data.slice(3), accessResult.user);
     return;
   }
 

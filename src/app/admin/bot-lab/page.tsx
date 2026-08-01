@@ -23,6 +23,16 @@ import {
   TriangleAlert,
   XCircle,
 } from 'lucide-react';
+// Модуль без зависимостей: сюда можно тянуть и значения. Ради этого он и
+// заведён отдельно — сам модуль политики ходит в базу, и клиентский компонент
+// держался бы на одном слове `type`.
+import {
+  AUTO_ANSWER_BLOCKER_LABELS,
+  isDeliveryDecision,
+  type AutoAnswerBlocker,
+  type DeliveryDecision,
+} from '@/lib/ai/delivery-decision';
+import { HUMAN_REVIEW_LABELS, HUMAN_REVIEW_ORDER, type AnswerReasons } from '@/lib/ai/answer-reasons';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -55,6 +65,14 @@ interface DatasetSummary {
 
 interface BotResult {
   sessionId: string;
+  /** Решение серверной политики доставки. Единственный источник — `/api/ask`. */
+  delivery?: DeliveryDecision;
+  /** Текст ответа подменён удерживающим: черновик клиенту показывать нельзя. */
+  answerWithheld?: boolean;
+  /** Забракованный черновик. Приходит только по сессии сотрудника. */
+  draftAnswer?: string;
+  /** Что помешало отправить ответ. `null` — ничто не помешало. */
+  deliveryBlocker?: AutoAnswerBlocker | null;
   answer: string;
   confidence: number;
   confidenceLevel: string;
@@ -102,6 +120,7 @@ interface BotResult {
       avgSimilarity?: number;
       maxSimilarity?: number;
     };
+    reasons?: AnswerReasons;
   };
 }
 
@@ -122,74 +141,73 @@ const sourceLabels: Record<string, string> = {
   deterministic_guardrail: 'Детерминированное правило',
 };
 
-function deriveDecision(result: BotResult | null, selectedCase: BotCase | null) {
-  if (!result) {
-    return {
-      code: 'NOT_RUN',
-      title: 'Запуск не выполнен',
-      description: 'Выберите кейс и запустите анализ.',
-      tone: 'slate',
-      icon: Activity,
-    };
-  }
-  if (
-    result.requiresHumanReview ||
-    result.consistency?.verificationFailed ||
-    (result.consistency?.unsupportedCount ?? 0) > 0
-  ) {
-    return {
-      code: 'REVIEW_REQUIRED',
-      title: 'Требуется проверка оператором',
-      description: result.consistency?.verificationFailed
-        ? 'Автоматическая проверка доказательств не завершилась. Ответ нельзя считать подтверждённым.'
-        : 'Одно или несколько утверждений ответа не подтверждены источниками.',
-      tone: 'rose',
-      icon: ShieldAlert,
-    };
-  }
-  if (selectedCase?.price_dependent) {
-    return {
-      code: 'LIVE_DATA_REQUIRED',
-      title: 'Нужен живой расчёт',
-      description: 'Можно использовать только политику расчёта. Сумму и срок должен подтвердить оператор или калькулятор.',
-      tone: 'amber',
-      icon: CircleDollarSign,
-    };
-  }
-  if (result.needsClarification) {
-    return {
-      code: 'CLARIFY',
-      title: 'Уточнить у клиента',
-      description: result.suggestedClarification || 'Контекста недостаточно для безопасного ответа.',
-      tone: 'sky',
-      icon: MessageSquareText,
-    };
-  }
-  if (result.confidence < 0.5) {
-    return {
-      code: 'ESCALATE',
-      title: 'Передать оператору',
-      description: 'Уверенность ниже безопасного порога или движок запросил ручную проверку.',
-      tone: 'rose',
-      icon: ShieldAlert,
-    };
-  }
-  if (result.confidence < 0.7 || (result.citations.length === 0 && result.answerSource !== 'deterministic_guardrail')) {
-    return {
-      code: 'DRAFT_WITH_WARNING',
-      title: 'Черновик — проверить факты',
-      description: 'Ответ можно использовать как основу, но его источники или уверенность недостаточны для отправки без проверки.',
-      tone: 'amber',
-      icon: TriangleAlert,
-    };
-  }
-  return {
-    code: 'DRAFT_READY',
-    title: 'Черновик готов к проверке',
-    description: 'Уверенность достаточная, ответ поддержан источниками. Auto-send в песочнице отключён.',
+/**
+ * Показ решения о доставке. Здесь ТОЛЬКО оформление — никаких порогов.
+ *
+ * Раньше на этом месте жила `deriveDecision`: копия политики отправки, считанная
+ * в браузере по своим порогам 0.5 и 0.7 и по своим семи исходам. Серверная
+ * политика (`decideDelivery`) знает три исхода и другие условия, и две копии
+ * успели разойтись — песочница показывала «черновик готов», когда прод удержал
+ * бы ответ. Инструмент, который врёт о поведении бота, хуже отсутствующего.
+ *
+ * Теперь решение приходит с сервера полем `delivery`, а бейдж `UI-DERIVED`
+ * снят: показывать нечего, кроме того, что реально произошло.
+ */
+type DecisionTone = 'emerald' | 'amber' | 'rose' | 'sky' | 'slate';
+
+const DELIVERY_VIEW: Record<
+  DeliveryDecision,
+  { title: string; description: string; tone: DecisionTone; icon: typeof Activity }
+> = {
+  answer: {
+    title: 'Ответ уходит собеседнику',
+    description: 'Политика доставки пропустила ответ: автоответ включён, уверенность выше порога, ручная проверка не потребовалась.',
     tone: 'emerald',
     icon: CheckCircle2,
-  };
+  },
+  clarify: {
+    title: 'Уточняющий вопрос',
+    description: 'Сценарный гейт не смог выбрать одну процедуру и задаёт вопрос собеседнику. Уточнение уходит независимо от тумблера автоответа: это вопрос, а не утверждение о фактах.',
+    tone: 'sky',
+    icon: MessageSquareText,
+  },
+  escalate: {
+    title: 'Передано оператору',
+    description: 'Политика доставки забраковала ответ. Клиенту вместо черновика уходит удерживающий текст.',
+    tone: 'rose',
+    icon: ShieldAlert,
+  },
+};
+
+const NOT_RUN_VIEW = {
+  code: 'NOT_RUN',
+  title: 'Запуск не выполнен',
+  description: 'Выберите кейс и запустите анализ.',
+  tone: 'slate' as DecisionTone,
+  icon: Activity,
+};
+
+/**
+ * Код исхода — латиница и то же слово, что вернул сервер: он попадает в шаг
+ * «Решение доставки» и в глаза читается вместе с логами. Русская строка на этом
+ * месте выглядела бы как ещё одно значение перечисления, которым не является.
+ */
+const NO_DECISION_VIEW = {
+  code: 'MISSING',
+  title: 'Сервер не вернул решение о доставке',
+  description: 'Ответ пришёл без распознанного поля delivery. Показывать здесь собственную оценку нельзя — она разойдётся с продом.',
+  tone: 'amber' as DecisionTone,
+  icon: TriangleAlert,
+};
+
+function deliveryView(result: BotResult | null) {
+  if (!result) return NOT_RUN_VIEW;
+  // Значение проверяется, а не берётся на веру: неизвестный код с сервера дал
+  // бы `undefined` из таблицы и уронил бы рендер целиком. И подставлять вместо
+  // него собственную догадку тоже нельзя — ровно так и появилась вторая копия
+  // политики.
+  if (!isDeliveryDecision(result.delivery)) return NO_DECISION_VIEW;
+  return { code: result.delivery, ...DELIVERY_VIEW[result.delivery] };
 }
 
 function cleanMarkdown(value: string): string {
@@ -213,6 +231,109 @@ function entitySummary(entities?: Record<string, unknown>) {
     .slice(0, 12);
 }
 
+/**
+ * Один контур: решение, что помешало, какие контроли сработали.
+ *
+ * Вынесено в компонент, потому что контуров два и они рисуются рядом. Прогон по
+ * корпусу показал, что на 3 вопросах из 26 они решают ПО-РАЗНОМУ: заземление
+ * чисел действует только на клиента, внутренний промпт разрешает фразу «в базе
+ * не указано» и потому ловится контролем, которого на клиентском ответе нет.
+ * Показывать один контур и называть это поведением бота нельзя.
+ */
+function ContourPanel({ title, subtitle, result }: { title: string; subtitle: string; result: BotResult | null }) {
+  const view = deliveryView(result);
+  const Icon = view.icon;
+  const reasons = result?.debug?.reasons;
+  return (
+    <div className="min-w-0 space-y-3 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+      <div>
+        <div className="text-[9px] uppercase tracking-[0.16em] text-cyan-300">{title}</div>
+        <div className="text-[10px] text-slate-500">{subtitle}</div>
+      </div>
+      <div className="flex items-center gap-3">
+        <div
+          className={cn(
+            'grid size-9 shrink-0 place-items-center rounded-xl',
+            view.tone === 'emerald' && 'bg-emerald-500/15 text-emerald-300',
+            view.tone === 'amber' && 'bg-amber-500/15 text-amber-300',
+            view.tone === 'rose' && 'bg-rose-500/15 text-rose-300',
+            view.tone === 'sky' && 'bg-sky-500/15 text-sky-300',
+            view.tone === 'slate' && 'bg-white/10 text-slate-300'
+          )}
+        >
+          <Icon className="size-4" />
+        </div>
+        <div className="min-w-0">
+          <div className="truncate text-sm font-medium text-white">{view.title}</div>
+          <div className="font-mono text-[10px] text-slate-500">
+            {view.code}
+            {result ? ` · ${Math.round(result.confidence * 100)}% ${result.confidenceLevel}` : ''}
+          </div>
+          {/* Источник важен сам по себе: ответ из общих знаний модели политика
+              не отправит никогда, каким бы уверенным он ни выглядел. */}
+          {result?.answerSource ? (
+            <div className="truncate text-[10px] text-slate-400">{sourceLabels[result.answerSource]}</div>
+          ) : null}
+        </div>
+      </div>
+
+      {result?.deliveryBlocker ? (
+        <div className="rounded-xl border border-white/10 bg-white/5 p-2.5">
+          <div className="text-[9px] uppercase tracking-wider text-slate-500">Что помешало отправить</div>
+          <div className="mt-1 text-[11px] leading-4 text-slate-200">
+            {AUTO_ANSWER_BLOCKER_LABELS[result.deliveryBlocker]}
+          </div>
+        </div>
+      ) : null}
+
+      {reasons?.humanReview.length ? (
+        <div className="space-y-2 rounded-xl border border-amber-400/30 bg-amber-500/10 p-2.5">
+          <div className="text-[9px] uppercase tracking-wider text-amber-300">
+            Сработавшие контроли · {reasons.humanReview.length} из 8
+          </div>
+          {reasons.humanReview.map((item) => (
+            <div key={item.reason}>
+              <div className="text-[11px] font-medium text-slate-200">{HUMAN_REVIEW_LABELS[item.reason]}</div>
+              <div className="mt-0.5 text-[10px] leading-4 text-slate-400">{item.detail}</div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {reasons ? (
+        <div className="rounded-xl border border-white/10 bg-white/5 p-2.5 text-[11px] text-slate-300">
+          <div className="text-[9px] uppercase tracking-wider text-slate-500">Прайс в промпте</div>
+          <div className="mt-1">
+            {reasons.tariffContext.rows > 0
+              ? `${reasons.tariffContext.rows} строк · ${reasons.tariffContext.sections.join(', ')}`
+              : 'не подавался'}
+          </div>
+          {reasons.ungroundedValues.length ? (
+            <div className="mt-1.5 text-[10px] text-amber-300">
+              Числа не из источников: {reasons.ungroundedValues.join(' · ')}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* Подмена текста — то, что собеседник увидит вместо черновика. Обе версии
+          показываются целиком: обрезанный черновик нельзя сверить. */}
+      {result?.answerWithheld ? (
+        <div className="max-h-64 overflow-y-auto rounded-xl border border-rose-400/30 bg-rose-500/10 p-2.5">
+          <div className="text-[9px] uppercase tracking-wider text-rose-300">Ушёл удерживающий текст</div>
+          <p className="mt-1 whitespace-pre-wrap text-[11px] leading-4 text-slate-300">{cleanMarkdown(result.answer)}</p>
+          {result.draftAnswer ? (
+            <>
+              <div className="mt-2.5 text-[9px] uppercase tracking-wider text-slate-500">Забракованный черновик</div>
+              <p className="mt-1 whitespace-pre-wrap text-[11px] leading-4 text-slate-400">{cleanMarkdown(result.draftAnswer)}</p>
+            </>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export default function BotLabPage() {
   const [cases, setCases] = useState<BotCase[]>([]);
   const [dataset, setDataset] = useState<DatasetSummary | null>(null);
@@ -223,7 +344,10 @@ export default function BotLabPage() {
   const [category, setCategory] = useState('all');
   const [risk, setRisk] = useState('all');
   const [question, setQuestion] = useState('');
+  /** Внутренний контур — то, что увидит сотрудник в Телеграме. */
   const [result, setResult] = useState<BotResult | null>(null);
+  /** Клиентский контур — то, что увидит заказчик. Решения расходятся. */
+  const [clientResult, setClientResult] = useState<BotResult | null>(null);
   const [runLoading, setRunLoading] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
@@ -282,8 +406,12 @@ export default function BotLabPage() {
     });
   }, [cases, category, risk, search]);
 
-  const decision = deriveDecision(result, evaluationCase);
-  const DecisionIcon = decision.icon;
+  // Контуры решили по-разному — это главное, ради чего они стоят рядом.
+  const divergent =
+    Boolean(result && clientResult) &&
+    isDeliveryDecision(result?.delivery) &&
+    isDeliveryDecision(clientResult?.delivery) &&
+    result?.delivery !== clientResult?.delivery;
   const intent = typeof result?.debug?.intentClassification === 'string'
     ? result.debug.intentClassification
     : result?.debug?.intentClassification?.intent;
@@ -326,22 +454,45 @@ export default function BotLabPage() {
     setRunError(null);
     setResult(null);
     setFeedbackSaved(false);
+    setClientResult(null);
     const startedAt = performance.now();
-    try {
+
+    // `sandbox` глушит побочные действия: прогон оператора не должен создавать
+    // черновик пробела знаний и слать уведомление супер-админам. Признаётся
+    // сервером только по сессии сотрудника.
+    const ask = async (audience: 'internal' | 'client') => {
       const response = await fetch('/api/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: trimmedQuestion, includeDebug: true }),
+        body: JSON.stringify({ question: trimmedQuestion, audience, includeDebug: true, sandbox: true }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Не удалось получить ответ');
-      setResult(data as BotResult);
-      setLatencyMs(Math.round(performance.now() - startedAt));
-    } catch (error) {
-      setRunError(error instanceof Error ? error.message : 'Не удалось запустить анализ');
-    } finally {
-      setRunLoading(false);
+      return data as BotResult;
+    };
+
+    // Оба контура на ОДНОМ вопросе и параллельно. Прогон по корпусу показал,
+    // что они расходятся в решении на 3 вопросах из 26 — и каждое расхождение
+    // осмысленно: заземление чисел действует только на клиента, внутренний
+    // промпт разрешает фразу «в базе не указано», выдача отличается фильтром
+    // аудитории. Показывать один контур и называть это поведением бота нельзя.
+    //
+    // `Promise.allSettled`, а не `all`: сбой одного контура не должен прятать
+    // результат второго — сеть здесь рвётся регулярно.
+    const [internal, client] = await Promise.allSettled([ask('internal'), ask('client')]);
+
+    if (internal.status === 'fulfilled') setResult(internal.value);
+    if (client.status === 'fulfilled') setClientResult(client.value);
+    if (internal.status === 'rejected' && client.status === 'rejected') {
+      setRunError(internal.reason instanceof Error ? internal.reason.message : 'Не удалось запустить анализ');
+    } else if (internal.status === 'rejected') {
+      setRunError('Внутренний контур не ответил — показан только клиентский.');
+    } else if (client.status === 'rejected') {
+      setRunError('Клиентский контур не ответил — показан только внутренний.');
     }
+
+    setLatencyMs(Math.round(performance.now() - startedAt));
+    setRunLoading(false);
   }
 
   async function saveFeedback() {
@@ -434,7 +585,7 @@ export default function BotLabPage() {
         <div>
           <div className="mb-2 flex flex-wrap items-center gap-2">
             <Badge className="bg-cyan-100 text-cyan-900"><FlaskConical className="size-3" /> Песочница · обучение</Badge>
-            <Badge variant="outline" className="bg-white/70 text-slate-600">Никаких отправок в Bitrix</Badge>
+            <Badge variant="outline" className="bg-white/70 text-slate-600">Ничего не отправляется и не уведомляется</Badge>
           </div>
           <h1 className="font-display text-3xl font-semibold tracking-tight text-slate-950">Bot Decision Lab</h1>
           <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">Проверяйте реальные обезличенные вопросы, сравнивайте ответ бота с эталоном оператора и разбирайте каждый шаг решения.</p>
@@ -570,18 +721,22 @@ export default function BotLabPage() {
 
         <aside className="min-w-0 space-y-4">
           <Card className="gap-0 overflow-hidden rounded-3xl border-slate-800 bg-slate-950 py-0 text-white shadow-elevated">
-            <CardHeader className="border-b border-white/10 pb-5">
-              <div className="mb-3 flex items-center justify-between"><div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-cyan-300"><BrainCircuit className="size-4" /> Решение</div><Badge variant="outline" className="border-white/15 bg-white/5 font-mono text-[9px] text-slate-400">UI-DERIVED</Badge></div>
-              <div className={cn('grid size-11 place-items-center rounded-2xl', decision.tone === 'emerald' && 'bg-emerald-500/15 text-emerald-300', decision.tone === 'amber' && 'bg-amber-500/15 text-amber-300', decision.tone === 'rose' && 'bg-rose-500/15 text-rose-300', decision.tone === 'sky' && 'bg-sky-500/15 text-sky-300', decision.tone === 'slate' && 'bg-white/10 text-slate-300')}><DecisionIcon className="size-5" /></div>
-              <CardTitle className="mt-4 text-xl leading-7 text-white">{decision.title}</CardTitle>
-              <p className="text-xs leading-5 text-slate-400">{decision.description}</p>
-            </CardHeader>
-            <CardContent className="space-y-5 pb-5 pt-5">
-              <div><div className="mb-2 flex justify-between text-xs text-slate-400"><span>Confidence движка</span><span className="font-mono text-white">{result ? `${Math.round(result.confidence * 100)}%` : '—'}</span></div><div className="h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-gradient-to-r from-cyan-400 to-emerald-400 transition-all" style={{ width: result ? `${Math.max(2, result.confidence * 100)}%` : '0%' }} /></div></div>
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <div className="rounded-xl border border-white/10 bg-white/5 p-3"><div className="text-[9px] uppercase tracking-wider text-slate-500">Источник</div><div className="mt-1 text-slate-200">{result?.answerSource ? sourceLabels[result.answerSource] : '—'}</div></div>
-                <div className="rounded-xl border border-white/10 bg-white/5 p-3"><div className="text-[9px] uppercase tracking-wider text-slate-500">Сценарий</div><div className="mt-1 line-clamp-2 text-slate-200">{result?.scenarioLabel || result?.scenarioKey || 'Не выбран'}</div></div>
+            <CardHeader className="border-b border-white/10 pb-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-cyan-300">
+                  <BrainCircuit className="size-4" /> Решение по контурам
+                </div>
+                <Badge variant="outline" className="border-white/15 bg-white/5 font-mono text-[9px] text-emerald-300">С СЕРВЕРА</Badge>
               </div>
+              {divergent ? (
+                <p className="mt-3 rounded-xl border border-amber-400/30 bg-amber-500/10 p-2.5 text-[11px] leading-4 text-amber-200">
+                  Контуры решили ПО-РАЗНОМУ: сотруднику «{deliveryView(result).title.toLowerCase()}», клиенту «{deliveryView(clientResult).title.toLowerCase()}». Это не сбой: заземление чисел действует только на клиента, а внутренний промпт разрешает фразы, которых клиентский не допускает.
+                </p>
+              ) : null}
+            </CardHeader>
+            <CardContent className="grid gap-3 pb-5 pt-4 md:grid-cols-2">
+              <ContourPanel title="Сотрудник" subtitle="Telegram, внутренний контур" result={result} />
+              <ContourPanel title="Клиент" subtitle="то, что увидит заказчик" result={clientResult} />
             </CardContent>
           </Card>
 
@@ -596,11 +751,19 @@ export default function BotLabPage() {
                 { label: 'Query expansion', value: result?.queryAnalysis?.expandedQueries?.length ? `${result.queryAnalysis.expandedQueries.length} вариантов` : 'Нет вариантов', actual: Boolean(result?.queryAnalysis) },
                 { label: 'Retrieval', value: result ? `${chunks.length} показано · ${result.debug?.searchStats?.totalChunksSearched ?? '—'} просмотрено` : 'Не запущено', actual: Boolean(result?.debug) },
                 { label: 'Evidence', value: result ? `${result.citations.length} цитат` : 'Не запущено', actual: Boolean(result) },
-                { label: 'Final action', value: decision.code, actual: Boolean(result), derived: true },
+                // Оба контура одной строкой: шаги выше описывают общий путь
+                // ответа, а расходятся контуры именно на последнем.
+                {
+                  label: 'Решение доставки',
+                  value: result || clientResult
+                    ? `сотрудник ${deliveryView(result).code} · клиент ${deliveryView(clientResult).code}`
+                    : 'Не запущено',
+                  actual: Boolean(result || clientResult),
+                },
               ].map((step, index) => (
                 <div key={step.label} className="grid grid-cols-[22px_minmax(0,1fr)] gap-2">
                   <div className="flex flex-col items-center"><div className={cn('grid size-5 place-items-center rounded-full border text-[9px]', step.actual ? 'border-cyan-300 bg-cyan-50 text-cyan-800' : 'border-slate-200 bg-white text-slate-400')}>{index + 1}</div>{index < 7 ? <div className="min-h-7 w-px flex-1 bg-slate-200" /> : null}</div>
-                  <div className="pb-3"><div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">{step.label}{step.derived ? <Badge variant="outline" className="h-4 bg-white px-1 text-[7px]">UI</Badge> : null}</div><div className="mt-0.5 line-clamp-3 text-xs leading-5 text-slate-700">{step.value}</div></div>
+                  <div className="pb-3"><div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">{step.label}</div><div className="mt-0.5 line-clamp-3 text-xs leading-5 text-slate-700">{step.value}</div></div>
                 </div>
               ))}
               {intentReasoning ? <div className="rounded-2xl bg-cyan-50 p-3 text-xs leading-5 text-cyan-900"><span className="font-semibold">Почему intent:</span> {intentReasoning}</div> : null}

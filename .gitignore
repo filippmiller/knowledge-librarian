@@ -77,5 +77,7 @@ docs/bot-audit/.autonomy-150-results*.jsonl
 docs/bot-audit/.autonomy-150-progress*.log
 docs/bot-audit/.tariff-shadow-results.jsonl
 
-# Рабочие деревья подагентов: со своими node_modules и .next, в репозитории им нечего делать
+# Рабочие деревья подагентов — временные, в репозиторий не идут.
 .claude/worktrees/
+docs/bot-audit/.contours*.jsonl
+docs/bot-audit/.sent-error-rate*.jsonl

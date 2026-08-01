@@ -28,6 +28,7 @@ import {
   checkCertificationPriceAttribution,
   type PriceContradiction,
 } from '@/lib/knowledge/certification-price';
+import { HUMAN_REVIEW_ORDER, type AnswerReasons, type HumanReviewReason, type ReasonDetail } from '@/lib/ai/answer-reasons';
 import { getTariffs } from '@/lib/knowledge/tariff-store';
 import { buildTariffContext } from '@/lib/knowledge/tariff-context';
 import { lookupTariffForQuestion, describeTariff } from '@/lib/knowledge/tariff-lookup';
@@ -82,6 +83,12 @@ export interface EnhancedAnswerResult {
       avgSimilarity: number;
       maxSimilarity: number;
     };
+    /**
+     * Почему ответ получился таким: какие контроли сработали, что из прайса
+     * ушло в промпт, какие числа не заземлились. Только при `includeDebug` —
+     * в обычном ответе это лишний вес.
+     */
+    reasons?: AnswerReasons;
   };
   clarificationQuestion?: {
     question: string;
@@ -1498,16 +1505,116 @@ ${fixList}
     );
   }
 
-  const requiresHumanReview = Boolean(
-    consistency?.verificationFailed ||
-    consistency?.unsupported.length ||
-    answerSignalsKnowledgeGap(answer) ||
-    answerSignalsCompositeCapabilityRisk(question, answer) ||
-    (clientSafety && !clientSafety.safe) ||
-    ungroundedBlocksClient ||
-    !priceAttribution.consistent ||
-    !stalePrice.ok
-  );
+  // Причины собираются ЗДЕСЬ ЖЕ, из тех же выражений, а не отдельной функцией:
+  // объяснение, посчитанное второй раз, разойдётся с решением, которое оно
+  // объясняет. Ровно так у песочницы появилась вторая копия политики отправки.
+  // РЕЕСТР КОНТРОЛЕЙ. Тип `Record<HumanReviewReason, …>` обязывает: добавили
+  // значение в перечисление причин — компилятор потребует и проверку, забыли
+  // проверку — сборка не пройдёт.
+  //
+  // Так было не всегда. Сначала стояли восемь отдельных `if`, а флаг выводился
+  // из длины списка причин, и я считал это защитой: контроль без причины
+  // окажется бездействующим, а не молча работающим. Аудит Codex перевернул
+  // довод — для контроля БЕЗОПАСНОСТИ «бездействующий» означает молча снятую
+  // защиту, и это хуже, чем защита без объяснения. Реестр убирает саму
+  // возможность: проверка и её причина — одна запись.
+  //
+  // Каждая проверка возвращает либо находку с подробностью для оператора, либо
+  // `null`. Подробность — не название класса, а то, что именно найдено: без неё
+  // нельзя отличить спасённого клиента от зря удержанного верного ответа.
+  const HUMAN_REVIEW_CHECKS: Record<HumanReviewReason, () => ReasonDetail | null> = {
+    consistency_failed: () =>
+      consistency?.verificationFailed
+        ? { reason: 'consistency_failed', detail: 'проверка утверждений не завершилась' }
+        : null,
+    unsupported_claims: () =>
+      consistency?.unsupported.length
+        ? {
+            reason: 'unsupported_claims',
+            detail: consistency.unsupported.map((c) => `«${c.claim}»`).join('; '),
+          }
+        : null,
+    knowledge_gap_phrase: () =>
+      answerSignalsKnowledgeGap(answer)
+        ? { reason: 'knowledge_gap_phrase', detail: 'ответ признаёт отсутствие данных' }
+        : null,
+    composite_capability_risk: () =>
+      answerSignalsCompositeCapabilityRisk(question, answer)
+        ? {
+            reason: 'composite_capability_risk',
+            detail: 'утверждение о возможности без прямого подтверждения',
+          }
+        : null,
+    client_safety: () =>
+      clientSafety && !clientSafety.safe
+        ? { reason: 'client_safety', detail: clientSafety.violations.join('; ') }
+        : null,
+    ungrounded_numbers: () =>
+      ungroundedBlocksClient
+        ? {
+            reason: 'ungrounded_numbers',
+            detail: grounding.ungrounded.map((c) => `${c.value} (${c.kind})`).join('; '),
+          }
+        : null,
+    price_attribution: () =>
+      priceAttribution.consistent
+        ? null
+        : {
+            reason: 'price_attribution',
+            detail: priceAttribution.contradictions
+              .map((c) => `${c.serviceLabel}: назвал ${c.claimed}, прайс ${c.expected}`)
+              .join('; '),
+          },
+    stale_price: () =>
+      stalePrice.ok
+        ? null
+        : {
+            reason: 'stale_price',
+            detail: stalePrice.findings
+              .map((f) => `${f.amount} ₽ при «${f.serviceHint}», действует ${f.currentAmounts.join(', ')}`)
+              .join('; '),
+          },
+  };
+
+  // Перебираются КЛЮЧИ РЕЕСТРА, а не список порядка. Порядок влияет только на
+  // то, как причины лягут в отчёт.
+  //
+  // Так не было. Сначала перебирался `HUMAN_REVIEW_ORDER`, написанный руками, и
+  // контроль, забытый в этом списке, молча не выполнялся вовсе — при чистой
+  // сборке. То есть дыра «тихой смерти защиты», которую реестр закрывал, просто
+  // переехала на строку ниже. Найдено независимым аудитом Kimi K3 и
+  // воспроизведено: удаление `stale_price` из порядка оставляет `tsc` чистым.
+  //
+  // Сбой одной проверки не снимает остальные и не открывает ворота: упавшая
+  // проверка считается СРАБОТАВШЕЙ. Ответ уйдёт человеку, и человек увидит, что
+  // именно сломалось. Обратное — молча пропустить ответ клиенту, потому что
+  // сторож упал, — для контроля безопасности недопустимо.
+  const humanReviewReasons = (Object.keys(HUMAN_REVIEW_CHECKS) as HumanReviewReason[])
+    .sort((a, b) => HUMAN_REVIEW_ORDER.indexOf(a) - HUMAN_REVIEW_ORDER.indexOf(b))
+    .map((reason): ReasonDetail | null => {
+      try {
+        return HUMAN_REVIEW_CHECKS[reason]();
+      } catch (e) {
+        console.error('[enhanced-answering] контроль «%s» упал:', reason, e);
+        return { reason, detail: `проверка не выполнилась: ${String(e).slice(0, 160)}` };
+      }
+    })
+    .filter((item): item is ReasonDetail => item !== null);
+
+  const requiresHumanReview = humanReviewReasons.length > 0;
+
+  const answerReasons: AnswerReasons = {
+    humanReview: humanReviewReasons,
+    tariffContext: { sections: tariffContext.sections, rows: tariffContext.count },
+    // Незаземлённые числа показываются ВСЕГДА, а не только когда они удержали
+    // ответ: внутреннему контуру они ответ не блокируют, но сотруднику знать о
+    // них надо — он отправляет этот текст клиенту своими руками.
+    ungroundedValues: grounding.ungrounded.map((c) => `${c.value} ${c.unit ?? ''}`.trim()),
+    stalePrices: stalePrice.findings.map((f) => `${f.amount} ₽ при «${f.serviceHint}»`),
+    priceContradictions: priceAttribution.contradictions.map(
+      (c) => `${c.serviceLabel}: ${c.claimed} против ${c.expected}`
+    ),
+  };
 
   // Build source references from context chunks
   const primarySource = primaryDocId ? {
@@ -1618,6 +1725,7 @@ ${fixList}
         avgSimilarity,
         maxSimilarity: chunks[0]?.combinedScore || 0,
       },
+      reasons: answerReasons,
     };
   }
 
