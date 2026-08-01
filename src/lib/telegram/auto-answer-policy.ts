@@ -1,16 +1,21 @@
 import prisma from '@/lib/db';
 import type { EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
-import { sendMessage } from './telegram-api';
+import { sendInlineKeyboard, sendMessage } from './telegram-api';
 import { getAdminTelegramIds } from './access-control';
 import { DEFAULT_MIN_CONFIDENCE } from './constants';
+import type { AutoAnswerBlocker, DeliveryDecision } from '@/lib/ai/delivery-decision';
 
 export interface AutoAnswerSettings {
   enabled: boolean;
   minConfidence: number;
 }
 
-/** What the bot does with an engine result on Telegram. */
-export type DeliveryDecision = 'clarify' | 'answer' | 'escalate';
+/**
+ * Что бот делает с результатом движка. Сам тип живёт в отдельном модуле без
+ * зависимостей: его импортирует и браузер, а этот модуль ходит в базу.
+ * Реэкспорт оставлен, чтобы не переписывать десяток мест вызова.
+ */
+export type { DeliveryDecision };
 
 export { DEFAULT_MIN_CONFIDENCE };
 
@@ -28,15 +33,37 @@ export { DEFAULT_MIN_CONFIDENCE };
  * - the answer came from general AI knowledge (unverified),
  * - the engine rated its own answer low/insufficient.
  */
+/**
+ * Что именно помешало отправить ответ. `null` — ничто не помешало.
+ *
+ * Это ЕДИНСТВЕННАЯ реализация условий: `shouldAutoAnswer` теперь спрашивает её,
+ * а не повторяет проверки. Иначе объяснение разошлось бы с решением, которое
+ * оно объясняет, — та же болезнь, что была у песочницы со второй копией
+ * политики, только незаметнее.
+ *
+ * Причина нужна оператору: без неё «передано оператору» одинаково выглядит и
+ * когда ответ плох, и когда просто выключен тумблер автоответа. Это два разных
+ * вывода и два разных следующих действия.
+ */
+export function explainAutoAnswer(
+  result: EnhancedAnswerResult,
+  settings: AutoAnswerSettings
+): AutoAnswerBlocker | null {
+  if (!settings.enabled) return 'auto_answer_disabled';
+  if (result.requiresHumanReview) return 'human_review_required';
+  if (result.answerSource === 'general_ai') return 'general_ai_source';
+  if (result.confidenceLevel === 'low' || result.confidenceLevel === 'insufficient') {
+    return 'confidence_level_too_low';
+  }
+  if (result.confidence < settings.minConfidence) return 'below_min_confidence';
+  return null;
+}
+
 export function shouldAutoAnswer(
   result: EnhancedAnswerResult,
   settings: AutoAnswerSettings
 ): boolean {
-  if (!settings.enabled) return false;
-  if (result.requiresHumanReview) return false;
-  if (result.answerSource === 'general_ai') return false;
-  if (result.confidenceLevel === 'low' || result.confidenceLevel === 'insufficient') return false;
-  return result.confidence >= settings.minConfidence;
+  return explainAutoAnswer(result, settings) === null;
 }
 
 /**
@@ -97,7 +124,13 @@ export async function escalateToHuman(
   chatId: number,
   question: string,
   result: EnhancedAnswerResult,
-  userTelegramId: string
+  userTelegramId: string,
+  /**
+   * Идентификатор записи об удержании. С ним под сообщением появляются кнопки
+   * вердикта: без ответа человека «был ли черновик верен» нельзя отличить
+   * контроль, спасший клиента, от контроля, отнявшего верный ответ.
+   */
+  heldAnswerId?: string | null
 ): Promise<void> {
   const adminIds = await getAdminTelegramIds();
   const confidenceLabel = `${Math.round(result.confidence * 100)}% (${result.confidenceLevel})`;
@@ -118,7 +151,18 @@ export async function escalateToHuman(
   for (const adminId of adminIds) {
     if (adminId === userTelegramId) continue;
     try {
-      await sendMessage(Number(adminId), adminMessage);
+      if (heldAnswerId) {
+        // Вердикт спрашивается ОДНОЙ кнопкой и прямо здесь: оператор уже читает
+        // черновик, и это единственный момент, когда его вывод стоит дёшево.
+        // Отдельная страница для разметки не будет открыта никогда.
+        await sendInlineKeyboard(Number(adminId), adminMessage, [
+          { text: '✅ Черновик был верен', callback_data: `hv:correct:${heldAnswerId}` },
+          { text: '❌ Черновик был неверен', callback_data: `hv:wrong:${heldAnswerId}` },
+          { text: '➖ Неполон', callback_data: `hv:partial:${heldAnswerId}` },
+        ]);
+      } else {
+        await sendMessage(Number(adminId), adminMessage);
+      }
     } catch {
       // Skip unreachable admins
     }

@@ -6,7 +6,8 @@ import { isAdmin, isSuperAdmin } from './access-control';
 import { addKnowledge, correctKnowledge } from './knowledge-manager';
 import { answerQuestionEnhanced } from '@/lib/ai/enhanced-answering-engine';
 import { getOrCreateSession, saveChatMessage } from '@/lib/ai/answering-engine';
-import { decideDelivery, getAutoAnswerSettings, escalateToHuman } from './auto-answer-policy';
+import { decideDelivery, explainAutoAnswer, getAutoAnswerSettings, escalateToHuman } from './auto-answer-policy';
+import { recordHeldAnswer } from '@/lib/ai/held-answers';
 import { ADD_KEYWORDS, CORRECT_KEYWORDS, PRICE_CHANGE_PATTERN, RULE_LOOKUP_PATTERN, DIRECT_EDIT_PATTERN } from './constants';
 import prisma from '@/lib/db';
 
@@ -169,7 +170,16 @@ export async function handleVoiceMessage(
 
     const autoAnswerSettings = await getAutoAnswerSettings();
     if (decideDelivery(result, autoAnswerSettings) === 'escalate') {
-      await escalateToHuman(chatId, text, result, user.telegramId);
+      const heldId = await recordHeldAnswer({
+        question: text,
+        result,
+        audience: 'internal',
+        source: 'TELEGRAM',
+        delivery: 'escalate',
+        blocker: explainAutoAnswer(result, autoAnswerSettings),
+        draftAnswer: result.answer,
+      });
+      await escalateToHuman(chatId, text, result, user.telegramId, heldId);
       return;
     }
 

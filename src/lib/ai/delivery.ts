@@ -2,9 +2,11 @@ import type { EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
 import type { Audience } from '@/lib/knowledge/audience';
 import {
   decideDelivery,
+  explainAutoAnswer,
   getAutoAnswerSettings,
   type DeliveryDecision,
 } from '@/lib/telegram/auto-answer-policy';
+import type { AutoAnswerBlocker } from '@/lib/ai/delivery-decision';
 
 /**
  * Одна политика доставки на все каналы.
@@ -29,6 +31,14 @@ export interface DeliveryOutcome {
   draftAnswer: string;
   /** Текст ответа подменён, потому что черновик клиенту показывать нельзя. */
   withheld: boolean;
+  /**
+   * Что помешало отправить ответ. `null` — ничто.
+   *
+   * Без этого «передано оператору» одинаково выглядит и когда ответ плох, и
+   * когда просто выключен тумблер автоответа. Это два разных вывода и два
+   * разных следующих действия оператора.
+   */
+  blocker: AutoAnswerBlocker | null;
 }
 
 /**
@@ -48,6 +58,9 @@ export async function resolveDelivery(
 ): Promise<DeliveryOutcome> {
   const settings = await getAutoAnswerSettings();
   const decision = decideDelivery(result, settings);
+  // Причина спрашивается у той же политики, а не выводится заново. Уточняющий
+  // вопрос помехой не является: он уходит собеседнику независимо от тумблера.
+  const blocker = decision === 'clarify' ? null : explainAutoAnswer(result, settings);
   const draftAnswer = result.answer;
 
   // Уточняющий вопрос — это вопрос клиенту, а не утверждение о фактах: его
@@ -59,6 +72,7 @@ export async function resolveDelivery(
     draftAnswer,
     outboundAnswer: withheld ? CLIENT_HOLDING_ANSWER : draftAnswer,
     withheld,
+    blocker,
   };
 }
 
@@ -82,6 +96,7 @@ export function applyDelivery(
   delivery: DeliveryDecision;
   draftAnswer?: string;
   answerWithheld: boolean;
+  deliveryBlocker?: AutoAnswerBlocker | null;
 } {
   return {
     ...result,
@@ -89,5 +104,8 @@ export function applyDelivery(
     delivery: outcome.decision,
     ...(opts.includeDraft ? { draftAnswer: outcome.draftAnswer } : {}),
     answerWithheld: outcome.withheld,
+    // Причина решения — рядом с решением и по тем же правилам, что черновик:
+    // анониму она не нужна и способна рассказать о внутренних настройках.
+    ...(opts.includeDraft ? { deliveryBlocker: outcome.blocker } : {}),
   };
 }

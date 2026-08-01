@@ -28,7 +28,8 @@ import {
 } from '@/lib/ai/enhanced-answering-engine';
 import { sendMessage, sendInlineKeyboard } from './telegram-api';
 import { formatAnswerResponse } from './commands';
-import { decideDelivery, getAutoAnswerSettings, escalateToHuman } from './auto-answer-policy';
+import { decideDelivery, explainAutoAnswer, getAutoAnswerSettings, escalateToHuman } from './auto-answer-policy';
+import { recordHeldAnswer } from '@/lib/ai/held-answers';
 import type { TelegramUserInfo } from './access-control';
 
 type ClarificationMeta = {
@@ -114,7 +115,16 @@ export async function handleScenarioCallback(
 
   const autoAnswerSettings = await getAutoAnswerSettings();
   if (decideDelivery(result, autoAnswerSettings) === 'escalate') {
-    await escalateToHuman(chatId, effectiveQuestion, result, telegramId);
+    const heldId = await recordHeldAnswer({
+      question: effectiveQuestion,
+      result,
+      audience: 'internal',
+      source: 'TELEGRAM',
+      delivery: 'escalate',
+      blocker: explainAutoAnswer(result, autoAnswerSettings),
+      draftAnswer: result.answer,
+    });
+    await escalateToHuman(chatId, effectiveQuestion, result, telegramId, heldId);
     return;
   }
 

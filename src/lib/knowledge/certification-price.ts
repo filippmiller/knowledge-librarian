@@ -303,6 +303,21 @@ interface ServiceMatch {
 }
 
 /**
+ * Услуга названа без указания, ЧЕГО именно заверение.
+ *
+ * Различаются не длина упоминания, а наличие ОБЪЕКТА. «Срочное заверение» и
+ * «нотариальное заверение» объект не называют — прилагательное говорит о виде
+ * или срочности, а не о том, что заверяют. Такое упоминание опирается на тему
+ * предыдущего предложения. «Заверение копии», «заверение перевода», «заверение
+ * штампом бюро» — называют, и переносить туда чужую тему нельзя.
+ */
+const CERTIFICATION_OBJECT = /перевод|копи|оригинал|устав|тождествен|штамп|печат|подпис|бланк/iu;
+
+function isBareMention(text: string): boolean {
+  return /заверени/iu.test(text) && !CERTIFICATION_OBJECT.test(text);
+}
+
+/**
  * Все услуги, названные в отрезке текста. При пересечении совпадений остаётся
  * самое длинное: «срочное нотариальное заверение» перекрывает «нотариальное
  * заверение», и цена обязана достаться срочной услуге.
@@ -489,11 +504,34 @@ export function checkCertificationPriceAttribution(answer: string): PriceAttribu
   // перевода, то стоимость — 260 рублей за страницу» — одно предложение.
   const sentences = answer.split(/(?<=[.!?])\s+|\n+/u);
 
+  /**
+   * Услуга, названная ЯВНО в одном из предыдущих предложений.
+   *
+   * По-русски подлежащее опускают: «Нотариальное заверение копии — 260 ₽ за
+   * страницу. Если нужно срочное заверение, то 300 ₽ за страницу.» Второе
+   * предложение говорит о копии, но слова «копии» в нём нет. Голое «заверение»
+   * опознавалось как заверение ПЕРЕВОДА, и верный ответ уходил оператору
+   * вместо клиента — поймано на живом прогоне песочницы, когда отладка начала
+   * показывать причину.
+   *
+   * Тема переносится только с ЯВНОГО упоминания и только на голое. Иначе
+   * настоящая ошибка «нотариальное заверение перевода — 260 ₽ за страницу»
+   * тоже была бы прощена: там услуга названа целиком, переносить нечего.
+   */
+  let carriedService: CertificationService | null = null;
+
   for (const sentence of sentences) {
     // Предложение про другой раздел прайса судить отсюда нельзя — см.
     // FOREIGN_SECTION.
     if (FOREIGN_SECTION.test(sentence)) continue;
     const services = matchServices(sentence);
+    // Тема, унаследованная от ПРЕДЫДУЩИХ предложений. Обновляется в конце
+    // разбора, а не здесь: иначе явное упоминание, стоящее ПОЗЖЕ числа в том же
+    // предложении, задним числом меняло бы тему более раннего фрагмента.
+    // Найдено аудитом Codex.
+    const inheritedService = carriedService;
+    const explicit = services.filter((s) => !isBareMention(s.text));
+    if (explicit.length > 0) carriedService = explicit[explicit.length - 1].service;
     if (services.length === 0) continue;
     const prices = matchPrices(sentence);
     if (prices.length === 0) continue;
@@ -503,7 +541,31 @@ export function checkCertificationPriceAttribution(answer: string): PriceAttribu
     for (const price of prices) {
       const left = services.filter((s) => s.end <= price.start);
       if (left.length === 0) continue;
-      const owner = left[left.length - 1];
+      const matched = left[left.length - 1];
+
+      // Голое «заверение» при заданной ранее теме — это она и есть, но перенос
+      // разрешён ТОЛЬКО когда единица рядом с числом противоречит услуге по
+      // умолчанию, а теме — подходит.
+      //
+      // Без второго условия перенос слишком жаден: «Заверение перевода печатью
+      // бюро — 250 ₽ за документ. Если нужно нотариальное заверение — это
+      // ДРУГАЯ услуга, 1100 ₽ за документ» — здесь голое «нотариальное
+      // заверение» означает ровно себя, и тему подставлять нельзя. Единица там
+      // совпадает («за документ»), значит услуга по умолчанию верна.
+      //
+      // А в ложной тревоге, ради которой это написано, единицы расходятся:
+      // «срочное заверение — 300 ₽ за СТРАНИЦУ» при заверении перевода за
+      // ДОКУМЕНТ. Тема из предыдущего предложения — копия, у неё страница.
+      const bare = isBareMention(matched.text);
+      const unitFitsInherited =
+        inheritedService !== null &&
+        price.unit !== null &&
+        price.unit !== matched.service.price?.unit &&
+        (inheritedService.price?.unit === price.unit ||
+          CERTIFICATION_SERVICES.find((s) => s.key === inheritedService?.urgentVariantKey)?.price
+            ?.unit === price.unit);
+      const owner =
+        bare && unitFitsInherited && inheritedService ? { ...matched, service: inheritedService } : matched;
 
       // Услуга названа и правее числа — какая из двух его хозяйка, по тексту не
       // определить. Не объявляем противоречие: это цена ложных тревог.
@@ -543,6 +605,7 @@ export function checkCertificationPriceAttribution(answer: string): PriceAttribu
         (p) => p.amount === price.amount && (price.unit === null || price.unit === p.unit)
       );
       if (fits) continue;
+
 
       contradictions.push({
         serviceKey: owner.service.key,
