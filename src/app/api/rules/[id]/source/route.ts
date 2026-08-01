@@ -29,7 +29,6 @@ export async function GET(
         confidence: true,
         status: true,
         version: true,
-        createdAt: true,
         sourceSpan: true,
         document: {
           select: {
@@ -50,8 +49,12 @@ export async function GET(
     const span = (rule.sourceSpan ?? null) as Record<string, unknown> | null;
     const quote = typeof span?.quote === 'string' ? span.quote : null;
     const locationHint = typeof span?.locationHint === 'string' ? span.locationHint : null;
-    // Голосовые правила помечаются authorityTag='VOICE_AUTHORITY' — у них
-    // документа-источника нет по природе, и модалка должна сказать это прямо.
+    // Происхождение правила определяется ТОЛЬКО этой меткой (её ставит Voice
+    // Rule Studio, `api/admin/voice-training/approve`), а не отсутствием
+    // документа: удаление документа не удаляет извлечённые из него правила и
+    // молча обнуляет `documentId`. На 2026-08-01 таких осиротевших правил 114,
+    // а правил с меткой — ноль, так что «нет документа ⇒ надиктовано голосом»
+    // было бы враньём во всех ста процентах случаев.
     const authorityTag = typeof span?.authorityTag === 'string' ? span.authorityTag : null;
 
     return NextResponse.json({
@@ -63,7 +66,6 @@ export async function GET(
         confidence: rule.confidence,
         status: rule.status,
         version: rule.version,
-        createdAt: rule.createdAt,
       },
       span: { quote, locationHint, authorityTag },
       document: rule.document

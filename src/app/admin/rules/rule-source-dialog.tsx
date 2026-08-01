@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { FileText, Loader2, MicVocal } from 'lucide-react';
+import { FileQuestion, FileText, History, Loader2, MicVocal } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import {
   Dialog,
@@ -54,29 +54,30 @@ export function RuleSourceDialog({ ruleId, onClose, restoreFocusRef }: RuleSourc
   // тысяч, тянуть тексты документов заранее нельзя.
   useEffect(() => {
     if (!ruleId) return;
-    let cancelled = false;
+    // Запрос обрывается вместе с закрытием модалки: ответ везёт весь текст
+    // документа, и дочитывать его для правила, которое оператор уже закрыл,
+    // незачем.
+    const abort = new AbortController();
 
     async function load(id: string) {
       setLoading(true);
       setError(null);
       setData(null);
       try {
-        const res = await fetch(`/api/rules/${id}/source`);
+        const res = await fetch(`/api/rules/${id}/source`, { signal: abort.signal });
         if (!res.ok) throw new Error(`Сервер ответил ${res.status}`);
-        const json = (await res.json()) as RuleSourceResponse;
-        if (!cancelled) setData(json);
+        setData((await res.json()) as RuleSourceResponse);
       } catch (e: unknown) {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'Не удалось загрузить источник');
+        if (abort.signal.aborted) return;
+        setError(e instanceof Error ? e.message : 'Не удалось загрузить источник');
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!abort.signal.aborted) setLoading(false);
       }
     }
 
     void load(ruleId);
 
-    return () => {
-      cancelled = true;
-    };
+    return () => abort.abort();
   }, [ruleId]);
 
   return (
@@ -152,6 +153,27 @@ export function RuleSourceDialog({ ruleId, onClose, restoreFocusRef }: RuleSourc
                 </div>
               )}
 
+              {/*
+                Правку правила сохраняют новой версией, а sourceSpan копируют от
+                прежней: текст уже другой, цитата — старая. Без этой оговорки
+                зелёное «найдено дословно» ниже относилось бы к тексту, которого
+                оператор на экране не видит.
+              */}
+              {data.rule.version > 1 && (
+                <div className="flex gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
+                  <History className="mt-0.5 h-4 w-4 shrink-0" />
+                  <div>
+                    <div className="font-medium">
+                      Правило редактировали после извлечения (версия {data.rule.version})
+                    </div>
+                    <div className="mt-0.5 text-xs">
+                      Цитата осталась от первой версии. Сверка ниже говорит о ней, а не о текущем
+                      тексте правила — текущий текст с документом никто не сверял.
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {data.span.quote && (
                 <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
                   <div className="mb-1 text-xs font-medium tracking-wide text-slate-500 uppercase">
@@ -161,15 +183,27 @@ export function RuleSourceDialog({ ruleId, onClose, restoreFocusRef }: RuleSourc
                 </div>
               )}
 
-              {!data.document ? (
+              {!data.document && data.span.authorityTag ? (
                 <div className="flex gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-700">
                   <MicVocal className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
                   <div>
-                    <div className="font-medium">Документа-источника нет</div>
+                    <div className="font-medium">Документа-источника нет по природе правила</div>
                     <div className="mt-0.5 text-xs">
-                      Правило добавлено оператором — надиктовано голосом или заведено вручную
-                      {data.span.authorityTag ? ` (метка ${data.span.authorityTag})` : ''}. Сверять не с
-                      чем: проверяйте формулировку с автором правила.
+                      Правило заведено оператором, метка происхождения — {data.span.authorityTag}.
+                      Сверять не с чем: проверяйте формулировку с автором правила.
+                    </div>
+                  </div>
+                </div>
+              ) : !data.document ? (
+                <div className="flex gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
+                  <FileQuestion className="mt-0.5 h-4 w-4 shrink-0" />
+                  <div>
+                    <div className="font-medium">Документ-источник не найден в базе</div>
+                    <div className="mt-0.5 text-xs">
+                      Откуда правило — неизвестно. У правил, заведённых оператором, стоит метка
+                      происхождения, а здесь её нет: похоже, документ был, но его удалили — удаление
+                      документа не удаляет извлечённые из него правила. Сверить не с чем, проверяйте
+                      формулировку по существу.
                     </div>
                   </div>
                 </div>

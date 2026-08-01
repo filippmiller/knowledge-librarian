@@ -21,6 +21,16 @@ interface Status {
   detail?: string;
 }
 
+/**
+ * Что именно поиск считает несущественным. Перечислено дословно, потому что
+ * оператор по зелёной плашке решает «сверено»: сказать «различия только в
+ * пробелах и кавычках», а втихую приравнять ещё и регистр с ё/е — значит
+ * назвать ему неверную причину совпадения.
+ */
+const IGNORED_ON_NORMALIZE =
+  'при сверке не учитывались регистр, ё/е, вид кавычек и тире, любое количество пробелов и ' +
+  'переносов строк, а также невидимые символы из PDF и Word';
+
 function buildStatus(quote: string | null | undefined, match: QuoteMatch | null): Status {
   if (!quote?.trim()) {
     return {
@@ -34,25 +44,40 @@ function buildStatus(quote: string | null | undefined, match: QuoteMatch | null)
       tone: 'error',
       title: 'Фрагмент не найден в тексте документа',
       detail:
-        'Подсветки нет: текст документа мог измениться после извлечения, либо цитата собрана из ' +
+        'Подсветки нет. Причины бывают три: правило отредактировали после извлечения и цитата ' +
+        'осталась от прежней версии; текст документа изменился; цитата собрана моделью из ' +
         'разрозненных кусков (частая история с таблицами). Сверяйте правило с документом вручную.',
     };
   }
+
+  // Такое же совпадение нашлось ещё где-то: место — догадка, и об этом надо
+  // сказать раньше, чем оператор прочитает процент как доказательство.
+  const guess = match.ambiguous
+    ? ' Точно такой же фрагмент есть в документе ещё раз — подсвечено первое вхождение, место показано наугад.'
+    : '';
+  const tone: Status['tone'] = match.ambiguous ? 'warn' : 'ok';
+
   if (match.kind === 'partial') {
     return {
       tone: 'warn',
       title: `Совпало только начало цитаты (${Math.round(match.coverage * 100)}%)`,
-      detail: 'Подсвечена совпавшая часть. Остаток цитаты в документе не найден — это не полная сверка.',
+      detail:
+        'Подсвечена совпавшая часть. Остаток цитаты в документе не найден — это не полная сверка.' +
+        guess,
     };
   }
   if (match.kind === 'normalized') {
     return {
-      tone: 'ok',
-      title: 'Фрагмент найден (с точностью до пробелов и кавычек)',
-      detail: 'Дословно цитата не совпала — различия только в пробелах, кавычках или тире.',
+      tone,
+      title: 'Фрагмент найден, но не дословно',
+      detail: `Цитата совпала не буква в букву: ${IGNORED_ON_NORMALIZE}.${guess}`,
     };
   }
-  return { tone: 'ok', title: 'Фрагмент найден в тексте документа дословно' };
+  return {
+    tone,
+    title: 'Фрагмент найден в тексте документа дословно',
+    detail: guess.trim() || undefined,
+  };
 }
 
 const TONE_CLASSES: Record<Status['tone'], string> = {
@@ -108,7 +133,6 @@ export function DocumentQuoteView({ text, quote, className, textClassName }: Doc
             <span>{text.slice(0, match.start)}</span>
             <span
               ref={highlightRef}
-              id="doc-highlight"
               className={cn(
                 'rounded px-0.5 text-gray-900 dark:text-white',
                 match.kind === 'partial'
