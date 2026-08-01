@@ -69,7 +69,10 @@ interface GuardResult {
   cleanTotal: number;
   /** Подложенные дефекты, которые контроль поймал. */
   caught: number;
+  /** Знаменатель находимости: только дефекты В ОБЛАСТИ контроля. */
   injectedTotal: number;
+  /** Подложено, но контролю не адресовано — в знаменатель не идёт. */
+  outOfScope: number;
   /** Верные ответы, на которых он сработал зря. */
   falseAlarms: string[];
   /** Подложенные дефекты, которые он пропустил. */
@@ -80,7 +83,18 @@ function measure(
   name: string,
   clean: string[],
   inject: (answer: string) => string | null,
-  fires: (answer: string) => boolean
+  fires: (answer: string) => boolean,
+  /**
+   * Попал ли подложенный дефект в область контроля.
+   *
+   * Ценовые сторожа судят только предложения, где к сумме привязана услуга: без
+   * услуги число не относится ни к чему, и молчать — их замысел, а не промах.
+   * Пока такие подмены падали в «пропущено», находимость занижалась на том, за
+   * что контроль не отвечает. Область берётся из его же вердикта (`checked` —
+   * сколько пар «услуга → цена» удалось связать), а не из отдельной эвристики:
+   * вторая мерка неизбежно разошлась бы с первой.
+   */
+  inScope: (spoiled: string) => boolean = () => true
 ): GuardResult {
   const res: GuardResult = {
     name,
@@ -88,6 +102,7 @@ function measure(
     cleanTotal: 0,
     caught: 0,
     injectedTotal: 0,
+    outOfScope: 0,
     falseAlarms: [],
     missed: [],
   };
@@ -98,6 +113,10 @@ function measure(
 
     const spoiled = inject(answer);
     if (spoiled === null) continue;
+    if (!inScope(spoiled)) {
+      res.outOfScope += 1;
+      continue;
+    }
     res.injectedTotal += 1;
     if (fires(spoiled)) res.caught += 1;
     else res.missed.push(spoiled.slice(0, 110).replace(/\n/g, ' '));
@@ -109,6 +128,9 @@ function print(r: GuardResult): void {
   console.log(`\n── ${r.name}`);
   console.log(`   МОЛЧИТ на верных:   ${r.quietOnClean} из ${r.cleanTotal} (${pct(r.quietOnClean, r.cleanTotal)}) · ложных тревог ${r.falseAlarms.length}`);
   console.log(`   НАХОДИТ подложенное: ${r.caught} из ${r.injectedTotal} (${pct(r.caught, r.injectedTotal)}) · пропущено ${r.missed.length}`);
+  if (r.outOfScope > 0) {
+    console.log(`   вне области:        ${r.outOfScope} — сумма подменена там, где услуга не привязана; в знаменатель не идёт`);
+  }
   if (r.injectedTotal === 0) {
     console.log('   ⚠ дефект подмешать было некуда — контроль этим замером НЕ проверен');
   }
@@ -134,7 +156,8 @@ async function main() {
       // Цена подменяется ценой ДРУГОЙ услуги заверения: 1100 ₽/док против
       // 260 ₽/стр — ровно тот дефект, с которого начался модуль.
       (a) => (MONEY.test(a) ? a.replace(MONEY, '260 руб') : null),
-      (a) => !checkCertificationPriceAttribution(a).consistent
+      (a) => !checkCertificationPriceAttribution(a).consistent,
+      (a) => checkCertificationPriceAttribution(a).checked > 0
     )
   );
 
@@ -143,7 +166,8 @@ async function main() {
       'Устаревшая цена (stale-price-check)',
       answers,
       (a) => (MONEY.test(a) ? a.replace(MONEY, `${alien} руб`) : null),
-      (a) => !checkStalePrice(a, tariffs).ok
+      (a) => !checkStalePrice(a, tariffs).ok,
+      (a) => checkStalePrice(a, tariffs).checked > 0
     )
   );
 
@@ -161,11 +185,16 @@ async function main() {
   console.log(`\nЧИТАТЬ ТАК: контроль годится удерживать ответ КЛИЕНТУ, только если`);
   console.log(`молчит почти на всех верных. Высокая находимость при заметной доле`);
   console.log(`ложных тревог означает не защиту, а случайный эскалатор.`);
-  console.log(`\nОГОВОРКА О ЗНАМЕНАТЕЛЕ. Ценовые контроли смотрят только предложения, где`);
-  console.log(`названа услуга прайса. Подмена суммы в ответе, где услуги нет, для них`);
-  console.log(`вне области — и попадает в «пропущено», занижая находимость. Читать её`);
-  console.log(`как «доля пойманного среди всего подложенного», а не как долю ошибок`);
-  console.log(`контроля. Утечки контура это не касается: она смотрит весь текст.`);
+  console.log(`\nО ЗНАМЕНАТЕЛЕ. Находимость считается по дефектам В ОБЛАСТИ контроля:`);
+  console.log(`подмена суммы там, где к ней не привязана услуга, вынесена в «вне области»`);
+  console.log(`и в знаменатель не идёт — молчать в таком ответе контроль обязан. Область`);
+  console.log(`берётся из его же вердикта (checked), поэтому не может разойтись с тем,`);
+  console.log(`что он на самом деле смотрит. Утечки контура это не касается: она читает`);
+  console.log(`весь текст, у неё область — весь корпус.`);
+  console.log(`\nЧТО ОСТАЛОСЬ НЕЧЕСТНОГО. Подмена может не создать ошибки: если ответ и так`);
+  console.log(`про услугу за 260 ₽, «приписке цены» ловить нечего, а случай считается`);
+  console.log(`пропуском. Находимость приписки поэтому всё ещё занижена — но уже не на`);
+  console.log(`ответах без услуги, а только на этих.`);
 
   await prisma.$disconnect();
 }

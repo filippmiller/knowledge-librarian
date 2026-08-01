@@ -20,6 +20,7 @@
  */
 import type { TariffRecord, TariffUnitKey } from '@/lib/knowledge/tariffs';
 import { serviceTerms } from '@/lib/knowledge/service-terms';
+import { splitSentences } from '@/lib/knowledge/sentences';
 
 /** Денежная сумма в тексте. Порядок ветвей важен — см. certification-price.ts. */
 const MONEY = String.raw`(?:₽|рубл[а-яё]+|руб\.?|р\.(?![\s.]*д))`;
@@ -83,7 +84,7 @@ export function checkStalePrice(answer: string, tariffs: TariffRecord[]): StaleP
   const findings: StalePriceFinding[] = [];
   let checked = 0;
 
-  const sentences = answer.split(/(?<=[.!?])\s+|\n+/u);
+  const sentences = splitSentences(answer);
   const re = new RegExp(String.raw`(\d[\d\s   ]*)\s*${MONEY}`, 'giu');
 
   for (const sentence of sentences) {

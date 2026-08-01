@@ -26,6 +26,8 @@
  * инцидента. Оба независимых критика (Kimi, Codex) сошлись на этом.
  */
 
+import { splitSentences } from '@/lib/knowledge/sentences';
+
 /** Единица, в которой назначена цена. Сравнивается наравне со значением. */
 export type PriceUnit = 'doc' | 'page' | 'mark' | 'visa' | 'standard_page';
 
@@ -502,7 +504,7 @@ export function checkCertificationPriceAttribution(answer: string): PriceAttribu
   // Границы — только конец предложения и перевод строки. По запятым делить
   // нельзя: реальная ошибка выглядела как «Если это нотариальное заверение
   // перевода, то стоимость — 260 рублей за страницу» — одно предложение.
-  const sentences = answer.split(/(?<=[.!?])\s+|\n+/u);
+  const sentences = splitSentences(answer);
 
   /**
    * Услуга, названная ЯВНО в одном из предыдущих предложений.
