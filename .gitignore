@@ -80,3 +80,4 @@ docs/bot-audit/.tariff-shadow-results.jsonl
 # Рабочие деревья подагентов — временные, в репозиторий не идут.
 .claude/worktrees/
 docs/bot-audit/.contours*.jsonl
+docs/bot-audit/.sent-error-rate*.jsonl
