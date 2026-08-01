@@ -23,6 +23,8 @@
  * откуда он пришёл.
  */
 
+import { splitSentences } from '@/lib/knowledge/sentences';
+
 /** Упоминание присяжного перевода в любой форме. */
 const SWORN = /присяжн/iu;
 
@@ -61,7 +63,7 @@ export interface SwornVerdict {
  */
 export function checkSwornTranslationClaim(answer: string): SwornVerdict {
   const violations: SwornClaimViolation[] = [];
-  for (const sentence of answer.split(/(?<=[.!?])\s+|\n+/u)) {
+  for (const sentence of splitSentences(answer)) {
     if (!SWORN.test(sentence)) continue;
     if (LOCATED_ABROAD.test(sentence)) continue;
     if (DENIES_EXISTENCE.test(sentence)) continue;
