@@ -106,8 +106,17 @@ interface Injection {
   sentence: string;
 }
 
+const normalizeDigits = (s: string) => s.replace(/[\s   ]/g, '');
+
 function injectMoney(answer: string, replacement: string): Injection | null {
-  if (!MONEY.test(answer)) return null;
+  const match = MONEY.exec(answer);
+  if (!match) return null;
+  // Подмена, которая не меняет сумму (первая цена в ответе и так «260 руб»),
+  // не создаёт дефекта — контроль обязан промолчать, а случай при этом
+  // считался бы «пропущено» и занижал находимость на пустом месте. Найдено
+  // ревью CodeRabbit на PR денаминатора.
+  const replacementDigits = normalizeDigits(replacement.match(/\d[\d\s ]*/u)?.[0] ?? '');
+  if (normalizeDigits(match[1]) === replacementDigits) return null;
   const full = answer.replace(MONEY, replacement);
   // MONEY без /g меняет только первое вхождение — предложение с ним ищем по
   // подставленному значению. Раньше него в тексте буквальный текст замены
