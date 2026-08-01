@@ -17,7 +17,8 @@ import { answerQuestionEnhanced, type EnhancedAnswerResult } from '@/lib/ai/enha
 import { getCachedAnswer, storeCachedAnswer } from '@/lib/ai/answer-cache';
 import { looksLikeClarificationReply } from '@/lib/ai/answer-policy';
 import { escalateUnconvincingAIAnswer } from './ai-escalation';
-import { decideDelivery, getAutoAnswerSettings, escalateToHuman } from './auto-answer-policy';
+import { decideDelivery, explainAutoAnswer, getAutoAnswerSettings, escalateToHuman } from './auto-answer-policy';
+import { recordHeldAnswer } from '@/lib/ai/held-answers';
 import { getOrCreateSession, saveChatMessage } from '@/lib/ai/answering-engine';
 import prisma from '@/lib/db';
 
@@ -590,7 +591,18 @@ export async function handleQuestion(message: TelegramMessage, user: TelegramUse
     // everything else goes to a human.
     const autoAnswerSettings = await getAutoAnswerSettings();
     if (decideDelivery(result, autoAnswerSettings) === 'escalate') {
-      await escalateToHuman(chatId, effectiveQuestion, result, user.telegramId);
+      // Удержание записывается ДО уведомления: идентификатор нужен кнопкам
+      // вердикта под самим сообщением оператору.
+      const heldId = await recordHeldAnswer({
+        question: effectiveQuestion,
+        result,
+        audience: 'internal',
+        source: 'TELEGRAM',
+        delivery: 'escalate',
+        blocker: explainAutoAnswer(result, autoAnswerSettings),
+        draftAnswer: result.answer,
+      });
+      await escalateToHuman(chatId, effectiveQuestion, result, user.telegramId, heldId);
       return;
     }
 

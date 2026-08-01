@@ -5,6 +5,7 @@ import {
 } from '@/lib/ai/enhanced-answering-engine';
 import { getCachedAnswer, storeCachedAnswer } from '@/lib/ai/answer-cache';
 import { applyDelivery, resolveDelivery } from '@/lib/ai/delivery';
+import { recordHeldAnswer } from '@/lib/ai/held-answers';
 import {
   saveChatMessage,
   getOrCreateSession,
@@ -199,6 +200,21 @@ export async function POST(request: NextRequest) {
     if (sandbox) {
       console.log('[ASK] Песочница: эскалация и черновик пробела знаний пропущены');
     } else {
+      // Удержанный ответ записывается, чтобы позже получить вердикт человека:
+      // без него частота срабатывания контроля не отличает верную тревогу от
+      // ложной. Наблюдение не имеет права ломать ответ — отсюда fire-and-forget.
+      if (delivery.decision === 'escalate') {
+        void recordHeldAnswer({
+          question,
+          result,
+          audience,
+          source: 'API',
+          delivery: delivery.decision,
+          blocker: delivery.blocker,
+          draftAnswer: delivery.draftAnswer,
+          sessionId: currentSessionId,
+        });
+      }
       void escalateUnconvincingAIAnswer({
         question,
         result,

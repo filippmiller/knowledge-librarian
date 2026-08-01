@@ -1,6 +1,6 @@
 import prisma from '@/lib/db';
 import type { EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
-import { sendMessage } from './telegram-api';
+import { sendInlineKeyboard, sendMessage } from './telegram-api';
 import { getAdminTelegramIds } from './access-control';
 import { DEFAULT_MIN_CONFIDENCE } from './constants';
 import type { AutoAnswerBlocker, DeliveryDecision } from '@/lib/ai/delivery-decision';
@@ -124,7 +124,13 @@ export async function escalateToHuman(
   chatId: number,
   question: string,
   result: EnhancedAnswerResult,
-  userTelegramId: string
+  userTelegramId: string,
+  /**
+   * Идентификатор записи об удержании. С ним под сообщением появляются кнопки
+   * вердикта: без ответа человека «был ли черновик верен» нельзя отличить
+   * контроль, спасший клиента, от контроля, отнявшего верный ответ.
+   */
+  heldAnswerId?: string | null
 ): Promise<void> {
   const adminIds = await getAdminTelegramIds();
   const confidenceLabel = `${Math.round(result.confidence * 100)}% (${result.confidenceLevel})`;
@@ -145,7 +151,18 @@ export async function escalateToHuman(
   for (const adminId of adminIds) {
     if (adminId === userTelegramId) continue;
     try {
-      await sendMessage(Number(adminId), adminMessage);
+      if (heldAnswerId) {
+        // Вердикт спрашивается ОДНОЙ кнопкой и прямо здесь: оператор уже читает
+        // черновик, и это единственный момент, когда его вывод стоит дёшево.
+        // Отдельная страница для разметки не будет открыта никогда.
+        await sendInlineKeyboard(Number(adminId), adminMessage, [
+          { text: '✅ Черновик был верен', callback_data: `hv:correct:${heldAnswerId}` },
+          { text: '❌ Черновик был неверен', callback_data: `hv:wrong:${heldAnswerId}` },
+          { text: '➖ Неполон', callback_data: `hv:partial:${heldAnswerId}` },
+        ]);
+      } else {
+        await sendMessage(Number(adminId), adminMessage);
+      }
     } catch {
       // Skip unreachable admins
     }
