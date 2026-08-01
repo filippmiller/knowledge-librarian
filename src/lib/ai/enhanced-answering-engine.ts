@@ -1576,9 +1576,30 @@ ${fixList}
           },
   };
 
-  const humanReviewReasons = HUMAN_REVIEW_ORDER.map((reason) => HUMAN_REVIEW_CHECKS[reason]()).filter(
-    (item): item is ReasonDetail => item !== null
-  );
+  // Перебираются КЛЮЧИ РЕЕСТРА, а не список порядка. Порядок влияет только на
+  // то, как причины лягут в отчёт.
+  //
+  // Так не было. Сначала перебирался `HUMAN_REVIEW_ORDER`, написанный руками, и
+  // контроль, забытый в этом списке, молча не выполнялся вовсе — при чистой
+  // сборке. То есть дыра «тихой смерти защиты», которую реестр закрывал, просто
+  // переехала на строку ниже. Найдено независимым аудитом Kimi K3 и
+  // воспроизведено: удаление `stale_price` из порядка оставляет `tsc` чистым.
+  //
+  // Сбой одной проверки не снимает остальные и не открывает ворота: упавшая
+  // проверка считается СРАБОТАВШЕЙ. Ответ уйдёт человеку, и человек увидит, что
+  // именно сломалось. Обратное — молча пропустить ответ клиенту, потому что
+  // сторож упал, — для контроля безопасности недопустимо.
+  const humanReviewReasons = (Object.keys(HUMAN_REVIEW_CHECKS) as HumanReviewReason[])
+    .sort((a, b) => HUMAN_REVIEW_ORDER.indexOf(a) - HUMAN_REVIEW_ORDER.indexOf(b))
+    .map((reason): ReasonDetail | null => {
+      try {
+        return HUMAN_REVIEW_CHECKS[reason]();
+      } catch (e) {
+        console.error('[enhanced-answering] контроль «%s» упал:', reason, e);
+        return { reason, detail: `проверка не выполнилась: ${String(e).slice(0, 160)}` };
+      }
+    })
+    .filter((item): item is ReasonDetail => item !== null);
 
   const requiresHumanReview = humanReviewReasons.length > 0;
 
