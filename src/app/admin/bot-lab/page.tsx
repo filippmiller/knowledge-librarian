@@ -23,14 +23,16 @@ import {
   TriangleAlert,
   XCircle,
 } from 'lucide-react';
-// Только тип: значение сюда тянуть нельзя — модуль политики ходит в базу.
+// Модуль без зависимостей: сюда можно тянуть и значения. Ради этого он и
+// заведён отдельно — сам модуль политики ходит в базу, и клиентский компонент
+// держался бы на одном слове `type`.
 import {
   AUTO_ANSWER_BLOCKER_LABELS,
   isDeliveryDecision,
   type AutoAnswerBlocker,
   type DeliveryDecision,
 } from '@/lib/ai/delivery-decision';
-import { HUMAN_REVIEW_LABELS, type AnswerReasons } from '@/lib/ai/answer-reasons';
+import { HUMAN_REVIEW_LABELS, HUMAN_REVIEW_ORDER, type AnswerReasons } from '@/lib/ai/answer-reasons';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
