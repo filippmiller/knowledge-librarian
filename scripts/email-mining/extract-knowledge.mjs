@@ -60,21 +60,41 @@ const SYSTEM = `Ты — аналитик базы знаний агентств
 4. Если ответ зависел от конкретной цены/срока — поставь price_dependent=true и в ответе опиши политику, НЕ называй сумму.
 5. confidence: насколько уверенно это общее правило компании (0..1). Если знание спорное/разовое — ниже.
 6. Если в треде нет переиспользуемых знаний — верни {"items":[]}.
+7. question и answer — ВСЕГДА по-русски, даже если переписка велась на другом языке (часть клиентов иностранные). Факт о компании не зависит от языка, на котором его один раз спросили.
 
 Верни СТРОГО JSON:
 {"items":[{"type":"capability|requirement|process|policy|location|pricing_policy","question":"...","answer":"...","price_dependent":bool,"confidence":0.0}]}`;
 
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+// Прогон scratch/email-mining/extract-knowledge-range.mjs на 640 тредах при
+// concurrency=6 без ретраев уложил 608 из 640 в rate limit (TPM у gpt-4o) —
+// без ретраев скрипт молча теряет знания, отчитываясь «готово».
+const MAX_RETRIES = 6;
+
 const extract = async (transcript) => {
-  const r = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${KEY}` },
-    body: JSON.stringify({
-      model: MODEL, temperature: 0, response_format: { type: 'json_object' },
-      messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: transcript }],
-    }),
-  });
-  const j = await r.json();
-  if (!j.choices) throw new Error(JSON.stringify(j).slice(0, 200));
-  return JSON.parse(j.choices[0].message.content).items || [];
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${KEY}` },
+      body: JSON.stringify({
+        model: MODEL, temperature: 0, response_format: { type: 'json_object' },
+        messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: transcript }],
+      }),
+    });
+    if (r.status === 429 || r.status === 500 || r.status === 503) {
+      if (attempt === MAX_RETRIES) throw new Error(`после ${MAX_RETRIES} попыток: ${r.status} ${(await r.text()).slice(0, 200)}`);
+      const retryAfterHeader = Number(r.headers.get('retry-after'));
+      const waitMs = Number.isFinite(retryAfterHeader) && retryAfterHeader > 0
+        ? retryAfterHeader * 1000
+        : 1000 * 2 ** attempt + Math.random() * 500;
+      await sleep(waitMs);
+      continue;
+    }
+    const j = await r.json();
+    if (!j.choices) throw new Error(JSON.stringify(j).slice(0, 200));
+    return JSON.parse(j.choices[0].message.content).items || [];
+  }
+  return [];
 };
 
 const pool = async (items, n, fn) => {
@@ -115,7 +135,7 @@ const pool = async (items, n, fn) => {
   const sample = threads.slice(0, numDeals);
   console.log(`Threads built: ${threads.length}; extracting knowledge from ${sample.length} with ${MODEL}...`);
 
-  const items = await pool(sample, 6, async (t) => (await extract(t.transcript)).map(it => ({ ...it, dealId: t.dealId })));
+  const items = await pool(sample, 3, async (t) => (await extract(t.transcript)).map(it => ({ ...it, dealId: t.dealId })));
 
   mkdirSync('scratchpad', { recursive: true });
   writeFileSync('scratchpad/email-knowledge.json', JSON.stringify(items, null, 2));
