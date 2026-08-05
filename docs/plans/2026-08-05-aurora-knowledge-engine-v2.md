@@ -72,6 +72,15 @@
 2. Если подтверждено — закрыть находку письменно в этом же файле плана (добавить секцию "Security review: closed, see commit <hash> or session log").
 3. Включить secret scanning в CI (GitHub secret scanning — уже, по логам сессии, включён на уровне организации; проверить `gh api repos/filippmiller/knowledge-librarian/vulnerability-alerts` или аналог).
 
+**Security review: closed.** Независимая перепроверка следующим исполнителем (не копируя вывод из чата, Beads translation-q1s), 2026-08-05:
+
+1. `git log --all --oneline -S"sk-proj-"`, `-S"sk-svcacct-"`, `-S"sk-ant-"` (без ограничения путём `*.md` — по всей истории, всем типам файлов) нашли только commits `c8d7b3d`, `98ba615`, `7bf4fa5` (и `d4901ea` для `sk-ant-`, где строка — не ключ, а название паттерна в тексте security-аудита). Во всех найденных диффах значение присутствует ТОЛЬКО в обрезанном виде: `` sk-proj-uckSc_X6-... `` и `` sk-svcacct-... `` — полного ключа нигде нет.
+2. Точечная проверка видимого фрагмента `git log --all -p -S"uckSc_X6"` — единственное вхождение то же самое обрезанное `sk-proj-uckSc_X6-...`, более длинной/полной формы нигде не всплывает.
+3. `gh api repos/filippmiller/knowledge-librarian --jq '.security_and_analysis'` подтверждает `secret_scanning: enabled` и `secret_scanning_push_protection: enabled` на уровне репозитория (не только организации).
+4. Не проверялись индивидуально dangling/unreachable объекты (`git fsck --unreachable` вернул несколько десятков) — непропорционально задаче: это обычный мусор git-истории (rebase/amend), а не то, что когда-либо было запушено и потенциально видно GitHub secret scanning, который и поймал исходный инцидент.
+
+**Вердикт: находка ложноположительная относительно риска — в истории git нет ни одного полного значения ключа, только заведомо обрезанные строки в документации инцидента. Secret scanning + push protection включены. Закрывающий коммит: см. Beads translation-q1s.**
+
 ---
 
 ### Задача 0.3 (SERIAL, зависит от 0.0-0.2): Prisma baseline — от РЕАЛЬНОЙ БД, не от git-схемы
