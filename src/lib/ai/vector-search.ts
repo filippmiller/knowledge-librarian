@@ -16,6 +16,18 @@ export interface SearchResult {
   documentId: string;
   similarity: number;
   metadata?: Record<string, unknown>;
+  /**
+   * Тема из дерева сценариев, к которой привязан чанк. `null` означает не
+   * «применимо ко всему», а «для темы этого документа нет узла в дереве» —
+   * пробел в таксономии, не факт универсальности (см. аудит
+   * .claude/audits/2026-08-05-moscow-oryol-bad-answer.md: 60 правил документа
+   * об апостиле образовательных документов получили scenarioKey=null только
+   * потому, что для «апостиль на дипломы» не было листа в дереве, и узкий
+   * факт про конкретного партнёра в Орле выиграл top-1 в ответе про
+   * произвольную логистику). Нужно вызывающему коду, чтобы применить более
+   * строгий порог именно к такому контенту в открытом поиске.
+   */
+  scenarioKey: string | null;
 }
 
 export interface HybridSearchResult extends SearchResult {
@@ -131,13 +143,15 @@ export async function searchSimilarChunksPgvector(
       documentId: string;
       similarity: number;
       metadata: Prisma.JsonValue;
+      scenarioKey: string | null;
     }>>`
       SELECT
         c.id,
         c.content,
         c."documentId",
         1 - (c."embeddingVector" <=> ${embeddingStr}::vector) as similarity,
-        c.metadata
+        c.metadata,
+        c."scenarioKey"
       FROM "DocChunk" c
       WHERE c."embeddingVector" IS NOT NULL
       ${Prisma.raw(domainFilter)}
@@ -154,6 +168,7 @@ export async function searchSimilarChunksPgvector(
       documentId: r.documentId,
       similarity: Number(r.similarity),
       metadata: r.metadata as Record<string, unknown> | undefined,
+      scenarioKey: r.scenarioKey,
     }));
   } catch (error) {
     // If pgvector query fails, reset availability flag so we use in-memory next time
@@ -209,6 +224,7 @@ async function searchSimilarChunksInMemory(
       documentId: true,
       embedding: true,
       metadata: true,
+      scenarioKey: true,
     },
   });
 
@@ -227,6 +243,7 @@ async function searchSimilarChunksInMemory(
       documentId: chunk.documentId,
       similarity,
       metadata: chunk.metadata as Record<string, unknown> | undefined,
+      scenarioKey: chunk.scenarioKey,
     });
   }
 
@@ -310,12 +327,14 @@ export async function searchByKeywords(
       content: string;
       documentId: string;
       rank: number;
+      scenarioKey: string | null;
     }>>`
       SELECT
         c.id,
         c.content,
         c."documentId",
-        ts_rank(to_tsvector('russian', c.content), plainto_tsquery('russian', ${query})) as rank
+        ts_rank(to_tsvector('russian', c.content), plainto_tsquery('russian', ${query})) as rank,
+        c."scenarioKey"
       FROM "DocChunk" c
       WHERE to_tsvector('russian', c.content) @@ plainto_tsquery('russian', ${query})
       ${Prisma.raw(domainFilter)}
@@ -331,6 +350,7 @@ export async function searchByKeywords(
         content: r.content,
         documentId: r.documentId,
         similarity: Math.min(Number(r.rank) / 0.5, 1), // Normalize rank to 0-1
+        scenarioKey: r.scenarioKey,
       }));
     }
   } catch {
@@ -384,6 +404,7 @@ async function searchByKeywordTerms(
       id: true,
       content: true,
       documentId: true,
+      scenarioKey: true,
     },
   });
 
@@ -397,6 +418,7 @@ async function searchByKeywordTerms(
         content: chunk.content,
         documentId: chunk.documentId,
         similarity: Math.min(0.15 + hits / Math.max(terms.length, 1), 1),
+        scenarioKey: chunk.scenarioKey,
       };
     })
     .sort((a, b) => b.similarity - a.similarity)

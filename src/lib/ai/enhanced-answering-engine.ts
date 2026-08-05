@@ -363,16 +363,29 @@ async function multiQuerySearch(
  */
 function selectContextChunks(
   chunks: HybridSearchResult[],
-  maxChunks: number = 5
+  maxChunks: number = 5,
+  openLookup: boolean = false
 ): HybridSearchResult[] {
   if (chunks.length === 0) return [];
 
   // RRF is a rank-fusion score, not an absolute relevance measurement. First
   // require real semantic support or a strong keyword match; otherwise "the
   // best five bad results" would still be sent to the synthesizer.
-  const eligible = chunks.filter(
-    (chunk) => chunk.semanticScore >= 0.4 || chunk.keywordScore >= 0.65
-  );
+  //
+  // Открытый поиск (сценарий не определён) не фильтрует чанки по теме вообще
+  // — ни на кого не похожая формулировка вопроса допускает любой документ. Для
+  // чанка с scenarioKey=null это вдвойне опасно: null означает не «применимо
+  // ко всему», а «для темы документа нет узла в дереве сценариев» (см. аудит
+  // .claude/audits/2026-08-05-moscow-oryol-bad-answer.md — узкий факт про
+  // партнёра в Орле выиграл top-1 в ответе про логистику в Минск только по
+  // случайному пересечению слов). Планка для такого чанка в открытом поиске
+  // выше обычной — не запрет (правило остаётся годным), а требование более
+  // сильного сигнала, прежде чем узкий факт попадёт в синтез без темы-щита.
+  const eligible = chunks.filter((chunk) => {
+    const passesNormalBar = chunk.semanticScore >= 0.4 || chunk.keywordScore >= 0.65;
+    if (!openLookup || chunk.scenarioKey !== null) return passesNormalBar;
+    return chunk.semanticScore >= 0.62 || chunk.keywordScore >= 0.85;
+  });
   if (eligible.length === 0) return [];
 
   // Find the "elbow" in similarity scores
@@ -992,7 +1005,7 @@ export async function answerQuestionEnhanced(
   }
 
   // Step 4: Select context chunks dynamically
-  const contextChunks = selectContextChunks(chunks, 5);
+  const contextChunks = selectContextChunks(chunks, 5, openKnowledgeLookup);
   console.log('[enhanced-answering] Step 4: Selected', contextChunks.length, 'context chunks');
 
   // Group context chunks by document for source attribution
@@ -1079,8 +1092,20 @@ export async function answerQuestionEnhanced(
       )
     );
     const keywordMatched = perTerm.flat();
+    // В открытом поиске (сценарий вопроса не определён) этот пул берёт топ по
+    // ОБЩЕЙ уверенности правила, безотносительно к самому вопросу — здесь и
+    // проходит утечка узкого факта без темы (см. аудит про Орёл/FPM). У
+    // keywordMatched выше уже есть реальная проверка: терм вопроса физически
+    // встречается в теле правила. Поэтому в открытом поиске правило без темы
+    // может попасть в кандидаты ТОЛЬКО через keywordMatched — не бесплатным
+    // топом по уверенности. У правил с назначенной темой это ограничение не
+    // действует: тема сама по себе уже сигнал релевантности.
     const byConfidence = await prisma.rule.findMany({
-      where: { status: 'ACTIVE', ...scenarioWhere, ...audienceWhere },
+      where: {
+        status: 'ACTIVE',
+        ...audienceWhere,
+        AND: [scenarioWhere, ...(openKnowledgeLookup ? [{ NOT: { scenarioKey: null } }] : [])],
+      },
       include: { document: { select: { title: true } } },
       take: 100,
       orderBy: { confidence: 'desc' },
@@ -1128,8 +1153,16 @@ export async function answerQuestionEnhanced(
         })
       )
     );
+    // Тот же принцип, что у byConfidence для правил чуть выше: в открытом
+    // поиске этот пул берёт топ по свежести без всякой связи с вопросом, и
+    // пара без темы могла пройти бесплатно. qaPerTerm выше уже требует
+    // реального совпадения терма в question/answer.
     const qaRecent = await prisma.qAPair.findMany({
-      where: { status: 'ACTIVE', ...scenarioWhere, ...audienceWhere },
+      where: {
+        status: 'ACTIVE',
+        ...audienceWhere,
+        AND: [scenarioWhere, ...(openKnowledgeLookup ? [{ NOT: { scenarioKey: null } }] : [])],
+      },
       take: 100,
       orderBy: { createdAt: 'desc' },
     });
