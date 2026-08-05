@@ -11,9 +11,19 @@ export interface ChatCompletionOptions {
   temperature?: number;
   maxTokens?: number;
   responseFormat?: 'text' | 'json_object';
+  /**
+   * Заставляет вызов идти к конкретному провайдеру, минуя глобальный
+   * AI_PROVIDER. Нужно там, где независимость провайдера — часть смысла
+   * вызова, а не оптимизация: LLM-judge, оценивающий выдачу экстрактора,
+   * на том же провайдере и той же модели разделяет с ним характер ошибок,
+   * то есть «независимый экзаменатор» только на словах.
+   * Fallback на второго провайдера при этом сохраняется — закрепление
+   * относится к выбору ПЕРВИЧНОГО провайдера, не к отказу от резерва.
+   */
+  provider?: Provider;
 }
 
-type Provider = 'anthropic' | 'openai';
+export type Provider = 'anthropic' | 'openai';
 
 const DEFAULT_ANTHROPIC_MODEL =
   process.env.ANTHROPIC_MODEL || 'claude-3-opus-20240229';
@@ -325,7 +335,7 @@ async function callOpenAI(options: ChatCompletionOptions, temperature: number): 
 export async function createChatCompletion(
   options: ChatCompletionOptions
 ): Promise<string> {
-  const provider = getProvider();
+  const provider = options.provider ?? getProvider();
   const temperature = options.temperature ?? DEFAULT_TEMPERATURE;
 
   // Try primary provider with retries
