@@ -617,6 +617,50 @@ model HallucinationLog {
   @@index([createdAt])
 }
 
+/// LLM call telemetry — every request/response through chat-provider.ts.
+///
+/// Schema-only baseline (Beads translation-uuy, Задача 0.3): this table
+/// already exists in prod (introduced by an unmerged instrumentation branch
+/// that wrote to it directly, ahead of this model landing in git). Adding
+/// the model here reconciles schema.prisma with real prod state — it does
+/// NOT wire up the writes. Retention/redaction policy for the PII this table
+/// can hold (system prompt, user message, raw response) is a separate,
+/// deliberately unblocked decision — see Задача 0.3b in
+/// docs/plans/2026-08-05-aurora-knowledge-engine-v2.md.
+model LlmCallLog {
+  id       String @id @default(cuid())
+  /// Метка вызывающего кода: какая именно функция дёрнула модель.
+  callSite String
+  provider String
+  model    String
+  /// Полный system prompt. Обрезается на 20000 символов с пометкой "...[truncated]" —
+  /// в прод-инцидентах system prompt редко превышает это, а неограниченный
+  /// текст рискует раздуть таблицу на аномальных запросах.
+  systemPrompt String @db.Text
+  /// Полный user-контент (вопрос + собранный контекст: чанки, правила, Q&A).
+  userMessage String @db.Text
+  /// Сырой ответ модели ДО normalizeJsonResponse / любого пост-парсинга.
+  /// `null`, если вызов упал до получения ответа.
+  rawResponse    String? @db.Text
+  temperature    Float?
+  maxTokens      Int?
+  responseFormat String?
+  streaming      Boolean @default(false)
+  latencyMs      Int?
+  /// Текст ошибки, если вызов (или все ретраи/фолбэк) завершился неудачей.
+  error     String? @db.Text
+  sessionId String?
+  /// Вопрос пользователя, вызвавший всю цепочку — общий якорь, чтобы собрать
+  /// все 5-9 записей одного ответа одним запросом.
+  question String? @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([callSite])
+  @@index([sessionId])
+}
+
 // ============================================
 // LIBRARIAN KNOWLEDGE MANAGEMENT SYSTEM
 // ============================================
