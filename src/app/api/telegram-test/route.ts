@@ -124,7 +124,7 @@ export async function POST(request: NextRequest) {
 
     const [similar] = await Promise.all([findSimilarOperatorAnswer(text)]);
 
-    let reply = `🧑‍💼 ОТВЕТ КЛИЕНТУ (${outcome.decision}${outcome.withheld ? ', подменён на удерживающий' : ''}):\n${outcome.outboundAnswer}`;
+    let reply = `💬 ОТВЕТ КЛИЕНТУ (${outcome.decision}${outcome.withheld ? ', подменён на удерживающий' : ''}):\n${outcome.outboundAnswer}`;
     if (outcome.withheld) {
       reply += `\n\n🔒 Черновик движка (клиент его не видит):\n${outcome.draftAnswer}`;
     }
