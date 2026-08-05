@@ -233,7 +233,12 @@ async function main(): Promise<void> {
     lines.push('');
   }
 
-  const out = 'docs/bot-audit/accuracy-vs-operator.md';
+  // Раньше путь вывода был зашит одной строкой независимо от входного отчёта —
+  // второй прогон на другой выборке молча затирал первый (воспроизведено
+  // 2026-08-05: 15-случайный прогон переписал 30-случайный без следа, спасло
+  // только то, что файл лежал в git). Явный третий аргумент — по умолчанию
+  // рядом со входным файлом, с суффиксом, а не общее фиксированное имя.
+  const out = process.argv[3] ?? REPORT.replace(/\.md$/, '-judged.md');
   writeFileSync(out, lines.join('\n'), 'utf8');
   console.log(`\nOK ${ok} · WEAK ${weak} · WRONG ${wrong}`);
   console.log(`Отчёт: ${out}`);
