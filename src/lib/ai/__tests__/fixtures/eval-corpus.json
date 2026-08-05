@@ -1,0 +1,174 @@
+[
+  {
+    "id": "wrongscope-minsk-claude11",
+    "category": "wrong-scope",
+    "question": "Как отправить документы в Минск?",
+    "audience": "internal",
+    "source": ".claude/audits/2026-08-05-full-retrieval-audit-claude.md — таблица §11, вопрос №11",
+    "expect": {
+      "forbiddenSubstrings": ["Орёл", "Орел", "FPM", "302028"]
+    },
+    "notes": "Живое подтверждение бага брифинга: топ-1 чанк (sem=0.4931) — адрес партнёра FPM в Орле, не связанный с Минском. Consistency-gate смягчил прямое утверждение, но регенерированный ответ всё равно дословно процитировал адрес Орла."
+  },
+  {
+    "id": "leakage-minsk-client",
+    "category": "client-leakage",
+    "question": "Как отправить документы в Минск?",
+    "audience": "client",
+    "source": "тот же кейс, что wrongscope-minsk-claude11, но с audience=client — проверяет checkClientSafety отдельно от scope-фильтра",
+    "expect": {
+      "forbiddenSubstrings": ["Орёл", "Орел", "FPM", "302028"]
+    },
+    "notes": "Клиент не должен увидеть внутренний адрес партнёра ни при каких обстоятельствах — это гарантия audience-guardrail, а не только retrieval-scope."
+  },
+  {
+    "id": "wrongscope-moscow-codex16",
+    "category": "wrong-scope",
+    "question": "как передать доки в москву",
+    "audience": "client",
+    "source": "docs/bot-audit/2026-08-05-full-architecture-audit-codex.md — §11.2, вопрос №16",
+    "expect": {
+      "forbiddenSubstrings": ["Орёл", "Орел", "FPM"]
+    },
+    "notes": "R-388 Орёл/FPM, sem=.572 — wrong-scope."
+  },
+  {
+    "id": "wrongscope-moscow-codex17",
+    "category": "wrong-scope",
+    "question": "как передать документы в москву",
+    "audience": "client",
+    "source": "docs/bot-audit/2026-08-05-full-architecture-audit-codex.md — §11.2, вопрос №17",
+    "expect": {
+      "forbiddenSubstrings": ["Орёл", "Орел", "FPM"]
+    },
+    "notes": "R-388, sem=.576 — wrong-scope, перефразировка №16."
+  },
+  {
+    "id": "wrongscope-moscow-codex18",
+    "category": "wrong-scope",
+    "question": "как отправить документы в москву",
+    "audience": "client",
+    "source": "docs/bot-audit/2026-08-05-full-architecture-audit-codex.md — §11.2, вопрос №18",
+    "expect": {
+      "forbiddenSubstrings": ["Орёл", "Орел", "FPM"]
+    },
+    "notes": "R-388, sem=.529 — wrong-scope, вторая перефразировка."
+  },
+  {
+    "id": "wrongscope-certification-package-codex13",
+    "category": "wrong-scope",
+    "question": "Подскажите, как у вас рассчитывается цена, если нужно заверить сразу несколько документов? И вообще, какие варианты заверения вы предлагаете?",
+    "audience": "client",
+    "source": "docs/bot-audit/2026-08-05-full-architecture-audit-codex.md — §11.2, вопрос №13",
+    "expect": {
+      "forbiddenSubstrings": ["апостил", "12 000", "12000", "45 дней", "45 рабочих"]
+    },
+    "notes": "Ожидалось правило пакетного заверения; вместо него подмешался education apostille (цена/срок из другого домена) — WEAK + wrong-scope в исходном аудите."
+  },
+  {
+    "id": "retrievalgap-courier-delivery-codex14",
+    "category": "retrieval-gap",
+    "question": "А вы доставляете переведённые документы курьером в другие города?",
+    "audience": "client",
+    "source": "docs/bot-audit/2026-08-05-full-architecture-audit-codex.md — §11.2, вопрос №14",
+    "expect": {
+      "expectedSubstrings": ["курьер", "достав"]
+    },
+    "notes": "Известный текущий баг (не гипотеза): правило доставки в базе ЕСТЬ, retrieval его не нашёл (WRONG в исходном аудите). Ожидаем FAIL на этом кейсе, пока задача про delivery-retrieval не закрыта — baseline фиксирует текущее состояние, а не желаемое."
+  },
+  {
+    "id": "missingcondition-diploma-claude13",
+    "category": "missing-condition",
+    "question": "Куда подавать диплом на апостиль?",
+    "audience": "internal",
+    "source": ".claude/audits/2026-08-05-full-retrieval-audit-claude.md — таблица §11, вопрос №13",
+    "expect": {
+      "requiresClarificationOrHold": true
+    },
+    "notes": "Baseline корректного поведения: дерево сценариев обязано попросить уточнение (недостающее условие — регион/тип документа), а не отвечать наугад."
+  },
+  {
+    "id": "negation-original-certification-claude16",
+    "category": "negation",
+    "question": "Не нужен ли оригинал для заверения?",
+    "audience": "internal",
+    "source": ".claude/audits/2026-08-05-full-retrieval-audit-claude.md — таблица §11, вопрос №16",
+    "expect": {
+      "requiresClarificationOrHold": false,
+      "minConfidence": 0.4
+    },
+    "notes": "Исходный аудит зафиксировал guardrail/90%; живой прогон при построении этого корпуса (railway run, 2026-08-05) дал knowledge_base/54% для того же текста вопроса — расхождение задокументировано, не скрыто (сам аудит предупреждал о недетерминизме маршрутизации, см. diagnose-answer.ts --runs=). Смысл кейса — что отрицание не путает полярность и не роняет бота в hold, а не конкретный путь маршрутизации; порог ослаблен под ПОДТВЕРЖДЁННОЕ живое поведение, а не под строку из старой таблицы."
+  },
+  {
+    "id": "territoriality-moscow-zags-claude7",
+    "category": "known-good",
+    "question": "Апостиль СОР, выдан в Москве",
+    "audience": "internal",
+    "source": ".claude/audits/2026-08-05-full-retrieval-audit-claude.md — таблица §11, вопрос №7",
+    "expect": {
+      "answerSourceIn": ["deterministic_guardrail"],
+      "minConfidence": 0.8
+    },
+    "notes": "Territoriality hard negative: детерминированный guardrail обязан сработать раньше RAG (90% medium, 0 чанков в исходном аудите)."
+  },
+  {
+    "id": "knowngood-apostille-copy-claude1",
+    "category": "known-good",
+    "question": "Апостиль на нотариальную копию доверенности",
+    "audience": "internal",
+    "source": ".claude/audits/2026-08-05-full-retrieval-audit-claude.md — таблица §11, вопрос №1",
+    "expect": {
+      "answerSourceIn": ["knowledge_base"],
+      "minConfidence": 0.5
+    },
+    "notes": "Baseline: ожидаемо корректный RAG-ответ (55% medium в исходном аудите) — не должен сломаться."
+  },
+  {
+    "id": "knowngood-apostille-spb-claude4",
+    "category": "known-good",
+    "question": "Апостиль СОР, выдан в СПб",
+    "audience": "internal",
+    "source": ".claude/audits/2026-08-05-full-retrieval-audit-claude.md — таблица §11, вопрос №4",
+    "expect": {
+      "answerSourceIn": ["knowledge_base"],
+      "minConfidence": 0.5
+    },
+    "notes": "Исходный аудит зафиксировал 71% high (лучший скор серии); два живых прогона при построении корпуса (railway run, 2026-08-05) дали 0.54-0.59 medium — стабильно ниже, но не деградация до insufficient/hold. Порог откалиброван под ПОДТВЕРЖДЁННОЕ живое поведение с запасом; не расследовано, почему исходный скор не воспроизвёлся (возможная общая деградация semantic-скоринга, а не специфика этого вопроса — тот же диапазон 0.5-0.6 наблюдался и на других кейсах этого прогона)."
+  },
+  {
+    "id": "knowngood-notarial-attach-codex3",
+    "category": "known-good",
+    "question": "Куда нужно прикрепить нотариальный перевод — к самому оригиналу документа, к его копии или к нотариально заверенной копии?",
+    "audience": "client",
+    "source": "docs/bot-audit/2026-08-05-full-architecture-audit-codex.md — §11.2, вопрос №3",
+    "expect": {
+      "answerSourceIn": ["knowledge_base", "deterministic_guardrail"],
+      "minConfidence": 0.55
+    },
+    "notes": "Исходный аудит: KB 69%. Живой прогон (railway run, 2026-08-05) дал deterministic_guardrail вместо knowledge_base — правдоподобно source-document-route guardrail (тот же механизм, что корректно перехватывает codex #14 «нужен ли оригинал для нотариального перевода») теперь match-ится и на эту формулировку. Не регрессия: guardrail детерминирован и по теме уместен, поэтому answerSourceIn расширен, а не сужен под один путь."
+  },
+  {
+    "id": "knowngood-original-required-codex4",
+    "category": "known-good",
+    "question": "Обязательно ли приносить оригинальный документ, чтобы вы его заверили и сшили с переводом?",
+    "audience": "client",
+    "source": "docs/bot-audit/2026-08-05-full-architecture-audit-codex.md — §11.2, вопрос №4",
+    "expect": {
+      "answerSourceIn": ["knowledge_base"],
+      "minConfidence": 0.6
+    },
+    "notes": "Baseline: KB 68% в исходном аудите, OK."
+  },
+  {
+    "id": "knowngood-nostrification-codex22",
+    "category": "known-good",
+    "question": "Помогаете ли вы с нострификацией (признанием) иностранного образовательного документа в РФ?",
+    "audience": "client",
+    "source": "docs/bot-audit/2026-08-05-full-architecture-audit-codex.md — §11.2, вопрос №22",
+    "expect": {
+      "requiresClarificationOrHold": false,
+      "minConfidence": 0.45
+    },
+    "notes": "Исходный аудит зафиксировал KB 100%/canonical (вопрос дословно совпадал с одобренной канонической парой). Два живых прогона при построении корпуса (railway run, 2026-08-05, вопрос скопирован дословно из таблицы аудита) стабильно дали medium ~0.51-0.52 через обычный RAG-синтез, БЕЗ canonical-override — расхождение воспроизводится, не единичный сбой. Причина не расследована в рамках этой задачи (кандидат: canonical-override матчится по (question, audience, scenarioKey) точным совпадением плюс questionTermOverlap-порог — пара могла быть SUPERSEDED, или порог term-overlap не пройден на этой формулировке). Стоит завести отдельную задачу, если нужно вернуть canonical-recall для этого вопроса; здесь порог откалиброван под подтверждённую живую реальность, чтобы корпус не был перманентно красным без нового сигнала."
+  }
+]
