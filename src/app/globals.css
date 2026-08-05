@@ -1,4 +1,16 @@
-@import "tailwindcss";
+/*
+ * source(none) отключает автосканирование всего src/ Tailwind'ом v4 по
+ * умолчанию. Без этого сканер обходит и чисто бэкендовые файлы (Telegram-бот,
+ * движок ответов), где классов Tailwind нет и не будет — но есть эмодзи в
+ * тексте сообщений пользователю. Составные эмодзи (ZWJ, variation selector
+ * U+FE0F) кладут сканер тайлвинда 4.1.18 с RangeError: Invalid code point —
+ * баг в его регулярке, не в содержимом файлов. Явные @source ниже сужают
+ * обход туда, где классы физически бывают.
+ */
+@import "tailwindcss" source(none);
+@source "./";
+@source "../components";
+@source "../hooks";
 @import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
