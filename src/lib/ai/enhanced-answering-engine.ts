@@ -879,28 +879,31 @@ export async function answerQuestionEnhanced(
     return buildClarificationResult(question, scenarioDecision);
   }
 
-  // out_of_scope handling. The classifier marks a question out_of_scope when
-  // it doesn't map to a concrete apostille scenario — but the scenario tree
-  // only covers apostille (ЗАГС/нотариалка/опека). Lots of legitimate bureau
-  // questions (education apostille, criminal-record certs, prices, translation)
-  // land here even though the KB DOES hold the answer. So:
-  //   1) deterministic region guardrail still wins (Moscow↔СПб);
-  //   2) if the question is about a bureau topic at all → reclassify to an
-  //      OPEN knowledge lookup over the whole KB (general_ai stays a last
-  //      resort, only if open retrieval finds nothing — handled downstream);
-  //   3) only genuinely off-topic questions (no bureau keyword: weather,
-  //      crypto, …) get the honest "no data" short-circuit, never general_ai.
+  // out_of_scope handling. Дерево сценариев покрывает только апостиль, поэтому
+  // сюда попадает масса законных вопросов, ответ на которые в базе ЕСТЬ:
+  // образование, несудимость, цены, перевод, порядок оформления заказа.
+  //
+  // Раньше здесь стоял список ключевых слов: вопрос без слова «апостиль»,
+  // «перевод», «документ» и т.п. отказывался ДО поиска. Это отсекало базу от
+  // вопросов, заданных обычным языком: «как оформить заказ онлайн?», «что
+  // делать при обнаружении ошибки?» — в них нет ни одного слова из списка,
+  // и поиск по 1535 активным правилам не запускался вовсе. Проверено на проде
+  // 2026-08-05: все 8 последних вопросов пользователей получили confidence 0
+  // и захардкоженный отказ, ни один не дошёл до retrieval.
+  //
+  // Отказ должен быть ЗАРАБОТАН поиском, а не предположён по словарю: ищем
+  // всегда, а «нет данных» выдаём ниже по потоку, когда retrieval действительно
+  // ничего не нашёл. Вопросы вне области («сколько стоит биткоин») получают тот
+  // же честный отказ — просто после того, как мы посмотрели, а не вместо этого:
+  // shouldUseGeneralKnowledgeFallback не пустит их в general_ai, а синтез при
+  // confidenceLevel='insufficient' отвечает «в базе знаний нет данных».
   if (scenarioDecision.kind === 'out_of_scope') {
     // Таблица уже спрошена выше и промолчала — повторять нечего.
-    if (!isBureauTopic(question)) {
-      return buildOutOfScopeResult(question, scenarioDecision);
-    }
-
-    console.log('[enhanced-answering] out_of_scope but bureau topic → open knowledge lookup');
+    console.log('[enhanced-answering] out_of_scope → open knowledge lookup');
     scenarioDecision = {
       kind: 'knowledge_lookup',
       label: 'Открытый поиск по базе знаний',
-      reasoning: `out_of_scope reclassified to open lookup (bureau topic): ${scenarioDecision.reasoning}`,
+      reasoning: `out_of_scope reclassified to open lookup: ${scenarioDecision.reasoning}`,
     };
   }
 
@@ -2203,35 +2206,12 @@ function buildInternalGuardrailResult(question: string): EnhancedAnswerResult | 
   };
 }
 
-// Does the question concern a service/document the bureau actually deals with?
-// Used to decide whether an out_of_scope verdict should fall through to an
-// OPEN knowledge-base lookup (bureau topic) or be honestly refused (off-topic).
+// Пускать ли вопрос в general_ai — ответ БЕЗ опоры на базу знаний.
 //
-// IMPORTANT: the trigger is a SERVICE or DOCUMENT word — NOT a generic
-// price/time word. "сколько стоит биткоин" must stay off-topic, so "стоит"
-// alone must never qualify; it only counts when paired with a service below.
-//
-// Domain owner: extend this list as the bureau's services grow. Each entry is
-// a stem. /iu flags are used so uppercase ВНЖ/РВП/etc. match without calling
-// toLowerCase(), which silently corrupts Cyrillic on some Alpine/Node environments.
-const BUREAU_TOPIC_PATTERN_CI = new RegExp(
-  'апостил|легализац|нотари|загс|кзагс|минюст|' +
-  'мвд|мю|' +  // мвд | мю  (Unicode escapes — immune to source encoding)
-  'перевод|доверенност|свидетельств|справк|диплом|аттестат|образован|судим|паспорт|' +
-  'истреб|консульск|заверен|печат|штамп|загранпаспорт|гражданств|виз|опек|документ|' +
-  'миграц|' +
-  'внж|' +                    // внж  (ВНЖ lowercase)
-  'вид[уаео]? на жительств|' + // вид[уаео]? на жительств
-  'рвп|' +                    // рвп  (РВП lowercase)
-  'вид на временн|' + // вид на временн
-  'содействи',                       // содействи
-  'iu'
-);
-
-function isBureauTopic(question: string): boolean {
-  return BUREAU_TOPIC_PATTERN_CI.test(question);
-}
-
+// Здесь словарь услуг уместен, в отличие от снятого гейта на входе в поиск:
+// это не «пускать ли к базе», а «разрешено ли отвечать по общим знаниям модели,
+// когда база промолчала». Для вопроса вне области ответа быть не должно вовсе,
+// поэтому отсутствие услуги в вопросе — законное основание не отвечать.
 function shouldUseGeneralKnowledgeFallback(question: string): boolean {
   // /iu flags on original question — same reason as buildDeterministicGuardrailResult.
   const mentionsKnownService =
@@ -2596,24 +2576,3 @@ function buildClarificationResult(
   };
 }
 
-function buildOutOfScopeResult(
-  question: string,
-  decision: Extract<ScenarioDecision, { kind: 'out_of_scope' }>
-): EnhancedAnswerResult {
-  return {
-    answer:
-      'В базе знаний нет данных по этому вопросу. Уточните, пожалуйста, о какой услуге идёт речь — апостиль, перевод, нотариальное заверение?',
-    confidence: 0,
-    confidenceLevel: 'insufficient',
-    needsClarification: true,
-    suggestedClarification: decision.reasoning,
-    citations: [],
-    domainsUsed: [],
-    queryAnalysis: {
-      originalQuery: question,
-      expandedQueries: [],
-      extractedEntities: { dates: [], prices: [], documentTypes: [], services: [] },
-      isAmbiguous: false,
-    },
-  };
-}
