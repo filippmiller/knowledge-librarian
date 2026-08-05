@@ -2,19 +2,45 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ master ]
   pull_request:
-    branches: [ main ]
+    branches: [ master ]
+
+env:
+  # Dummy but well-formed connection string. `prisma generate`/`validate` and
+  # PrismaClient module-load need DATABASE_URL to *resolve*, not to connect —
+  # no real database is contacted by any step in this workflow.
+  DATABASE_URL: "postgresql://ci:ci@localhost:5432/ci"
+  ENCRYPTION_KEY: "ci-only-placeholder-key-not-used-in-prod-32b"
+  SESSION_SECRET: "ci-only-placeholder-session-secret-32-bytes"
 
 jobs:
-  lint:
+  ci:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Install pnpm
+        run: npm install -g pnpm@9.14.4
+
       - name: Install dependencies
-        run: npm install -g pnpm && pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Prisma validate
+        run: pnpm exec prisma validate
+
       - name: Lint
-        run: pnpm lint || echo "Linting completed with warnings"
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
