@@ -1073,3 +1073,56 @@ model HeldAnswer {
   @@index([createdAt])
   @@index([verdict])
 }
+
+/// Полная трасса каждого вызова к LLM (Anthropic/OpenAI) — что ушло в модель
+/// и что она вернула сырым текстом, до JSON-парсинга и пост-обработки.
+///
+/// НЕДОСТАЮЩИЙ КОНТУР. За один ответ пользователю движок делает 5-9 вызовов
+/// модели (классификация сценария, расширение запроса, извлечение сущностей,
+/// синтез ответа, ревизия галлюцинаций, general_ai фолбэк...). Когда бот
+/// выдаёт необъяснимый плохой ответ (пример: на вопрос "как передать доки в
+/// москву" — ответ про офис партнёра в Орле), раньше не было способа
+/// посмотреть, что именно ушло в system prompt и что модель вернула сырым
+/// текстом. Диагностический скрипт (scripts/diagnose-answer.ts) показывает
+/// это только "на лету", не даёт ретроспективно разобрать прод-инцидент.
+///
+/// `callSite` — обязательная метка вызывающего кода (например
+/// "enhanced-answering:synthesis", "scenario-classifier",
+/// "query-expansion:expandQuery") — без неё десяток записей на один вопрос
+/// нечитаемы.
+///
+/// Пишется fire-and-forget той же дисциплиной, что и HeldAnswer: наблюдение
+/// не имеет права сломать ответ собеседнику.
+model LlmCallLog {
+  id       String @id @default(cuid())
+  /// Метка вызывающего кода: какая именно функция дёрнула модель.
+  callSite String
+  provider String
+  model    String
+  /// Полный system prompt. Обрезается на 20000 символов с пометкой "...[truncated]" —
+  /// в прод-инцидентах system prompt редко превышает это, а неограниченный
+  /// текст рискует раздуть таблицу на аномальных запросах.
+  systemPrompt String @db.Text
+  /// Полный user-контент (вопрос + собранный контекст: чанки, правила, Q&A).
+  userMessage String @db.Text
+  /// Сырой ответ модели ДО normalizeJsonResponse / любого пост-парсинга.
+  /// `null`, если вызов упал до получения ответа.
+  rawResponse String? @db.Text
+  temperature Float?
+  maxTokens   Int?
+  responseFormat String?
+  streaming      Boolean @default(false)
+  latencyMs      Int?
+  /// Текст ошибки, если вызов (или все ретраи/фолбэк) завершился неудачей.
+  error     String?  @db.Text
+  sessionId String?
+  /// Вопрос пользователя, вызвавший всю цепочку — общий якорь, чтобы собрать
+  /// все 5-9 записей одного ответа одним запросом.
+  question  String?  @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([callSite])
+  @@index([sessionId])
+}

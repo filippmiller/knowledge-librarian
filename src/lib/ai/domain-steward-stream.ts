@@ -137,6 +137,7 @@ ${documentText.slice(0, 8000)}
   ];
 
   const stream = streamChatCompletionTokens({
+    callSite: 'domain-steward-stream:suggest',
     messages,
     temperature: 0.3,
     responseFormat: 'json_object',

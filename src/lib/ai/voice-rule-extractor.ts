@@ -82,6 +82,7 @@ export async function extractVoiceRules(
   }
 
   const raw = await createChatCompletion({
+    callSite: 'voice-rule-extractor:extract',
     messages: [
       { role: 'system', content: VOICE_RULE_PROMPT },
       {

@@ -86,6 +86,7 @@ export async function extractKnowledge(
     const batch = batches[i];
 
     const content = await createChatCompletion({
+      callSite: 'knowledge-extractor:extractBatch',
       messages: [
         { role: 'system', content: EXTRACTION_SYSTEM_PROMPT },
         {

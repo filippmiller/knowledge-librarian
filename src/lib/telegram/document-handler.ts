@@ -170,6 +170,7 @@ async function classifyDomains(rawText: string, documentId: string): Promise<str
     .join('\n');
 
   const response = await createChatCompletion({
+    callSite: 'document-handler:classifyDomains',
     messages: [
       {
         role: 'system',
@@ -255,6 +256,7 @@ async function extractKnowledge(
     : 1;
 
   const response = await createChatCompletion({
+    callSite: 'document-handler:extractKnowledge',
     messages: [
       {
         role: 'system',

@@ -89,6 +89,8 @@ ${taxonomySummary()}
   let raw: string | undefined;
   try {
     raw = (await createChatCompletion({
+      callSite: 'scenario-classifier:classify',
+      question,
       messages: [
         { role: 'system', content: CLASSIFIER_PROMPT },
         { role: 'user', content: userPrompt },

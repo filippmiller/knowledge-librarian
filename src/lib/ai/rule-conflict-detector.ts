@@ -177,6 +177,7 @@ async function analyzeRuleConflict(
 }> {
   try {
     const content = await createChatCompletion({
+      callSite: 'rule-conflict-detector:detect',
       messages: [
         { role: 'system', content: CONFLICT_DETECTION_PROMPT },
         {
