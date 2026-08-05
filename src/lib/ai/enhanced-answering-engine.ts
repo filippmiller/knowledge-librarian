@@ -52,6 +52,20 @@ const CONFIDENCE_THRESHOLD_HIGH = 0.7;    // Answer confidently
 const CONFIDENCE_THRESHOLD_MEDIUM = 0.5;  // Answer with caveat
 const CONFIDENCE_THRESHOLD_LOW = 0.3;     // Ask for clarification
 
+// Feature flag (Beads translation-2yt): scenarioKey=null means "no leaf in
+// the scenario taxonomy for this content's topic", NOT "applies to
+// everything" — PR #53 already enforces the stricter null-content bar in
+// the open-lookup branch (scenario unrecognized). This flag extends the
+// SAME policy to the known-scenario branch too, which the open-lookup-only
+// fix left wide open (Grok finding during plan review).
+//
+// Off by default: ~79% Rule / ~90% DocChunk currently have scenarioKey=null
+// (2026-08-05 audit), so flipping this on for the known-scenario branch too
+// is a real hold-rate risk, not just a bug fix. Dry-run against the golden
+// corpus (scripts/run-eval-corpus.ts) before enabling in prod — see that
+// script's hold-rate in its aggregate output.
+const SCOPE_NULL_STRICT = process.env.SCOPE_NULL_STRICT === 'true';
+
 export interface EnhancedAnswerResult {
   answer: string;
   confidence: number;
@@ -341,15 +355,29 @@ async function multiQuerySearch(
     queries.map(q => hybridSearch(q, domainSlugs, limit, 0.7, scenarioAncestors, audience))
   );
 
-  // Merge and deduplicate results using max score
+  // Merge and deduplicate, keeping the STRONGEST signal seen for each chunk
+  // across query variants — not just whichever variant had the best
+  // combinedScore. combinedScore is an RRF rank-fusion score: a chunk found
+  // by one variant with the best RANK can still carry a lower raw
+  // semanticScore/keywordScore than the SAME chunk found by another variant
+  // with a worse rank (Codex review on PR #53). selectContextChunks' null-
+  // scenario eligibility bar reads semantic/keyword scores directly, so
+  // keeping only the best-combinedScore duplicate could wrongly discard a
+  // chunk that actually clears that bar via a different variant.
   const mergedResults = new Map<string, HybridSearchResult>();
 
   for (const results of allResults) {
     for (const result of results) {
       const existing = mergedResults.get(result.id);
-      if (!existing || result.combinedScore > existing.combinedScore) {
+      if (!existing) {
         mergedResults.set(result.id, result);
+        continue;
       }
+      mergedResults.set(result.id, {
+        ...(result.combinedScore > existing.combinedScore ? result : existing),
+        semanticScore: Math.max(existing.semanticScore, result.semanticScore),
+        keywordScore: Math.max(existing.keywordScore, result.keywordScore),
+      });
     }
   }
 
@@ -363,16 +391,36 @@ async function multiQuerySearch(
  */
 function selectContextChunks(
   chunks: HybridSearchResult[],
-  maxChunks: number = 5
+  maxChunks: number = 5,
+  openLookup: boolean = false
 ): HybridSearchResult[] {
   if (chunks.length === 0) return [];
 
   // RRF is a rank-fusion score, not an absolute relevance measurement. First
   // require real semantic support or a strong keyword match; otherwise "the
   // best five bad results" would still be sent to the synthesizer.
-  const eligible = chunks.filter(
-    (chunk) => chunk.semanticScore >= 0.4 || chunk.keywordScore >= 0.65
-  );
+  //
+  // Открытый поиск (сценарий не определён) не фильтрует чанки по теме вообще
+  // — ни на кого не похожая формулировка вопроса допускает любой документ. Для
+  // чанка с scenarioKey=null это вдвойне опасно: null означает не «применимо
+  // ко всему», а «для темы документа нет узла в дереве сценариев» (см. аудит
+  // .claude/audits/2026-08-05-moscow-oryol-bad-answer.md — узкий факт про
+  // партнёра в Орле выиграл top-1 в ответе про логистику в Минск только по
+  // случайному пересечению слов). Планка для такого чанка в открытом поиске
+  // выше обычной — не запрет (правило остаётся годным), а требование более
+  // сильного сигнала, прежде чем узкий факт попадёт в синтез без темы-щита.
+  //
+  // SCOPE_NULL_STRICT (Beads translation-2yt) extends the SAME higher bar to
+  // the known-scenario branch too — a recognized scenario doesn't make a
+  // scenarioKey=null chunk any more "about" that scenario, it just means the
+  // question was easier to classify. Off by default: see the flag's own
+  // comment near the top of this file for the hold-rate risk.
+  const eligible = chunks.filter((chunk) => {
+    const passesNormalBar = chunk.semanticScore >= 0.4 || chunk.keywordScore >= 0.65;
+    const needsHigherBar = chunk.scenarioKey === null && (openLookup || SCOPE_NULL_STRICT);
+    if (!needsHigherBar) return passesNormalBar;
+    return chunk.semanticScore >= 0.62 || chunk.keywordScore >= 0.85;
+  });
   if (eligible.length === 0) return [];
 
   // Find the "elbow" in similarity scores
@@ -671,6 +719,16 @@ async function findCanonicalQaOverride(
   question: string,
   audience: Audience
 ): Promise<QAPair | null> {
+  // Beads translation-2yt (Grok/Codex, ревью плана): fuzzy term-overlap не
+  // доказывает применимость пары к ЭТОМУ вопросу — но и точное совпадение
+  // текста тоже не доказывает, пара могла быть про другой город/услугу со
+  // случайно тем же текстом. Подмена ответа целиком с confidence=1.0 и
+  // requiresHumanReview=false остаётся только там, где оператор увидит хит и
+  // может поймать ложное совпадение — audience=internal. Для клиента этот
+  // быстрый путь отключён полностью; вопрос идёт через обычный синтез со
+  // всеми его проверками (checkClientSafety, claim grounding, price
+  // attribution).
+  if (audience !== 'internal') return null;
   try {
     // Выборка по authority-маркеру, а не по свежести. Раньше брались 200
     // последних активных пар: после импорта корпуса старые утверждённые эталоны
@@ -992,7 +1050,7 @@ export async function answerQuestionEnhanced(
   }
 
   // Step 4: Select context chunks dynamically
-  const contextChunks = selectContextChunks(chunks, 5);
+  const contextChunks = selectContextChunks(chunks, 5, openKnowledgeLookup);
   console.log('[enhanced-answering] Step 4: Selected', contextChunks.length, 'context chunks');
 
   // Group context chunks by document for source attribution
@@ -1079,8 +1137,25 @@ export async function answerQuestionEnhanced(
       )
     );
     const keywordMatched = perTerm.flat();
+    // Этот пул берёт топ по ОБЩЕЙ уверенности правила, безотносительно к
+    // самому вопросу — здесь и проходит утечка узкого факта без темы (см.
+    // аудит про Орёл/FPM). У keywordMatched выше уже есть реальная проверка:
+    // терм вопроса физически встречается в теле правила. Поэтому правило без
+    // темы может попасть в кандидаты ТОЛЬКО через keywordMatched — не
+    // бесплатным топом по уверенности. У правил с назначенной темой это
+    // ограничение не действует: тема сама по себе уже сигнал релевантности.
+    //
+    // В открытом поиске (scenario не определён) это уже безусловно так —
+    // PR #53. SCOPE_NULL_STRICT (translation-2yt) добавляет то же самое и в
+    // ветку с распознанным сценарием: известный сценарий не делает
+    // scenarioKey=null правило более «про этот сценарий», он лишь означает,
+    // что вопрос было легче классифицировать.
     const byConfidence = await prisma.rule.findMany({
-      where: { status: 'ACTIVE', ...scenarioWhere, ...audienceWhere },
+      where: {
+        status: 'ACTIVE',
+        ...audienceWhere,
+        AND: [scenarioWhere, ...((openKnowledgeLookup || SCOPE_NULL_STRICT) ? [{ NOT: { scenarioKey: null } }] : [])],
+      },
       include: { document: { select: { title: true } } },
       take: 100,
       orderBy: { confidence: 'desc' },
@@ -1128,8 +1203,17 @@ export async function answerQuestionEnhanced(
         })
       )
     );
+    // Тот же принцип, что у byConfidence для правил чуть выше (см. этот
+    // комментарий и SCOPE_NULL_STRICT там же): этот пул берёт топ по
+    // свежести без всякой связи с вопросом, и пара без темы могла пройти
+    // бесплатно. qaPerTerm выше уже требует реального совпадения терма в
+    // question/answer.
     const qaRecent = await prisma.qAPair.findMany({
-      where: { status: 'ACTIVE', ...scenarioWhere, ...audienceWhere },
+      where: {
+        status: 'ACTIVE',
+        ...audienceWhere,
+        AND: [scenarioWhere, ...((openKnowledgeLookup || SCOPE_NULL_STRICT) ? [{ NOT: { scenarioKey: null } }] : [])],
+      },
       take: 100,
       orderBy: { createdAt: 'desc' },
     });
@@ -1508,6 +1592,17 @@ ${fixList}
     );
   }
 
+  // Под SCOPE_NULL_STRICT confidence-top пулы (byConfidence/qaRecent/чанки
+  // выше нормального порога) уже не пропускают scenarioKey=null бесплатно —
+  // такой контент попадает в финальный ответ ТОЛЬКО через keyword-match пул
+  // (реальное вхождение терма вопроса в тело). Раз он всё же прошёл — тема
+  // не подтверждена, только keyword; оператор должен это увидеть.
+  const unscopedContentInAnswer =
+    SCOPE_NULL_STRICT &&
+    (rules.some((r) => r.scenarioKey === null) ||
+      qaPairs.some((qa) => qa.scenarioKey === null) ||
+      contextChunks.some((c) => c.scenarioKey === null));
+
   // Причины собираются ЗДЕСЬ ЖЕ, из тех же выражений, а не отдельной функцией:
   // объяснение, посчитанное второй раз, разойдётся с решением, которое оно
   // объясняет. Ровно так у песочницы появилась вторая копия политики отправки.
@@ -1535,6 +1630,14 @@ ${fixList}
         ? {
             reason: 'unsupported_claims',
             detail: consistency.unsupported.map((c) => `«${c.claim}»`).join('; '),
+          }
+        : null,
+    unscoped_content: () =>
+      unscopedContentInAnswer
+        ? {
+            reason: 'unscoped_content',
+            detail:
+              'ответ опирается на правило/QA/чанк без узла в дереве сценариев (scenarioKey=null), допущенный только через keyword-совпадение',
           }
         : null,
     knowledge_gap_phrase: () =>

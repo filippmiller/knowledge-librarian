@@ -15,14 +15,23 @@
 /**
  * Контроли, взводящие `requiresHumanReview`. Порядок — как в движке.
  *
- * Восемь, а не семь: восьмой (`stale_price`) добавлен 2026-07-31 вместе с
- * подключением тарифной сетки к пути ответа.
+ * Девять, а не восемь: девятый (`unscoped_content`) добавлен 2026-08-05
+ * вместе с флагом SCOPE_NULL_STRICT (Beads translation-2yt) — восьмой
+ * (`stale_price`) добавлен 2026-07-31 вместе с подключением тарифной сетки
+ * к пути ответа.
  */
 export type HumanReviewReason =
   /** Проверка утверждений не завершилась — сбой модели, а не вердикт. */
   | 'consistency_failed'
   /** В ответе есть утверждение, которого нет в источниках. */
   | 'unsupported_claims'
+  /**
+   * Ответ опирается на правило/QA/чанк без узла в дереве сценариев
+   * (scenarioKey=null), пропущенное только благодаря реальному совпадению
+   * терма в тексте (keyword-match пул) — сценарий не подтверждает
+   * применимость, только keyword. Взводится только при SCOPE_NULL_STRICT.
+   */
+  | 'unscoped_content'
   /** Бот сам написал, что данных нет. */
   | 'knowledge_gap_phrase'
   /** «Мы делаем X» без прямого подтверждения именно этой возможности. */
@@ -47,6 +56,7 @@ export type HumanReviewReason =
 export const HUMAN_REVIEW_ORDER: HumanReviewReason[] = [
   'consistency_failed',
   'unsupported_claims',
+  'unscoped_content',
   'knowledge_gap_phrase',
   'composite_capability_risk',
   'client_safety',
@@ -58,6 +68,7 @@ export const HUMAN_REVIEW_ORDER: HumanReviewReason[] = [
 export const HUMAN_REVIEW_LABELS: Record<HumanReviewReason, string> = {
   consistency_failed: 'Проверка утверждений не завершилась',
   unsupported_claims: 'Утверждения не подтверждены источниками',
+  unscoped_content: 'Использован контент без темы в дереве сценариев',
   knowledge_gap_phrase: 'Бот сам сообщил, что данных нет',
   composite_capability_risk: '«Мы делаем» без подтверждения возможности',
   client_safety: 'Клиенту утекли внутренние сведения',
