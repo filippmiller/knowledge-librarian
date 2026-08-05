@@ -1,4 +1,5 @@
 import { openai, CHAT_MODEL as OPENAI_DEFAULT_MODEL } from '@/lib/openai';
+import prisma from '@/lib/db';
 
 export type ChatMessage = {
   role: 'system' | 'user' | 'assistant';
@@ -11,6 +12,87 @@ export interface ChatCompletionOptions {
   temperature?: number;
   maxTokens?: number;
   responseFormat?: 'text' | 'json_object';
+  /**
+   * Метка вызывающего кода — какая именно функция движка дёрнула модель
+   * (например "enhanced-answering:synthesis", "scenario-classifier",
+   * "query-expansion:expandQuery"). Обязательна по соглашению (см.
+   * CLAUDE.md задачу про LlmCallLog): за один ответ пользователю движок
+   * делает 5-9 вызовов, и без метки лог одного вопроса нечитаем.
+   * Технически опциональна (default 'unknown'), чтобы забытая метка не
+   * ломала сборку и не роняла прод-запрос — но новый код обязан её передавать.
+   */
+  callSite?: string;
+  /** Опциональный якорь для группировки всех вызовов одного диалога/ответа. */
+  sessionId?: string | null;
+  /** Исходный вопрос пользователя — общий якорь для сборки цепочки вызовов. */
+  question?: string | null;
+}
+
+/** Prisma-поле systemPrompt/userMessage — обрезка ради защиты таблицы от аномальных запросов. */
+const MAX_LOGGED_TEXT = 20000;
+
+function truncateForLog(text: string): string {
+  if (text.length <= MAX_LOGGED_TEXT) return text;
+  return `${text.slice(0, MAX_LOGGED_TEXT)}\n...[truncated ${text.length - MAX_LOGGED_TEXT} chars]`;
+}
+
+interface LlmCallLogParams {
+  callSite: string;
+  provider: Provider;
+  model: string;
+  systemPrompt: string;
+  userMessage: string;
+  rawResponse: string | null;
+  temperature?: number;
+  maxTokens?: number;
+  responseFormat?: string;
+  streaming?: boolean;
+  latencyMs?: number;
+  error?: string | null;
+  sessionId?: string | null;
+  question?: string | null;
+}
+
+/**
+ * Записать вызов модели в LlmCallLog. Fire-and-forget той же дисциплиной,
+ * что recordHeldAnswer в src/lib/ai/held-answers.ts: наблюдение не имеет
+ * права сломать ответ пользователю ни задержкой, ни исключением.
+ */
+function logLlmCall(params: LlmCallLogParams): void {
+  void prisma.llmCallLog
+    .create({
+      data: {
+        callSite: params.callSite,
+        provider: params.provider,
+        model: params.model,
+        systemPrompt: truncateForLog(params.systemPrompt),
+        userMessage: truncateForLog(params.userMessage),
+        rawResponse: params.rawResponse !== null ? truncateForLog(params.rawResponse) : null,
+        temperature: params.temperature ?? null,
+        maxTokens: params.maxTokens ?? null,
+        responseFormat: params.responseFormat ?? null,
+        streaming: params.streaming ?? false,
+        latencyMs: params.latencyMs ?? null,
+        error: params.error ?? null,
+        sessionId: params.sessionId ?? null,
+        question: params.question ?? null,
+      },
+    })
+    .catch((e: unknown) => {
+      console.warn('[chat-provider] запись LlmCallLog не удалась:', e);
+    });
+}
+
+function summarizePromptForLog(options: ChatCompletionOptions): { system: string; user: string } {
+  const system = options.messages
+    .filter((m) => m.role === 'system')
+    .map((m) => m.content)
+    .join('\n\n');
+  const user = options.messages
+    .filter((m) => m.role !== 'system')
+    .map((m) => `[${m.role}] ${m.content}`)
+    .join('\n\n');
+  return { system, user };
 }
 
 type Provider = 'anthropic' | 'openai';
@@ -302,6 +384,33 @@ export async function createChatCompletion(
 ): Promise<string> {
   const provider = getProvider();
   const temperature = options.temperature ?? DEFAULT_TEMPERATURE;
+  const callSite = options.callSite || 'unknown';
+  const { system, user } = summarizePromptForLog(options);
+  const startedAt = Date.now();
+
+  const logCall = (
+    activeProvider: Provider,
+    model: string,
+    rawResponse: string | null,
+    error: string | null
+  ) => {
+    logLlmCall({
+      callSite,
+      provider: activeProvider,
+      model,
+      systemPrompt: system,
+      userMessage: user,
+      rawResponse,
+      temperature,
+      maxTokens: options.maxTokens,
+      responseFormat: options.responseFormat,
+      streaming: false,
+      latencyMs: Date.now() - startedAt,
+      error,
+      sessionId: options.sessionId,
+      question: options.question,
+    });
+  };
 
   // Try primary provider with retries
   let lastError: unknown;
@@ -310,6 +419,11 @@ export async function createChatCompletion(
       const raw = provider === 'anthropic'
         ? await callAnthropic(options, temperature)
         : await callOpenAI(options, temperature);
+
+      const model = provider === 'anthropic'
+        ? options.model || DEFAULT_ANTHROPIC_MODEL
+        : options.model || DEFAULT_OPENAI_MODEL;
+      logCall(provider, model, raw, null);
 
       return options.responseFormat === 'json_object'
         ? normalizeJsonResponse(raw)
@@ -339,15 +453,38 @@ export async function createChatCompletion(
         ? await callOpenAI(options, temperature)
         : await callAnthropic(options, temperature);
 
+      const model = fallbackProvider === 'anthropic'
+        ? options.model || DEFAULT_ANTHROPIC_MODEL
+        : options.model || DEFAULT_OPENAI_MODEL;
+      logCall(fallbackProvider, model, raw, null);
+
       return options.responseFormat === 'json_object'
         ? normalizeJsonResponse(raw)
         : raw;
     } catch (fallbackError) {
       console.error(`[chat-provider] Fallback ${fallbackProvider} also failed:`, fallbackError);
+      const model = fallbackProvider === 'anthropic'
+        ? options.model || DEFAULT_ANTHROPIC_MODEL
+        : options.model || DEFAULT_OPENAI_MODEL;
+      logCall(
+        fallbackProvider,
+        model,
+        null,
+        fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
+      );
     }
   }
 
   // Both providers failed
+  const primaryModel = provider === 'anthropic'
+    ? options.model || DEFAULT_ANTHROPIC_MODEL
+    : options.model || DEFAULT_OPENAI_MODEL;
+  logCall(
+    provider,
+    primaryModel,
+    null,
+    lastError instanceof Error ? lastError.message : String(lastError)
+  );
   throw lastError;
 }
 
@@ -357,86 +494,126 @@ export async function* streamChatCompletionTokens(
 ): AsyncGenerator<string> {
   const provider = getProvider();
   const temperature = options.temperature ?? DEFAULT_TEMPERATURE;
+  const callSite = options.callSite || 'unknown';
+  const { system: systemForLog, user: userForLog } = summarizePromptForLog(options);
+  const startedAt = Date.now();
+  let accumulated = '';
 
-  if (provider === 'anthropic') {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) {
-      throw new Error('ANTHROPIC_API_KEY is not set');
-    }
-
-    const { system, messages } = buildAnthropicPayload(options);
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: options.model || DEFAULT_ANTHROPIC_MODEL,
-        system,
-        messages,
-        temperature,
-        max_tokens: options.maxTokens ?? DEFAULT_ANTHROPIC_MAX_TOKENS,
-        stream: true,
-      }),
+  // Логируем накопленный текст в finally: стрим может оборваться на любом
+  // чанке (клиент отключился, сеть упала) — запись должна отразить то, что
+  // реально успело уйти, а не молчать из-за незавершённого прохода.
+  const logStream = (model: string, error: string | null) => {
+    logLlmCall({
+      callSite,
+      provider,
+      model,
+      systemPrompt: systemForLog,
+      userMessage: userForLog,
+      rawResponse: accumulated || null,
+      temperature,
+      maxTokens: options.maxTokens,
+      responseFormat: options.responseFormat,
+      streaming: true,
+      latencyMs: Date.now() - startedAt,
+      error,
+      sessionId: options.sessionId,
+      question: options.question,
     });
+  };
 
-    if (!response.ok) {
-      const errorBody = await response.text();
-      throw new Error(
-        `Anthropic API error (${response.status}): ${errorBody || 'Unknown error'}`
-      );
-    }
+  try {
+    if (provider === 'anthropic') {
+      const apiKey = process.env.ANTHROPIC_API_KEY;
+      if (!apiKey) {
+        throw new Error('ANTHROPIC_API_KEY is not set');
+      }
 
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error('Failed to get response body reader');
+      const { system, messages } = buildAnthropicPayload(options);
+      const model = options.model || DEFAULT_ANTHROPIC_MODEL;
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model,
+          system,
+          messages,
+          temperature,
+          max_tokens: options.maxTokens ?? DEFAULT_ANTHROPIC_MAX_TOKENS,
+          stream: true,
+        }),
+      });
 
-    const decoder = new TextDecoder();
-    let buffer = '';
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(
+          `Anthropic API error (${response.status}): ${errorBody || 'Unknown error'}`
+        );
+      }
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('Failed to get response body reader');
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+      const decoder = new TextDecoder();
+      let buffer = '';
 
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const content = line.slice(6).trim();
-          if (content === '[DONE]') break;
-          try {
-            const data = JSON.parse(content);
-            if (data.type === 'content_block_delta' && data.delta?.text) {
-              yield data.delta.text;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const content = line.slice(6).trim();
+            if (content === '[DONE]') break;
+            try {
+              const data = JSON.parse(content);
+              if (data.type === 'content_block_delta' && data.delta?.text) {
+                accumulated += data.delta.text;
+                yield data.delta.text;
+              }
+            } catch {
+              // Ignore parse errors for non-json lines
             }
-          } catch {
-            // Ignore parse errors for non-json lines
           }
         }
       }
+      logStream(model, null);
+      return;
     }
-    return;
-  }
 
-  // OpenAI streaming
-  const stream = await openai.chat.completions.create({
-    model: options.model || DEFAULT_OPENAI_MODEL,
-    messages: options.messages,
-    temperature,
-    ...(options.maxTokens && { max_tokens: options.maxTokens }),
-    ...(options.responseFormat && {
-      response_format: { type: options.responseFormat },
-    }),
-    stream: true,
-  });
+    // OpenAI streaming
+    const model = options.model || DEFAULT_OPENAI_MODEL;
+    const stream = await openai.chat.completions.create({
+      model,
+      messages: options.messages,
+      temperature,
+      ...(options.maxTokens && { max_tokens: options.maxTokens }),
+      ...(options.responseFormat && {
+        response_format: { type: options.responseFormat },
+      }),
+      stream: true,
+    });
 
-  for await (const chunk of stream) {
-    const content = chunk.choices[0]?.delta?.content || '';
-    if (content) {
-      yield content;
+    for await (const chunk of stream) {
+      const content = chunk.choices[0]?.delta?.content || '';
+      if (content) {
+        accumulated += content;
+        yield content;
+      }
     }
+    logStream(model, null);
+  } catch (error) {
+    const model = provider === 'anthropic'
+      ? options.model || DEFAULT_ANTHROPIC_MODEL
+      : options.model || DEFAULT_OPENAI_MODEL;
+    logStream(model, error instanceof Error ? error.message : String(error));
+    throw error;
   }
 }

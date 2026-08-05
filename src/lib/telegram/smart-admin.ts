@@ -89,6 +89,7 @@ const CLASSIFIER_PROMPT = `Ты классификатор намерений а
 export async function classifyAdminIntent(text: string): Promise<ClassifiedIntent> {
   try {
     const response = await createChatCompletion({
+      callSite: 'smart-admin:classifyAdminIntent',
       messages: [
         { role: 'system', content: CLASSIFIER_PROMPT },
         { role: 'user', content: text },

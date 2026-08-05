@@ -171,6 +171,7 @@ function parseKnowledgeExtractionJson(raw: string): KnowledgeExtractionStreamRes
 
 async function retryBatchExtraction(messages: ChatMessage[]) {
   const retryContent = await createChatCompletion({
+    callSite: 'knowledge-extractor-stream:retryBatchExtraction',
     messages: [
       ...messages,
       {
@@ -279,6 +280,7 @@ ${batch}
     ];
 
     const stream = streamChatCompletionTokens({
+      callSite: 'knowledge-extractor-stream:extractBatch',
       messages,
       temperature: 0.1,
       responseFormat: 'json_object',

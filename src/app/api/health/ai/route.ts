@@ -26,6 +26,7 @@ export async function GET() {
         : process.env.OPENAI_CHAT_MODEL || 'gpt-4o';
 
     const response = await createChatCompletion({
+      callSite: 'health-check:ping',
       messages: [
         { role: 'user', content: 'Respond with only the word: OK' },
       ],

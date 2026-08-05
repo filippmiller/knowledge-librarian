@@ -36,6 +36,7 @@ export async function polishVoiceAnswer(
   }
 
   const raw = await createChatCompletion({
+    callSite: 'voice-answer-polisher:polish',
     messages: [
       { role: 'system', content: POLISH_PROMPT },
       {

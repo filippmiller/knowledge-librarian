@@ -73,6 +73,7 @@ export async function addKnowledge(
 ): Promise<{ rulesCreated: number; qaPairsCreated: number; summary: string }> {
   // Step 1: Parse text with AI
   const response = await createChatCompletion({
+    callSite: 'knowledge-manager:addKnowledge',
     messages: [
       { role: 'system', content: KNOWLEDGE_PARSER_PROMPT },
       { role: 'user', content: text },
@@ -189,6 +190,7 @@ export async function correctKnowledge(
     .replace('{EXISTING_RULES}', rulesText);
 
   const response = await createChatCompletion({
+    callSite: 'knowledge-manager:correctKnowledge',
     messages: [
       { role: 'system', content: prompt },
       { role: 'user', content: text },
@@ -352,6 +354,7 @@ async function getNextRuleCode(): Promise<number> {
 async function classifyDomainForText(text: string): Promise<string[]> {
   // Quick domain classification using AI
   const response = await createChatCompletion({
+    callSite: 'knowledge-manager:classifyDomainForText',
     messages: [
       {
         role: 'system',

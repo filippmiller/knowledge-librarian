@@ -33,6 +33,7 @@ export async function polishCanonicalAnswer(
   }
 
   const raw = await createChatCompletion({
+    callSite: 'canonical-answer-polisher:polish',
     messages: [
       { role: 'system', content: POLISH_PROMPT },
       {

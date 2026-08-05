@@ -39,6 +39,8 @@ const QUERY_EXPANSION_PROMPT = `Ты - эксперт по пониманию з
 export async function expandQuery(question: string): Promise<ExpandedQueries> {
   try {
     const content = await createChatCompletion({
+      callSite: 'query-expansion:expandQuery',
+      question,
       messages: [
         { role: 'system', content: QUERY_EXPANSION_PROMPT },
         { role: 'user', content: question },
@@ -93,6 +95,8 @@ const ENTITY_EXTRACTION_PROMPT = `Извлеки из вопроса польз�
 export async function extractEntities(question: string): Promise<ExtractedEntities> {
   try {
     const content = await createChatCompletion({
+      callSite: 'query-expansion:extractEntities',
+      question,
       messages: [
         { role: 'system', content: ENTITY_EXTRACTION_PROMPT },
         { role: 'user', content: question },

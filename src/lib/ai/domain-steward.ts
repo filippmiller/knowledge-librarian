@@ -63,6 +63,7 @@ export async function classifyDocumentDomains(
     .join('\n');
 
   const content = await createChatCompletion({
+    callSite: 'domain-steward:suggest',
     messages: [
       { role: 'system', content: DOMAIN_STEWARD_SYSTEM_PROMPT },
       {

@@ -60,6 +60,7 @@ const ANSWERING_PROMPT = `Ты - ИИ-библиотекарь знаний дл
 
 export async function classifyIntent(question: string): Promise<IntentClassification> {
   const content = await createChatCompletion({
+    callSite: 'answering-engine:classifyIntent',
     messages: [
       { role: 'system', content: INTENT_CLASSIFIER_PROMPT },
       { role: 'user', content: question },
@@ -132,6 +133,7 @@ export async function answerQuestion(
   // Step 5: Generate answer
   const answer =
     (await createChatCompletion({
+      callSite: 'answering-engine:generateAnswer',
       messages: [
         { role: 'system', content: ANSWERING_PROMPT },
         {

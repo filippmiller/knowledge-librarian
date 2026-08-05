@@ -89,6 +89,7 @@ ${answer}
   let raw: string | undefined;
   try {
     raw = (await createChatCompletion({
+      callSite: 'consistency-gate:verify',
       messages: [
         { role: 'system', content: VERIFIER_SYSTEM_PROMPT },
         { role: 'user', content: userPrompt },

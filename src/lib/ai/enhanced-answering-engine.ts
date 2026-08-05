@@ -295,6 +295,8 @@ const GENERAL_KNOWLEDGE_FALLBACK_PROMPT = `Ты — экспертный пом�
 async function classifyIntent(question: string): Promise<IntentClassification> {
   const { createChatCompletion, normalizeJsonResponse } = await import('@/lib/ai/chat-provider');
   const content = await createChatCompletion({
+    callSite: 'enhanced-answering:classifyIntent',
+    question,
     messages: [
       { role: 'system', content: INTENT_CLASSIFIER_PROMPT },
       { role: 'user', content: question },
@@ -1318,6 +1320,9 @@ export async function answerQuestionEnhanced(
   try {
     answer =
       (await createChatCompletion({
+      callSite: 'enhanced-answering:synthesis',
+      sessionId,
+      question,
       messages: [
         { role: 'system', content: systemPrompt },
         {
@@ -1376,6 +1381,9 @@ ${confidenceLevel === 'insufficient'
           .join('\n');
         try {
           const revised = (await createChatCompletion({
+            callSite: 'enhanced-answering:hallucination-revision',
+            sessionId,
+            question,
             messages: [
               // Тот же промпт, что и при первичной генерации: иначе клиентский
               // ответ переписывается по внутренним правилам, которым разрешено
@@ -2262,6 +2270,9 @@ async function answerFromGeneralKnowledgeFallback(
 
   try {
     const raw = await createChatCompletion({
+      callSite: 'enhanced-answering:general-ai-fallback',
+      sessionId,
+      question,
       messages: [
         { role: 'system', content: GENERAL_KNOWLEDGE_FALLBACK_PROMPT },
         {
@@ -2481,6 +2492,7 @@ async function checkIfFollowUp(
 ): Promise<{ isFollowUp: boolean; expandedQuestion?: string }> {
   const { createChatCompletion, normalizeJsonResponse } = await import('@/lib/ai/chat-provider');
   const content = await createChatCompletion({
+    callSite: 'enhanced-answering:checkIfFollowUp',
     messages: [
       {
         role: 'system',
