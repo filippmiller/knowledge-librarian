@@ -280,6 +280,17 @@ ${batch}
 
     const stream = streamChatCompletionTokens({
       messages,
+      // Извлечение — редкая, дорогая по значению операция (правило живёт в базе
+      // годами), а не частый лёгкий вызов вроде classifyIntent. Живое сравнение
+      // (2026-08-05, scripts/test-extraction-pack.ts на тестовом пакете):
+      // ANTHROPIC_MODEL по умолчанию (Haiku) раздробил 10 правил документа на 44
+      // атомарные строки, включая разрыв одного числового ограничения (15с/30с/
+      // 3 цикла) на 3 отдельные строки; та же модель, переключённая на думающий
+      // тир, дала 29 строк с тем же ограничением в одной. EXTRACTION_MODEL —
+      // отдельная от общего ANTHROPIC_MODEL настройка именно для этого вызова,
+      // не глобальная смена модели (остальные вызовы — classifyIntent,
+      // expandQuery — не выигрывают от дорогой модели и не должны платить за неё).
+      model: process.env.EXTRACTION_MODEL || undefined,
       temperature: 0.1,
       responseFormat: 'json_object',
       maxTokens: 16000,

@@ -207,6 +207,8 @@ test('aborts when deadline exceeded', async () => {
 
 Зафиксировать на бумаге (markdown-таблица в этом же docs/plans/ файле или отдельном): для пары (профиль, запрос) — что даёт `MATCH`, что `CONFLICT`, что `UNKNOWN`; пустой список поля = `UNKNOWN`, не `ANY`; обязательные поля по типу знания (например `DELIVERY_RULE` обязан иметь `deliveryCityCodes`, иначе создание запрещено).
 
+**Готово:** `docs/plans/2026-08-05-applicability-truth-table.md` — truth table по измерениям (scenario/audience/geography/conditionType/numericConstraint), обязательные поля по типу знания, обоснована живым прогоном `scripts/test-extraction-pack.ts` на тестовом пакете `semantic_rule_extraction_test_pack.zip` (10 правил документа → 44 извлечённые атомарные строки без структурного поля условия — конкретное эмпирическое подтверждение проблемы, не гипотеза).
+
 ### Задача 2.2: Concept/ConceptAlias — контролируемый словарь, до QueryFrame
 
 Без него `serviceCodes: string[]` в профиле и в QueryFrame почти гарантированно не совпадут («апостиль» vs `apostille` vs `apostille.zags`) — hard filter даст 0 результатов везде вместо утечки не туда (тот же класс проблемы, другой полюс).

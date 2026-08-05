@@ -11,9 +11,19 @@ export interface ChatCompletionOptions {
   temperature?: number;
   maxTokens?: number;
   responseFormat?: 'text' | 'json_object';
+  /**
+   * Заставляет вызов идти к конкретному провайдеру, минуя глобальный
+   * AI_PROVIDER. Нужно там, где независимость провайдера — часть смысла
+   * вызова, а не оптимизация: LLM-judge, оценивающий выдачу экстрактора,
+   * на том же провайдере и той же модели разделяет с ним характер ошибок,
+   * то есть «независимый экзаменатор» только на словах.
+   * Fallback на второго провайдера при этом сохраняется — закрепление
+   * относится к выбору ПЕРВИЧНОГО провайдера, не к отказу от резерва.
+   */
+  provider?: Provider;
 }
 
-type Provider = 'anthropic' | 'openai';
+export type Provider = 'anthropic' | 'openai';
 
 const DEFAULT_ANTHROPIC_MODEL =
   process.env.ANTHROPIC_MODEL || 'claude-3-opus-20240229';
@@ -237,14 +247,15 @@ async function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function callAnthropic(options: ChatCompletionOptions, temperature: number): Promise<string> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error('ANTHROPIC_API_KEY is not set');
-  }
-
-  const { system, messages } = buildAnthropicPayload(options);
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
+async function postAnthropicMessages(
+  apiKey: string,
+  model: string,
+  system: string | undefined,
+  messages: ReturnType<typeof buildAnthropicPayload>['messages'],
+  maxTokens: number,
+  temperature: number | undefined
+): Promise<Response> {
+  return fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -252,13 +263,37 @@ async function callAnthropic(options: ChatCompletionOptions, temperature: number
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
-      model: options.model || DEFAULT_ANTHROPIC_MODEL,
+      model,
       system,
       messages,
-      temperature,
-      max_tokens: options.maxTokens ?? DEFAULT_ANTHROPIC_MAX_TOKENS,
+      max_tokens: maxTokens,
+      ...(temperature !== undefined && { temperature }),
     }),
   });
+}
+
+async function callAnthropic(options: ChatCompletionOptions, temperature: number): Promise<string> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    throw new Error('ANTHROPIC_API_KEY is not set');
+  }
+
+  const { system, messages } = buildAnthropicPayload(options);
+  const model = options.model || DEFAULT_ANTHROPIC_MODEL;
+  const maxTokens = options.maxTokens ?? DEFAULT_ANTHROPIC_MAX_TOKENS;
+
+  let response = await postAnthropicMessages(apiKey, model, system, messages, maxTokens, temperature);
+
+  // Reasoning/thinking-tier models (e.g. claude-sonnet-5, claude-opus-5) reject
+  // an explicit temperature outright — extended thinking fixes it internally.
+  // Retry once without the field instead of hardcoding a model-name allowlist,
+  // so this keeps working as new model tiers ship.
+  if (!response.ok && response.status === 400) {
+    const errorBody = await response.clone().text();
+    if (/temperature.{0,40}deprecated/i.test(errorBody)) {
+      response = await postAnthropicMessages(apiKey, model, system, messages, maxTokens, undefined);
+    }
+  }
 
   if (!response.ok) {
     const errorBody = await response.text();
@@ -300,7 +335,7 @@ async function callOpenAI(options: ChatCompletionOptions, temperature: number): 
 export async function createChatCompletion(
   options: ChatCompletionOptions
 ): Promise<string> {
-  const provider = getProvider();
+  const provider = options.provider ?? getProvider();
   const temperature = options.temperature ?? DEFAULT_TEMPERATURE;
 
   // Try primary provider with retries
@@ -365,22 +400,44 @@ export async function* streamChatCompletionTokens(
     }
 
     const { system, messages } = buildAnthropicPayload(options);
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const model = options.model || DEFAULT_ANTHROPIC_MODEL;
+    const maxTokens = options.maxTokens ?? DEFAULT_ANTHROPIC_MAX_TOKENS;
+    const buildBody = (withTemperature: boolean) =>
+      JSON.stringify({
+        model,
+        system,
+        messages,
+        max_tokens: maxTokens,
+        stream: true,
+        ...(withTemperature && { temperature }),
+      });
+
+    let response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': apiKey,
         'anthropic-version': '2023-06-01',
       },
-      body: JSON.stringify({
-        model: options.model || DEFAULT_ANTHROPIC_MODEL,
-        system,
-        messages,
-        temperature,
-        max_tokens: options.maxTokens ?? DEFAULT_ANTHROPIC_MAX_TOKENS,
-        stream: true,
-      }),
+      body: buildBody(true),
     });
+
+    // See callAnthropic() for why: reasoning/thinking-tier models reject an
+    // explicit temperature outright, retry once without it.
+    if (!response.ok && response.status === 400) {
+      const errorBody = await response.clone().text();
+      if (/temperature.{0,40}deprecated/i.test(errorBody)) {
+        response = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: buildBody(false),
+        });
+      }
+    }
 
     if (!response.ok) {
       const errorBody = await response.text();
