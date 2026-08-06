@@ -114,6 +114,7 @@ import {
   resolveGraderRunConfig,
   summarizeRunModels,
   type ExtractionRunConfig,
+  type RunSideSummary,
   type LlmCallContext,
   type LlmCallRecord,
 } from '../src/lib/ai/extraction-run';
@@ -1059,24 +1060,36 @@ async function main() {
   // Считается ПОСЛЕ прогона: до него известна только запрошенная конфигурация,
   // а ответить мог резерв.
   const models = summarizeRunModels(extractionCalls, graderCalls);
-  const listIdentities = (summary: { servedIdentities: { provider: string; model: string }[] }) =>
-    summary.servedIdentities.map((id) => `${id.provider}/${id.model}`).join(', ') || '(нет данных)';
+  const describeSide = (side: RunSideSummary) => {
+    const served = side.servedIdentities.map((id) => `${id.provider}/${id.model}`).join(', ');
+    const failed = side.failedCalls > 0 ? `, упало ${side.failedCalls}` : '';
+    return `${side.calls} (${side.modelConsistency}${failed}) → ${served || '(нет данных)'}`;
+  };
 
   // ── сводка ──
   const byMode = (mode: GradeMode) => grades.filter((record) => record.mode === mode);
   console.log('\n' + '─'.repeat(72));
   console.log('СВОДКА');
   console.log('─'.repeat(72));
-  console.log(
-    `  Вызовы извлечения:             ${models.extraction.calls} (${models.extraction.modelConsistency}) → ${listIdentities(models.extraction)}`
-  );
-  console.log(
-    `  Вызовы судьи:                  ${models.grader.calls} (${models.grader.modelConsistency}) → ${listIdentities(models.grader)}`
-  );
+  console.log(`  Вызовы извлечения:             ${describeSide(models.extraction)}`);
+  console.log(`  Вызовы судьи:                  ${describeSide(models.grader)}`);
   console.log(`  Отношение моделей (по факту):  ${models.statement}`);
   if (models.extraction.modelConsistency === 'MIXED') {
     console.log('  !!! Батчи/retry внутри одного прогона обслужены РАЗНЫМИ моделями: извлечение не однородно,');
     console.log('  !!! и сравнивать этот прогон с однородным как регрессию нельзя.');
+  }
+  if (models.extraction.divergedFromRequest > 0) {
+    // Однородный фоллбэк не даёт MIXED — прогон однороден, просто не на той
+    // модели, которую заказывали. Без этой строки это видно только построчно.
+    console.log(
+      `  !!! ${models.extraction.divergedFromRequest} из ${models.extraction.calls} вызовов извлечения обслужены НЕ запрошенной моделью`
+    );
+    console.log(`  !!! (запрошено ${extractionRunConfig.provider}/${extractionRunConfig.model}) — сработал резерв.`);
+  }
+  if (models.extraction.failedCalls > 0) {
+    console.log(
+      `  !!! ${models.extraction.failedCalls} вызовов извлечения не получили ответа: однородность посчитана по остальным.`
+    );
   }
   console.log(`  Структурные поля применимости: ${rulesWithAnyField}/${total} правил (${structuralPercent}%)`);
   console.log(`  Цитаты найдены в источнике:    ${quotesOk}/${quoteChecks.length}`);

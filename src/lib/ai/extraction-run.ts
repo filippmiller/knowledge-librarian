@@ -182,6 +182,12 @@ export interface LlmCallRecord {
   /** Кто фактически ответил. null — только если не ответил никто. */
   servedByProvider: Provider | null;
   servedByModel: string | null;
+  /**
+   * Ответ пришёл от РЕЗЕРВНОГО таргета. На упавшем вызове всегда `false`: не
+   * ответил никто, и «резерв использован» тут значило бы другое, чем на
+   * успешном вызове. Какие таргеты были ПОПРОБОВАНЫ (включая неудачный резерв)
+   * — в `attempts[]`, это единственный источник правды по попыткам.
+   */
   fallbackUsed: boolean;
   /** Каждая попытка, включая неудачные и прерванные (A1). */
   attempts: CompletionAttempt[];
@@ -402,6 +408,21 @@ export function describeGraderIndependence(relationship: ModelRelationship): str
 
 export interface RunSideSummary {
   calls: number;
+  /**
+   * Вызовы, которые не получили ответа. Стоит рядом с `modelConsistency`
+   * намеренно: однородность считается по УСПЕШНЫМ вызовам, и прогон, где три
+   * батча из четырёх упали, тоже даёт `CONSISTENT` — честно про исполнителя,
+   * но «весь документ отработан чисто» из этого не следует.
+   */
+  failedCalls: number;
+  /**
+   * Успешные вызовы, где фактический исполнитель отличался от запрошенного в
+   * run config (сработал резерв). Если резерв сработал ОДИНАКОВО на всех
+   * вызовах, прогон однороден и `MIXED` не возникает — но он весь ушёл не на
+   * той модели, которую заказывали, и это должно быть видно в сводке, а не
+   * только при построчном чтении журнала.
+   */
+  divergedFromRequest: number;
   modelConsistency: RunModelConsistency;
   servedIdentities: ModelIdentity[];
 }
@@ -417,9 +438,20 @@ export interface RunModelSummary {
   statement: string;
 }
 
+/** Успешный вызов, чей исполнитель не совпал с запрошенным в run config. */
+export function divergedFromRequest(record: LlmCallRecord): boolean {
+  if (!record.servedByProvider || !record.servedByModel) return false;
+  return (
+    record.servedByProvider !== record.requestedProvider ||
+    record.servedByModel !== record.requestedModel
+  );
+}
+
 function summarizeSide(records: LlmCallRecord[]): RunSideSummary {
   return {
     calls: records.length,
+    failedCalls: records.filter((record) => record.outcome === 'FAILED').length,
+    divergedFromRequest: records.filter(divergedFromRequest).length,
     modelConsistency: computeRunModelConsistency(records),
     servedIdentities: servedIdentities(records),
   };

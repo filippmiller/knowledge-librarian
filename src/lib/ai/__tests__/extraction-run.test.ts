@@ -11,6 +11,7 @@ import {
   computeModelRelationship,
   computeRunModelConsistency,
   describeGraderIndependence,
+  divergedFromRequest,
   EXTRACTION_PROMPT_VERSION,
   EXTRACTION_SCHEMA_VERSION,
   GraderConfigError,
@@ -22,6 +23,7 @@ import {
   resolveGraderProvider,
   resolveGraderRunConfig,
   servedIdentities,
+  summarizeRunModels,
   type LlmCallContext,
   type LlmCallRecord,
   type ModelRelationship,
@@ -292,6 +294,56 @@ describe('describeGraderIndependence', () => {
     const text = describeGraderIndependence('SAME_PROVIDER_DIFFERENT_MODEL');
     expect(text).toContain('ЧАСТИЧНО');
     expect(text).not.toMatch(/полн/i);
+  });
+});
+
+describe('summarizeRunModels — CONSISTENT не выдаётся за «прогон чистый»', () => {
+  const grader = served('openai', 'gpt-4o', { role: 'GRADER', batchIndex: null, label: 'Q01' });
+
+  it('однородный резерв не даёт MIXED, но считается как расхождение с запрошенной моделью', () => {
+    // Все вызовы ушли к резерву ОДИНАКОВО: прогон однороден, но не на той
+    // модели, которую заказывали. MIXED здесь был бы неправдой, а молчание —
+    // тоже.
+    const calls = [
+      served('anthropic', 'claude-pinned', {
+        servedByProvider: 'openai',
+        servedByModel: 'gpt-4o',
+        fallbackUsed: true,
+      }),
+      served('anthropic', 'claude-pinned', {
+        role: 'EXTRACTION_RETRY',
+        servedByProvider: 'openai',
+        servedByModel: 'gpt-4o',
+        fallbackUsed: true,
+      }),
+    ];
+
+    const summary = summarizeRunModels(calls, [grader]);
+    expect(summary.extraction.modelConsistency).toBe('CONSISTENT');
+    expect(summary.extraction.divergedFromRequest).toBe(2);
+    expect(summary.extraction.failedCalls).toBe(0);
+  });
+
+  it('упавшие вызовы считаются отдельно и не исчезают за словом CONSISTENT', () => {
+    const summary = summarizeRunModels(
+      [served('anthropic', 'claude-a'), failed('anthropic', 'claude-a'), failed('anthropic', 'claude-a')],
+      [grader]
+    );
+
+    expect(summary.extraction.calls).toBe(3);
+    expect(summary.extraction.failedCalls).toBe(2);
+    // Однородность считается по успешным — и это должно быть видно рядом.
+    expect(summary.extraction.modelConsistency).toBe('CONSISTENT');
+  });
+
+  it('упавший вызов не считается расхождением: исполнителя у него нет', () => {
+    const summary = summarizeRunModels([failed('anthropic', 'claude-a')], [grader]);
+    expect(summary.extraction.divergedFromRequest).toBe(0);
+    expect(summary.relationship).toBe('UNKNOWN');
+  });
+
+  it('divergedFromRequest = 0, когда ответил ровно запрошенный исполнитель', () => {
+    expect(divergedFromRequest(served('anthropic', 'claude-a'))).toBe(false);
   });
 });
 
