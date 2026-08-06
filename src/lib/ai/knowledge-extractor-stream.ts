@@ -1,4 +1,18 @@
-import { createChatCompletion, normalizeJsonResponse, streamChatCompletionTokens, type ChatMessage } from '@/lib/ai/chat-provider';
+import {
+  createChatCompletionDetailed,
+  createChatCompletionStreamDetailed,
+  normalizeJsonResponse,
+  type ChatMessage,
+} from '@/lib/ai/chat-provider';
+import {
+  recordFailedCall,
+  recordSuccessfulCall,
+  resolveExtractionRunConfig,
+  toCompletionOptions,
+  type ExtractionRunConfig,
+  type LlmCallContext,
+  type LlmCallRecord,
+} from '@/lib/ai/extraction-run';
 import prisma from '@/lib/db';
 
 export interface ExtractedRuleStream {
@@ -169,28 +183,84 @@ function parseKnowledgeExtractionJson(raw: string): KnowledgeExtractionStreamRes
   };
 }
 
-async function retryBatchExtraction(messages: ChatMessage[]) {
-  const retryContent = await createChatCompletion({
-    messages: [
-      ...messages,
-      {
-        role: 'user',
-        content:
-          'Предыдущий ответ не удалось распарсить как JSON. Повтори извлечение, но верни КОМПАКТНЫЙ валидный JSON без markdown. Если правил много, сократи формулировки body, но сохрани конкретные цены, сроки, требования и шаги.',
-      },
-    ],
-    temperature: 0,
-    responseFormat: 'json_object',
-    maxTokens: 16000,
-  });
+const RETRY_INSTRUCTION =
+  'Предыдущий ответ не удалось распарсить как JSON. Повтори извлечение, но верни КОМПАКТНЫЙ валидный JSON без markdown. Если правил много, сократи формулировки body, но сохрани конкретные цены, сроки, требования и шаги.';
 
-  return parseKnowledgeExtractionJson(retryContent);
+type RetryOutcome =
+  | { ok: true; result: KnowledgeExtractionStreamResult; record: LlmCallRecord }
+  | { ok: false; error: unknown; record: LlmCallRecord };
+
+/**
+ * Retry берёт ТУ ЖЕ конфигурацию, что и первичный вызов. До этого он звал
+ * `createChatCompletion` вообще без `model` и молча уходил на дефолт
+ * провайдера, пока primary был закреплён на `EXTRACTION_MODEL`: один документ
+ * мог оказаться наполовину извлечён одной моделью, наполовину другой, а
+ * артефакт выглядел как один однородный прогон.
+ *
+ * Никогда не бросает: журнальная запись обязана появиться и для упавшего
+ * retry, иначе «прогон целиком на модели X» означало бы «всё, что не упало».
+ */
+async function retryBatchExtraction(
+  messages: ChatMessage[],
+  config: ExtractionRunConfig,
+  context: { batchNumber: number; batchText: string }
+): Promise<RetryOutcome> {
+  const callContext: LlmCallContext = {
+    role: 'EXTRACTION_RETRY',
+    batchIndex: context.batchNumber,
+    label: `batch-${context.batchNumber}`,
+    config,
+    sourceText: context.batchText,
+  };
+
+  try {
+    const completion = await createChatCompletionDetailed({
+      messages: [...messages, { role: 'user', content: RETRY_INSTRUCTION }],
+      ...toCompletionOptions(config),
+      temperature: 0,
+      responseFormat: 'json_object',
+      maxTokens: 16000,
+    });
+
+    const record = recordSuccessfulCall(callContext, completion);
+    try {
+      return { ok: true, result: parseKnowledgeExtractionJson(completion.text), record };
+    } catch (parseError) {
+      // Провайдер ответил — значит исполнитель известен и запись остаётся
+      // SUCCESS-вызовом с фактической моделью; непарсибельность ответа это
+      // свойство батча, а не отказ вызова.
+      return { ok: false, error: parseError, record };
+    }
+  } catch (error) {
+    return { ok: false, error, record: recordFailedCall(callContext, error) };
+  }
 }
+
+export interface KnowledgeExtractionStreamOptions {
+  /**
+   * Конфигурация прогона. По умолчанию резолвится один раз на весь документ,
+   * чтобы все батчи и все retry ехали на одной модели.
+   */
+  runConfig?: ExtractionRunConfig;
+}
+
+export type KnowledgeExtractionStreamEvent =
+  | { type: 'token'; data: string }
+  | { type: 'result'; data: KnowledgeExtractionStreamResult }
+  | { type: 'batch_progress'; data: { current: number; total: number } }
+  | { type: 'batch_skipped'; data: { batchIndex: number; total: number; reason: string } }
+  /** Фактический исполнитель одного вызова — батча или retry. */
+  | { type: 'llm_call'; data: LlmCallRecord };
 
 export async function* streamKnowledgeExtraction(
   documentText: string,
-  existingRuleCodes: string[] = []
-): AsyncGenerator<{ type: 'token' | 'result' | 'batch_progress' | 'batch_skipped'; data: string | KnowledgeExtractionStreamResult | { current: number; total: number } | { batchIndex: number; total: number; reason: string } }> {
+  existingRuleCodes: string[] = [],
+  options: KnowledgeExtractionStreamOptions = {}
+): AsyncGenerator<KnowledgeExtractionStreamEvent> {
+  // Один раз на весь документ: перерезолвка на каждом батче вернула бы ту же
+  // развилку «два независимых места выбора модели», только на другом уровне.
+  const runConfig = options.runConfig ?? resolveExtractionRunConfig();
+
   const startCode =
     existingRuleCodes.length > 0
       ? Math.max(...existingRuleCodes.map((c) => parseInt(c.replace('R-', '')))) + 1
@@ -224,7 +294,8 @@ export async function* streamKnowledgeExtraction(
   // Process each batch
   for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
     const batch = batches[batchIndex];
-    
+    const batchNumber = batchIndex + 1;
+
     // Report progress
     yield {
       type: 'batch_progress',
@@ -278,32 +349,65 @@ ${batch}
       },
     ];
 
-    const stream = streamChatCompletionTokens({
+    // Извлечение — редкая, дорогая по значению операция (правило живёт в базе
+    // годами), а не частый лёгкий вызов вроде classifyIntent. Живое сравнение
+    // (2026-08-05, scripts/test-extraction-pack.ts на тестовом пакете):
+    // ANTHROPIC_MODEL по умолчанию (Haiku) раздробил 10 правил документа на 44
+    // атомарные строки, включая разрыв одного числового ограничения (15с/30с/
+    // 3 цикла) на 3 отдельные строки; та же модель, переключённая на думающий
+    // тир, дала 29 строк с тем же ограничением в одной. EXTRACTION_MODEL —
+    // отдельная от общего ANTHROPIC_MODEL настройка именно для этого вызова, не
+    // глобальная смена модели (остальные вызовы — classifyIntent, expandQuery —
+    // не выигрывают от дорогой модели и не должны платить за неё). Читается она
+    // теперь в resolveExtractionRunConfig(), одним местом на весь прогон.
+    const operation = createChatCompletionStreamDetailed({
       messages,
-      // Извлечение — редкая, дорогая по значению операция (правило живёт в базе
-      // годами), а не частый лёгкий вызов вроде classifyIntent. Живое сравнение
-      // (2026-08-05, scripts/test-extraction-pack.ts на тестовом пакете):
-      // ANTHROPIC_MODEL по умолчанию (Haiku) раздробил 10 правил документа на 44
-      // атомарные строки, включая разрыв одного числового ограничения (15с/30с/
-      // 3 цикла) на 3 отдельные строки; та же модель, переключённая на думающий
-      // тир, дала 29 строк с тем же ограничением в одной. EXTRACTION_MODEL —
-      // отдельная от общего ANTHROPIC_MODEL настройка именно для этого вызова,
-      // не глобальная смена модели (остальные вызовы — classifyIntent,
-      // expandQuery — не выигрывают от дорогой модели и не должны платить за неё).
-      model: process.env.EXTRACTION_MODEL || undefined,
+      ...toCompletionOptions(runConfig),
       temperature: 0.1,
       responseFormat: 'json_object',
       maxTokens: 16000,
     });
 
+    const primaryContext: LlmCallContext = {
+      role: 'EXTRACTION_PRIMARY',
+      batchIndex: batchNumber,
+      label: `batch-${batchNumber}`,
+      config: runConfig,
+      sourceText: batch,
+    };
+
     let fullContent = '';
 
-    for await (const content of stream) {
-      if (content) {
-        fullContent += content;
-        yield { type: 'token', data: content };
+    try {
+      for await (const content of operation.tokens) {
+        if (content) {
+          fullContent += content;
+          yield { type: 'token', data: content };
+        }
       }
+    } catch (error) {
+      // Сбой самого стрима, как и раньше, валит документ целиком — но запись о
+      // вызове обязана выйти наружу до этого, иначе в артефакте прогона просто
+      // не будет следа от вызова, который его и убил.
+      //
+      // Итерация `tokens` пробрасывает СЫРУЮ ошибку провайдера, а `attempts[]`
+      // лежит в `ChatCompletionError`, которым отклоняется `completion`. Если
+      // записать сюда сырую ошибку, у упавшего вызова окажется пустой список
+      // попыток — то есть артефакт не скажет, какой провайдер и какая модель
+      // вообще пробовались. Ровно то, ради чего этот PR и делается.
+      const errorForRecord = await operation.completion.then(
+        () => error,
+        (completionError: unknown) => completionError
+      );
+      yield { type: 'llm_call', data: recordFailedCall(primaryContext, errorForRecord) };
+      // Наружу летит исходная ошибка: поведение вызывающего кода не меняется.
+      throw error;
     }
+
+    yield {
+      type: 'llm_call',
+      data: recordSuccessfulCall(primaryContext, await operation.completion),
+    };
 
     // Parse batch result
     try {
@@ -312,10 +416,16 @@ ${batch}
         batchResult = parseKnowledgeExtractionJson(fullContent);
       } catch (parseError) {
         console.warn(
-          `[Knowledge Extraction] Batch ${batchIndex + 1} returned invalid streamed JSON, retrying compact non-stream parse:`,
+          `[Knowledge Extraction] Batch ${batchNumber} returned invalid streamed JSON, retrying compact non-stream parse:`,
           parseError
         );
-        batchResult = await retryBatchExtraction(messages);
+        const retry = await retryBatchExtraction(messages, runConfig, {
+          batchNumber,
+          batchText: batch,
+        });
+        yield { type: 'llm_call', data: retry.record };
+        if (!retry.ok) throw retry.error;
+        batchResult = retry.result;
       }
 
       // Default optional fields the AI sometimes omits
