@@ -818,6 +818,8 @@ describe('streaming', () => {
       signal: controller.signal,
     });
     operation.abort('caller changed its mind');
+    // Причину называет первая отмена: безаргументный повтор её не стирает.
+    operation.abort();
 
     const error = (await operation.completion.catch(
       (e: unknown) => e

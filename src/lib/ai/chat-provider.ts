@@ -1205,6 +1205,11 @@ export interface ChatCompletionStreamOperation {
    *
    * Ранний `break` (или исключение в теле `for await`) отменяет запрос к
    * провайдеру: незакрытый стрим продолжал бы качать токены и деньги.
+   *
+   * Потребитель ОДИН. Как и у async-генератора, все `for await` делят один
+   * итератор и один буфер: второй потребитель не получит копию потока, он
+   * разберёт с первым одну и ту же очередь. Полный текст прогона всегда есть в
+   * `completion.text` — за ним и надо идти, если нужен «ещё один читатель».
    */
   tokens: AsyncIterable<string>;
   /**
@@ -1428,7 +1433,9 @@ export function createChatCompletionStreamDetailed(
     completion,
     abort(reason?: string) {
       if (settled) return;
-      abortReason = reason;
+      // Причину фиксирует ПЕРВАЯ отмена: `abort('почему')` с последующим
+      // безаргументным `abort()` не должен стирать уже названную причину.
+      if (abortReason === undefined) abortReason = reason;
       gate.abort();
     },
   };
