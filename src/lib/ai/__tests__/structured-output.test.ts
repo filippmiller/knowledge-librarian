@@ -699,8 +699,22 @@ describe('structured() — детект обрыва', () => {
     expect(error.issues[0].code).toBe('truncated_response');
   });
 
-  it('преждевременно закрытая структура тоже ловится', async () => {
-    // Массив закрыт фигурной скобкой — счётчик глубины сошёлся бы в ноль.
+  // Зеркальный случай к «{ ]»: открывателей и закрывателей поровну, поэтому
+  // счётчик глубины снова показал бы ноль, а типы не совпадают.
+  it('«[ }» тоже не считается сбалансированным', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('[ }'));
+
+    const error = await expectStructuredError(
+      structured({ schema: priceSchema, messages: MESSAGES, runConfig: runConfig() })
+    );
+
+    expect(error.reason).toBe('TRUNCATED_JSON');
+    expect(error.issues[0].code).toBe('truncated_response');
+  });
+
+  // Незакрытая структура — случай, который ловил и счётчик глубины: он здесь не
+  // сходится в ноль. Тест сторожит от регресса самой проверки, а не типов скобок.
+  it('незакрытая структура по-прежнему ловится', async () => {
     fetchMock.mockResolvedValue(
       anthropicOk('{"kind":"PRICE","notes":["срочно"}')
     );
