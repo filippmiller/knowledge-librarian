@@ -419,6 +419,7 @@ async function createKnowledgeChunk(text: string, domainIds: string[]): Promise<
     const chunk = await prisma.docChunk.create({
       data: {
         documentId: doc.id,
+        scenarioKey: doc.scenarioKey,
         chunkIndex: 0,
         content: text,
         embedding,
