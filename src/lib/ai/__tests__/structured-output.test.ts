@@ -337,6 +337,23 @@ describe('structured() — ответ, не соответствующий сх�
     expect(error.servedByModel).toBe('claude-test-primary');
   });
 
+  it('упавшая схема на живом вызове тоже сохраняет attempts[]', async () => {
+    // Форма ответа схеме соответствует — иначе вердикт вынесется раньше, чем
+    // дело дойдёт до падающей проверки, и тест проверял бы не ту ветку.
+    fetchMock.mockResolvedValue(anthropicOk(JSON.stringify({ kind: 'PRICE' })));
+    const throwingSchema = z.strictObject({ kind: z.string() }).superRefine(() => {
+      throw new Error('схема сама сломалась');
+    });
+
+    const error = await expectStructuredError(
+      structured({ schema: throwingSchema, messages: MESSAGES, runConfig: runConfig() })
+    );
+
+    expect(error.reason).toBe('SCHEMA_THREW');
+    expect(error.attempts).toHaveLength(1);
+    expect(error.attempts[0]).toMatchObject({ provider: 'anthropic', outcome: 'SUCCESS' });
+  });
+
   it('первопричина не проглатывается: результат вызова остаётся в ошибке целиком', async () => {
     fetchMock.mockResolvedValue(
       anthropicOk(JSON.stringify({ ...VALID_PAYLOAD, price: 'дорого' }))
@@ -374,6 +391,29 @@ describe('validateStructuredPayload() — чистая половина адап
       completionResult(JSON.stringify(VALID_PAYLOAD))
     );
     expect(data).toEqual(VALID_PAYLOAD);
+  });
+
+  it('упавшая схема не уносит attempts[] наружу голым Error', () => {
+    // safeParse() в Zod 4 НЕ ловит исключения из собственной логики схемы —
+    // проверено на 4.3.5: superRefine/transform/check/custom пробрасываются.
+    const throwingSchema = z.strictObject({ kind: z.string() }).superRefine(() => {
+      throw new Error('схема сама сломалась');
+    });
+
+    let caught: unknown;
+    try {
+      validateStructuredPayload(throwingSchema, completionResult('{"kind":"PRICE"}'));
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(StructuredOutputError);
+    const error = caught as StructuredOutputError;
+    expect(error.reason).toBe('SCHEMA_THREW');
+    expect(error.attempts).toHaveLength(1);
+    expect(error.servedByModel).toBe('claude-test-primary');
+    expect(error.message).toContain('схема сама сломалась');
+    expect((error as { cause?: unknown }).cause).toBeInstanceOf(Error);
   });
 
   it('длинный список претензий обрезается, но их количество названо честно', () => {

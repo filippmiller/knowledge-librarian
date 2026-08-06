@@ -85,7 +85,17 @@ export interface StructuredIssue {
   readonly message: string;
 }
 
-export type StructuredFailureReason = 'INVALID_JSON' | 'SCHEMA_MISMATCH';
+export type StructuredFailureReason =
+  | 'INVALID_JSON'
+  | 'SCHEMA_MISMATCH'
+  /**
+   * Схема упала сама, не вынеся вердикта. `safeParse()` в Zod 4 НЕ ловит
+   * исключения из `.transform()`/`.superRefine()`/`.check()`/`z.custom()` — он их
+   * пробрасывает (проверено на 4.3.5). Без этой ветки такая схема уносила бы
+   * наружу голый `Error` без `attempts[]`, то есть ровно ту телеметрию, ради
+   * которой адаптер и возвращает полный результат вызова.
+   */
+  | 'SCHEMA_THREW';
 
 /**
  * Ответ пришёл, но контракту не соответствует.
@@ -168,6 +178,11 @@ function buildMessage(
     return `structured(): ответ ${served} не разобрался как JSON: ${cause}`;
   }
 
+  if (reason === 'SCHEMA_THREW') {
+    const cause = issues[0]?.message ?? 'причина не определена';
+    return `structured(): схема упала на ответе ${served}, вердикта нет: ${cause}`;
+  }
+
   const listed = issues
     .slice(0, MAX_LISTED_ISSUES)
     .map((issue) => `${issue.path}: ${issue.message} [${issue.code}]`)
@@ -204,11 +219,28 @@ export function validateStructuredPayload<T>(
     );
   }
 
-  const validation = schema.safeParse(parsed);
+  // `safeParse` безопасен только относительно НЕсоответствия схеме: исключение
+  // из `.transform()`/`.superRefine()`/`.check()`/`z.custom()` он пробрасывает
+  // как есть. Не поймать его здесь значило бы отдать вызывающему голый `Error`
+  // без `attempts[]` — единственная дыра, через которую телеметрия вызова могла
+  // бы потеряться.
+  let validation: ReturnType<z.ZodType<T>['safeParse']>;
+  try {
+    validation = schema.safeParse(parsed);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new StructuredOutputError(
+      'SCHEMA_THREW',
+      [{ path: '<схема>', code: 'schema_threw', message }],
+      result,
+      { cause: error }
+    );
+  }
+
   if (!validation.success) {
-    // Ни коэрсии, ни частичного приёма: ответ, не соответствующий схеме, — не
-    // «почти успех». Молча принятая половина объекта уехала бы в базу знаний
-    // неотличимой от полной.
+    // Ни коэрсии, ни частичного приёма: адаптер принимает ровно то, что принимает
+    // схема, и ни байтом больше. Насколько строг сам контракт — решает схема
+    // (в B1 это `strictObject`, отвергающий лишние ключи, а не молча их срезающий).
     const issues: StructuredIssue[] = validation.error.issues.map((issue) => ({
       path: formatIssuePath(issue.path),
       code: issue.code,
@@ -251,5 +283,12 @@ export async function structured<T>(
     ...(opts.signal && { signal: opts.signal }),
   });
 
+  // Резерв провайдера НЕ спасает от несоответствия схеме, и это осознанно:
+  // `createChatCompletionDetailed` возвращается на первом же ответе провайдера,
+  // а схема проверяется после. Ответ 200 с мусором внутри валит вызов целиком, к
+  // другому вендору за «может, у него получится» адаптер не ходит — иначе
+  // `servedByModel` перестал бы означать «модель, чью выдачу вы читаете».
+  // Перезапрос по содержательной причине — решение вызывающего (consistency
+  // retry в PR E), а не молчаливая механика адаптера.
   return { ...result, data: validateStructuredPayload(opts.schema, result) };
 }
