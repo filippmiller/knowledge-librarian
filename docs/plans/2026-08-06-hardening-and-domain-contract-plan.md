@@ -10,30 +10,51 @@
 >
 > **Revision 2 (2026-08-06):** первая версия этого плана получила `REQUEST_CHANGES`
 > от того же внешнего ChatGPT-ревью, плюс два независимых открытых замечания от
-> Codex на самом PR (см. §3 — оба закрыты добавлением недостающих стадий и
-> заменой `--fail-on` на явную gate-семантику). Ревью согласилось с направлением
-> (порядок hardening → доменный контракт → пилот → схема правильный, provider-баги
-> подтверждены, порядок pgvector/Prisma логичен), но указало, что план физически
-> невыполним между PR B и пилотом (нет моста: structured output, QueryFrame,
-> extraction, human review, persistence), что PR A слишком большой одним куском,
-> что `facets: Record<string, FacetValue>` — будущий EAV, что `evaluateApplicability()`
+> Codex на самом PR. Ревью согласилось с направлением (порядок hardening →
+> доменный контракт → пилот → схема правильный, provider-баги подтверждены,
+> порядок pgvector/Prisma логичен), но указало, что план физически невыполним
+> между PR B и пилотом, что PR A слишком большой одним куском, что
+> `facets: Record<string, FacetValue>` — будущий EAV, что `evaluateApplicability()`
 > требует разбиения на 4 функции, что `grader.independent` — недостаточно одного
 > boolean, что gate golden corpus не совпадает с реальным shape `run-eval-corpus.ts`,
-> и что эту ветку нужно сначала обновить от текущего `master` (PR #60 уже смержен).
-> Все эти пункты учтены ниже; изменения отмечены `[R2]`.
+> и что эту ветку нужно сначала обновить от текущего `master`. Все эти пункты были
+> учтены (изменения отмечены `[R2]`).
+>
+> **Revision 3 (2026-08-06):** Revision 2 получила от того же ревью одобрение
+> макро-архитектуры («backbone правильный»), но снова `REQUEST CHANGES` — на этот
+> раз по контрактам, не по направлению. CodeRabbit независимо оставил 9 actionable
+> comments на диффе Revision 2, все признаны валидными без исключений; ревью
+> добавило ещё 8 существенных пунктов сверху. Изменения отмечены `[R3]`:
+> исправлены все 9 comments CodeRabbit (типы `reviewedAt`, Zod-инвариант
+> review-статуса, разделение table-driven тестов по владельцу, контракт
+> `structured()`, вход QueryFrame builder, типизация `ExtractedKnowledgeUnit.facets`,
+> единый формат persistence в PR F, MD040); плюс: fallback-политика заменена с
+> boolean на трёхзначный `FallbackPolicy` с явным legacy-совместимым дефолтом,
+> добавлены typed failure (`ChatCompletionError` с `attempts[]`) и
+> timeout/`AbortSignal` в A1; `GraderIndependence` переименован в реальную
+> provider/model-матрицу вместо переобещающего `FULL`; B1 различает
+> `NOT_APPLICABLE` и `UNKNOWN` через `KNOWLEDGE_KIND_REGISTRY`, `audience`
+> возвращён к текущей `CLIENT_SAFE | INTERNAL_ONLY` семантике; `negation: boolean`
+> в QueryFrame заменён на per-facet `QueryFacetState` с evidence и `questionAspects`,
+> `missingRequiredFacets` убран из LLM-выхода в пользу детерминированного
+> вычисления в B2; `ExtractedKnowledgeUnit` получил обратно само утверждение
+> (`statement`/`title`) и provenance по полям; PR F требует JSONL безусловно и
+> детерминированные ID из pre-LLM source anchor, не из хэша LLM-контента; §6
+> DAG перестроен по реальным техническим зависимостям вместо декоративной
+> последовательности; §4.1 явно фиксирует инвариант «scenario не единственная
+> ось» как принятое решение, а не открытый вопрос.
 
 ## Как это читать
 
 - **§1** — что из разбора подтвердилось при чтении кода (буквально, не на слово).
 - **§2** — что я оспариваю или уточняю, с обоснованием.
-- **§3** — предлагаемая последовательность работ (`[R2]`: расширена мостом между
-  доменным контрактом и пилотом, PR A разбит на A1–A4, PR B — на B1/B2).
-- **§4** — архитектурные вопросы, которые план сознательно НЕ решает сейчас, а
-  ставит на пилот 2.3 — чтобы не повторить ошибку "схема раньше пилота" ещё раз,
-  на этот раз с фасетами вместо scenario-дерева.
+- **§3** — предлагаемая последовательность работ и её зависимости (`[R3]`:
+  граф зависимостей исправлен на технический, не декоративный).
+- **§4** — архитектурные вопросы; часть из них Revision 3 переводит из «открыто»
+  в «инвариант принят, детали решает пилот» (см. 4.1).
 - **§5** — что явно не делать в следующей сессии.
 - **§6** — Beads-изменения (готовятся к выполнению ПОСЛЕ утверждения этого плана,
-  не раньше).
+  не раньше — и не раньше содержательного ревью самой Revision 3).
 
 ---
 
@@ -143,7 +164,8 @@ const graderIsIndependent = graderProvider !== extractionProvider || graderModel
   вводит модель `reviewStatus: UNCLASSIFIED|REVIEWED` — разные имена одного
   понятия в разных разделах одного документа. Моя ошибка, не смысловая, но
   реальная. **[R2]** См. §3 (PR A4) и §4.4 ниже — вводим строгий инвариант
-  вместо простого переименования.
+  вместо простого переименования. **[R3]** Инвариант теперь также закреплён
+  Zod-refinement в B1, не только текстом (см. PR B1, PR A4).
 - **Моя собственная ошибка счёта**, не в самом документе: в тексте PR #59 и
   комментарии Beads я дважды написал «5 SCOPE dimensions», перечислив ровно
   четыре (`scenario/audience/geography/service`). В самой truth table (§ Термины)
@@ -188,8 +210,11 @@ pgvector вообще; зависимость появляется только 
 **[R2]** Codex независимо указал на связанный пробел на самом PR: копировать
 `--fail-on=none|degraded|lost` из `test-extraction-pack.ts` в `run-eval-corpus.ts`
 нельзя буквально — у extraction harness есть вердикты `DEGRADED`/`LOST`, у
-golden corpus их нет, там только `PASS/FAIL` на кейс. См. §3, PR A3 — вместо
-переноса чужой семантики вводим отдельную, подходящую именно этому раннеру.
+golden corpus их нет, там только `PASS/FAIL` на кейс. См. §3, PR A3.
+**[R3]** CodeRabbit на диффе Revision 2 пошёл на шаг дальше: даже нового
+`ExpectedDisposition`/`CaseResult` недостаточно без явного `ActualDisposition` —
+без него `MUST_HOLD → direct-answer` и поведение `MAY_HOLD` невозможно вычислить
+из голого `PASS/FAIL`. Полная матрица — в PR A3 ниже.
 
 ---
 
@@ -210,10 +235,8 @@ Document/Rule/QAPair", НЕ "нулевые записи вообще") уже �
 
 **[R2]** Ревью раунда 2 согласилось с этим доводом ("не скрытый сюрприз"), но
 справедливо добавило: это не отменяет необходимость настоящего no-write режима
-для production regression runner'а — то, что прежние прогоны уже писали
-телеметрию, объясняет историю, но не основание продолжать так делать. Принято
-без возражений — `telemetryMode: 'disabled'` остаётся в PR A3, теперь явно как
-обязательный пункт, не как опциональное улучшение.
+для production regression runner'а. Принято без возражений — `telemetryMode:
+'disabled'` остаётся в PR A3, явно как обязательный пункт.
 
 ### 2.2 «Legacy numeric evidence должен быть hold, а не участвовать в синтезе как раньше» — реальный компромисс, не очевидный факт
 
@@ -226,9 +249,7 @@ backfill») имеет цену: `SCOPE_NULL_STRICT` dry-run в этой же с
 РЕШЕНИЕ, которое нужно принять осознанно с числом в руках (dry-run на золотом
 корпусе ДО включения), а не тихо принять как самоочевидно верное.
 
-**[R2] Конкретный эксперимент** (ревью раунда 2 согласилось с доводом, но
-потребовало не просто «когда-нибудь dry-run», а точный протокол измерения —
-добавляется как задача в PR A4/отдельная задача Beads, см. §6):
+**[R2] Конкретный эксперимент:**
 
 Shadow-фиксация (не блокирует ответ, только логирует), reason
 `unverified_numeric_evidence`, срабатывает только при ОДНОВРЕМЕННОМ выполнении:
@@ -251,187 +272,262 @@ Shadow-фиксация (не блокирует ответ, только лог
 Только после этого отчёта выбирается policy (например: internal-аудитория —
 разрешить + пометка unverified; client-аудитория — typed-источник авто-отправка,
 legacy-only prose — human review). Hold применяется к конкретному
-неподтверждённому утверждению, а не ко всему документу, где встретилась цифра
-— так стратегия не деградирует в грубую блокировку каждого DocChunk/Rule с
-любым числом внутри.
+неподтверждённому утверждению, а не ко всему документу, где встретилась цифра.
 
 ### 2.3 Оценка «Реальная готовность нового v2-движка: 2/10»
 
 Согласен по существу (в runtime нет `ApplicabilityProfile`/`QueryFrame`/
 `evaluateApplicability` — и не должно быть, эта работа целенаправленно не
-начиналась: план (после ревью Grok+Codex, PR #54) прямо требует truth table
-ДО pilot ДО схемы, не наоборот). Числовая оценка не то, с чем можно спорить
-предметно — фиксирую согласие, не разбираю дальше.
+начиналась). Числовая оценка не то, с чем можно спорить предметно — фиксирую
+согласие, не разбираю дальше.
+
+### 2.4 Dependabot (81 alerts) — не блокер этого PR **[R3]**
+
+Ревью раунда 3 подтвердило верность решения не смешивать это с PR №61: 81 alert
+нельзя чинить одним массовым апдейтом — нужно разделить runtime vs dev-only,
+direct vs transitive, severity, reachability, patch/minor vs major. Заведено
+отдельной задачей вне Beads-графа этого плана (не блокирует PR A1–F), если среди
+алертов не найдётся подтверждённая critical reachable runtime-уязвимость —
+severity и reachability пока не проверены, поэтому не игнорируется и не паникуется.
 
 ---
 
-## §3. Предлагаемая последовательность **[R2 — существенно переработано]**
+## §3. Предлагаемая последовательность и граф зависимостей **[R3 — граф исправлен на технический]**
 
-Ревью раунда 1 согласилось с макро-порядком (hardening → доменный контракт →
-пилот → схема), но правильно указало на физическую невыполнимость перехода от
-PR B прямо к пилоту 2.3: пилоту нужны structured-output контракт, QueryFrame,
-структурная экстракция с provenance, human-review формат и временное
-persistence — этого не было ни одной задачей между ними. Ниже — полная цепочка
-без пропусков, плюс разбиение PR A и PR B на управляемые куски (проверяемые и
-откатываемые по отдельности, а не одним PR с шестью несвязанными зонами
-изменений).
+Revision 2 предложила полностью линейную цепочку (A1→A2→A3→A4→B1→B2→...). Ревью
+раунда 3 верно указало: это декоративный порядок ревью, а не реальные технические
+зависимости — A3 и A4 физически не зависят от A1/A2, а пилот 2.3 зависит не
+только от F, но и от B2 и D параллельно (F зависит от E, но D — отдельная ветка,
+не сворачивающаяся в E/F). Ниже — реальный DAG; порядок ИСПОЛНЕНИЯ (какой PR
+писать первым) может по-прежнему быть линейным по соображениям пропускной
+способности одной сессии, но БЛОКИРОВКА в Beads должна отражать только то, что
+технически необходимо.
 
+```text
+Обновить эту ветку от текущего master (сделано в Revision 2)
+
+Без зависимостей, могут идти параллельно:
+  A1 — Provider routing & fallback contract
+  A3 — Eval harness gate semantics
+  A4 — Документация (truth-table consistency, review-status invariant)
+
+A1 → A2 — Extraction run consistency
+
+A4 → B1 — Типизированный доменный контракт (FacetRegistry, KnowledgeKindRegistry,
+           ApplicabilityProfile, QueryFrame)
+
+B1 → B2 — Evaluator'ы (eligibility / scope / trigger / resolution)
+
+B2 → 2.2 — Concept/ConceptAlias (translation-5ii)
+
+A1 + B1 → C — Provider structured-output adapter
+
+B1 + C + 2.2 → D — QueryFrame builder
+
+A2 + B1 + C + 2.2 → E — Структурная экстракция + provenance
+
+E → F — Human-review артефакт + JSONL persistence
+
+B2 + D + F → 2.3 — Пилот на 3–5 РЕАЛЬНЫХ документах бюро
+
+2.3 → 2.4 — Финальная Prisma-схема v2
+
+2.4 → pgvector (3.1/3.2) / retrieval / shadow / canary — без изменений порядка
 ```
-Обновить эту ветку от текущего master (PR #60 уже смержен — сделано в этой
-редакции документа)
-   ↓
-[сделано] 0.0–0.3, 0.6/0.7 (partial), 2.1 (truth table) — PR #55–59
-   ↓
-A1 — Provider routing & fallback contract
-   ↓
-A2 — Extraction run consistency (единый ExtractionRunConfig, grader independence)
-   ↓
-A3 — Eval harness gate semantics (baseline vs gate, no-write mode)
-   ↓
-A4 — Документация (truth-table consistency, review-status invariant, 3.1 заголовок,
-     numeric-evidence эксперимент как задача)
-   ↓
-B1 — Типизированный доменный контракт: FacetRegistry, ApplicabilityProfile,
-     QueryFrame — pure TS/Zod, без Prisma/LLM/БД
-   ↓
-B2 — Evaluator'ы: eligibility / scope / trigger / multi-unit resolution,
-     exhaustive table-driven тесты на каждую строку truth table
-   ↓
-2.2 — Concept/ConceptAlias, канонические Concept ID (уже в очереди Beads,
-     translation-5ii — теперь зависит от B2, не только от 2.1)
-   ↓
-C — Provider structured-output adapter (типобезопасный JSON-контракт поверх
-     Anthropic/OpenAI, с реальной резолвленной моделью в артефакте)
-   ↓
-D — QueryFrame builder (вопрос + история переписки + канал → typed QueryFrame,
-     UNKNOWN для отсутствующих значений, negation, missingRequiredFacets)
-   ↓
-E — Структурная экстракция + provenance (kind/facets/triggerCondition/
-     numericConstraint/parentRuleRef/sourceSpan вместо title+body)
-   ↓
-F — Human-review артефакт + временное immutable persistence для пилота
-     (JSON/JSONL, не production Prisma v2)
-   ↓
-2.3 — Пилот на 3–5 РЕАЛЬНЫХ документах бюро (не только синтетика про зуд)
-   ↓
-2.4 — Финальная Prisma-схема v2 (только после B2, C–F и 2.3 дают реальные данные)
-   ↓
-pgvector (3.1/3.2) / retrieval / shadow / canary — без изменений порядка
-```
+
+Практическое следствие для исполнения (не для Beads-блокировки): A1/A3/A4 можно
+писать в любом порядке или параллельно разными сессиями — они не мешают друг
+другу файлово. B1 технически ждёт только A4 (нужен зафиксированный
+review-инвариант и truth-table consistency перед тем, как типизировать контракт
+на их основе) — по факту разумно также подождать A1–A3, чтобы не переписывать
+signatures дважды, но это решение по эргономике, не зависимость.
 
 ### PR A1 — Provider routing & fallback contract [P0]
 
-Разбито из исходного пункта 1–2, 5 старого PR A. Только provider-механика,
-никакой правки extraction/grader/eval-корпуса в этом PR.
+Только provider-механика, никакой правки extraction/grader/eval-корпуса в этом PR.
 
-- **Явный fallback-контракт по умолчанию — fail-closed.** Если вызывающий код
-  закрепил `options.model` явно, кросс-провайдерный фоллбэк для этого вызова
-  ОТКЛЮЧЁН по умолчанию — молчаливая подмена модели хуже честной ошибки,
-  особенно для extraction/grader/verifier/benchmark/QueryFrame-построения.
-  Явный opt-in при необходимости фоллбэка:
+**[R3] Fallback-политика — трёхзначная, не boolean, с явным legacy-совместимым
+дефолтом.** Revision 2 сделала `allowCrossProviderFallback` default `false` —
+ревью верно указало, что это молча отключило бы фоллбэк у ВСЕХ существующих
+call sites (classifier, synthesis, verifier), которые сегодня на него
+рассчитывают, при заявлении «existing call sites не трогаются» — внутреннее
+противоречие. Вместо boolean:
 
-  ```ts
-  interface ChatCompletionOptions {
-    // ...существующие поля
-    providerModels?: { anthropic?: string; openai?: string };
-    allowCrossProviderFallback?: boolean; // default: false
-  }
-  ```
+```ts
+type FallbackPolicy =
+  | 'NONE'               // фоллбэк запрещён — явно закреплённая модель важнее
+                          // отказоустойчивости
+  | 'SAME_PROVIDER_ONLY'  // фоллбэк допустим только на другую модель ТОГО ЖЕ
+                          // провайдера (зарезервировано, не требуется в A1)
+  | 'CROSS_PROVIDER';     // фоллбэк на другого провайдера разрешён —
+                          // ТРЕБУЕТ providerModels[fallbackProvider]
 
-  Если `allowCrossProviderFallback: true`, фоллбэк обязан взять модель из
-  `providerModels[fallbackProvider]`, а не переиспользовать `options.model`.
-  Обычный клиентский synthesis (не extraction/grader) может продолжать
-  разрешать фоллбэк — это решение оставляется на месте вызова, не хардкодится
-  в `chat-provider.ts`.
+interface ChatCompletionOptions {
+  // ...существующие поля
+  providerModels?: { anthropic?: string; openai?: string };
+  fallbackPolicy?: FallbackPolicy;
+}
+```
 
-- **Вернуть, что РЕАЛЬНО обслужило вызов — не ломая существующие call sites.**
-  Вместо немедленной замены сигнатуры `createChatCompletion(): Promise<string>`
-  везде (риск для hardening-PR слишком большой ради одного PR), добавляется
-  parallel "detailed" API, а существующая сигнатура становится тонкой обёрткой:
+Правило дефолта (без него это снова тихая регрессия):
 
-  ```ts
-  interface CompletionAttempt {
-    provider: Provider;
-    model: string;
-    startedAt: string;
-    latencyMs: number;
-    outcome: 'SUCCESS' | 'ERROR';
-    statusCode?: number;
-    errorCode?: string;
-  }
+```text
+options.model задан явно (пиннинг)
+  + providerModels[fallbackProvider] НЕ задан  → fallbackPolicy по умолчанию NONE
+    (fail-closed: явное закрепление важнее отказоустойчивости)
+  + providerModels[fallbackProvider] задан      → CROSS_PROVIDER разрешён с этой
+    моделью
 
-  interface ChatCompletionResult {
-    text: string;
-    servedByProvider: Provider;
-    servedByModel: string;
-    fallbackUsed: boolean;
-    attempts: CompletionAttempt[];
-  }
+options.model НЕ задан явно (сегодняшний типичный call site)
+  → fallbackPolicy по умолчанию временно остаётся CROSS_PROVIDER (без смены
+    модели — берётся дефолт целевого провайдера), сохраняя ТЕКУЩЕЕ поведение
+    бесшовно. Это временное состояние до отдельной последовательной миграции
+    call sites на явный `fallbackPolicy` — не постоянное решение, отслеживается
+    как follow-up задача (см. §6), не блокирует A1.
+```
 
-  async function createChatCompletionDetailed(
-    options: ChatCompletionOptions
-  ): Promise<ChatCompletionResult>;
+**Typed failure — ошибка тоже несёт телеметрию.** `ChatCompletionResult`
+Revision 2 существовал только для успеха; при полном отказе (primary И fallback
+оба упали) диагностика снова терялась бы. Решение — не новый discriminated-union
+return type (это изменило бы `await`-эргономику каждого места вызова), а typed
+error, сохраняющий сегодняшнее поведение «бросает исключение при полном отказе»:
 
-  async function createChatCompletion(
-    options: ChatCompletionOptions
-  ): Promise<string> {
-    return (await createChatCompletionDetailed(options)).text;
-  }
-  ```
+```ts
+interface CompletionAttempt {
+  provider: Provider;
+  model: string;
+  startedAt: string;
+  latencyMs: number;
+  outcome: 'SUCCESS' | 'ERROR' | 'ABORTED';
+  statusCode?: number;
+  errorCode?: string;
+}
 
-  Существующие call sites не трогаются в этом PR. Новый код (A2 extraction,
-  grader, будущий C) переходит на `createChatCompletionDetailed`.
+interface ChatCompletionResult {
+  text: string;
+  servedByProvider: Provider;
+  servedByModel: string;
+  fallbackUsed: boolean;
+  attempts: CompletionAttempt[];
+}
 
-- **[P1]** `streamChatCompletionTokens`: `options.provider ?? getProvider()`,
-  как уже сделано в `createChatCompletion`. Аналогичная detailed-обёртка для
-  стриминга:
+class ChatCompletionError extends Error {
+  attempts: CompletionAttempt[];
+  constructor(message: string, attempts: CompletionAttempt[]) { ... }
+}
 
-  ```ts
-  const operation = createChatCompletionStreamDetailed(options);
-  for await (const token of operation.tokens) { /* ... */ }
-  const metadata = await operation.completion; // ChatCompletionResult без text
-  ```
+async function createChatCompletionDetailed(
+  options: ChatCompletionOptions
+): Promise<ChatCompletionResult>;
+// бросает ChatCompletionError (с полным attempts[]) при полном отказе —
+// не молча возвращает пустой text
+
+async function createChatCompletion(
+  options: ChatCompletionOptions
+): Promise<string> {
+  return (await createChatCompletionDetailed(options)).text;
+}
+```
+
+Существующие call sites не трогаются в этом PR — они уже сегодня получают
+исключение при полном отказе, просто без `attempts[]` внутри. Новый код (A2
+extraction, grader, будущий C) переходит на `createChatCompletionDetailed` и
+может читать `error.attempts` в catch-блоке.
+
+**Timeout и cancellation — подтверждено обоими сегодняшними аудитами как
+отсутствующее, не включено в Revision 2, добавляется здесь:**
+
+```ts
+interface ChatCompletionOptions {
+  // ...
+  requestTimeoutMs?: number;   // таймаут одной попытки (primary ИЛИ fallback)
+  totalDeadlineMs?: number;    // суммарный дедлайн на весь вызов, включая retry
+  signal?: AbortSignal;
+}
+```
+
+Правила:
+- retry/backoff обязаны укладываться в `totalDeadlineMs` — превышение
+  дедлайна прерывает попытку фоллбэка, не начинает её;
+- прерванный стрим (потребитель прекратил итерацию раньше конца, или сработал
+  `AbortSignal`) — `outcome: 'ABORTED'` в соответствующем `CompletionAttempt`,
+  не `'ERROR'`;
+- ранний выход потребителя из `for await` не должен блокировать финализацию
+  completion-метаданных (`operation.completion` в стриминговом варианте ниже
+  обязана разрешиться/отклониться, а не зависнуть).
+
+**Streaming, аналогично:**
+
+```ts
+export async function* streamChatCompletionTokens(options, chunkSize) {
+  const provider = options.provider ?? getProvider(); // было: только getProvider()
+  // ...
+}
+
+const operation = createChatCompletionStreamDetailed(options);
+for await (const token of operation.tokens) { /* ... */ }
+const metadata = await operation.completion; // ChatCompletionResult без text
+```
 
 **Acceptance criteria:**
-- закреплённая Anthropic-модель никогда не отправляется в OpenAI при фоллбэке;
-- без `providerModels[fallbackProvider]` кросс-провайдерный фоллбэк не
-  выполняется — вызов завершается ошибкой (fail-closed), не молчаливой
-  подменой модели;
+- закреплённая (`options.model` задан) модель никогда не отправляется другому
+  провайдеру без `providerModels[fallbackProvider]` — в этом случае вызов
+  завершается `ChatCompletionError`, не молчаливой подменой модели;
+- вызовы без явно закреплённой модели сохраняют сегодняшнее поведение
+  (кросс-провайдерный фоллбэк работает как раньше) — ни один существующий
+  тест/сценарий не должен сломаться из-за этого PR;
 - при заданном `providerModels` фоллбэк использует правильный, валидный для
   целевого провайдера model ID;
 - `streamChatCompletionTokens` уважает `options.provider`;
-- `attempts[]` в `ChatCompletionResult` содержит каждую попытку (primary +
-  fallback, если был);
-- тесты: primary success, primary fail → fallback success (с `providerModels`),
-  primary fail → fallback disabled (без `providerModels`, ожидаем ошибку),
-  dual failure.
+- `attempts[]` содержит каждую попытку (primary + fallback, если был), включая
+  `ABORTED` для прерванных попыток;
+- `totalDeadlineMs` соблюдается — retry не начинается, если превысит дедлайн;
+- ранний разрыв потребления стрима не подвешивает `operation.completion`;
+- тесты: primary success; primary fail → fallback success (с `providerModels`);
+  primary fail → fallback `NONE` (пиннинг без provider map, ожидаем
+  `ChatCompletionError`); primary fail → legacy fallback (без пиннинга,
+  сохранённое поведение); dual failure (оба провайдера упали, `attempts.length
+  === 2`); timeout укладывающийся и превышающий `totalDeadlineMs`; ранняя
+  отмена стрима.
 
-### PR A2 — Extraction run consistency [P0]
-
-Разбито из исходного пункта 3–4 старого PR A.
+### PR A2 — Extraction run consistency [P0, depends-on A1]
 
 - **[P0]** `retryBatchExtraction()` должен получать ту же модель, что и
   первичный вызов — единый `ExtractionRunConfig` (provider, model, prompt
-  version), не два независимых места выбора модели.
+  version, `fallbackPolicy`), не два независимых места выбора модели.
 - **[P0]** Пересчитать независимость grader'а по РЕЗОЛВЛЕННЫМ
   `servedByProvider`/`servedByModel` (из `ChatCompletionResult`, PR A1), не по
-  сырым env-переменным. **[R2]** Одного boolean недостаточно — документ может
-  делиться на несколько batch, часть из которых обслужена одной моделью,
-  часть — другой после фоллбэка (даже с fail-closed policy: пользователь мог
-  явно разрешить фоллбэк для этого прогона). Вместо `graderIsIndependent: boolean`:
+  сырым env-переменным.
+
+  **[R3] `GraderIndependence` переименован — старая шкала переобещала.**
+  Revision 2 ввела `FULL | PARTIAL | NONE | UNKNOWN`, но ревью верно указало:
+  если extraction шёл на Claude Haiku, а grader — на Claude Sonnet,
+  `provider+model` формально различаются и шкала назвала бы это `FULL`
+  независимостью — при том, что это одно семейство моделей одного вендора с
+  потенциально коррелированными ошибками. `FULL` — слово, которое здесь нельзя
+  использовать честно. Вместо оценки независимости — фактическая матрица
+  отношений:
 
   ```ts
-  type GraderIndependence = 'FULL' | 'PARTIAL' | 'NONE' | 'UNKNOWN';
-  // FULL    — ни один вызов grader'а не совпал по provider+model ни с одним
-  //           extraction-вызовом (primary или retry, по всем batch)
-  // PARTIAL — часть extraction-вызовов совпала с grader'ом, часть нет
-  // NONE    — grader и extraction фактически выполнены одной моделью
-  // UNKNOWN — не хватает attempt-метаданных для вывода (старые прогоны до A1)
+  type ModelRelationship =
+    | 'SAME_MODEL'                    // тот же provider И та же model строка
+    | 'SAME_PROVIDER_DIFFERENT_MODEL' // тот же provider, другая model
+    | 'DIFFERENT_PROVIDER'            // разные provider (Anthropic vs OpenAI)
+    | 'MIXED'                         // batch/retry дали разные результаты
+                                       // внутри одного прогона
+    | 'UNKNOWN';                      // не хватает attempt-метаданных (прогоны
+                                       // до PR A1)
   ```
+
+  Понятие «независимый grader» как policy-вывод (например, «считать надёжным
+  для авто-принятия») строится ПОВЕРХ этой матрицы отдельной функцией
+  (`DIFFERENT_PROVIDER` → надёжно независим; `SAME_PROVIDER_DIFFERENT_MODEL` →
+  частично; `SAME_MODEL`/`MIXED` → не независим) — но сырое поле артефакта
+  хранит факт (`ModelRelationship`), не готовую интерпретацию.
 
   Артефакт прогона хранит каждый extraction batch, каждый retry, каждый grader
   call с их фактическим `servedByProvider`/`servedByModel`/prompt version/
-  source hash — независимость вычисляется по этому списку, не по двум
+  source hash — `ModelRelationship` вычисляется по этому списку, не по двум
   env-строкам.
 
 **Acceptance criteria:**
@@ -439,42 +535,74 @@ pgvector (3.1/3.2) / retrieval / shadow / canary — без изменений �
   `ExtractionRunConfig`;
 - артефакт прогона хранит фактически использованную модель для каждого batch
   (включая retry);
-- mixed-model run (из-за разрешённого фоллбэка) явно помечается в артефакте;
-- `GraderIndependence` вычисляется как FULL/PARTIAL/NONE/UNKNOWN по реальным
-  attempt-данным, не по env presence;
-- extraction benchmark не может пометить прогон как `FULL`-независимый без
-  фактической телеметрии, подтверждающей это.
+- mixed-model run (из-за разрешённого фоллбэка) явно помечается `MIXED` в
+  артефакте;
+- `ModelRelationship` вычисляется как SAME_MODEL/SAME_PROVIDER_DIFFERENT_MODEL/
+  DIFFERENT_PROVIDER/MIXED/UNKNOWN по реальным attempt-данным, не по env presence;
+- ни один текст отчёта/лога не использует слово «independent» без указания
+  конкретного `ModelRelationship`, на котором основан вывод.
 
 ### PR A3 — Eval harness gate semantics [P1]
 
-Разбито из исходного пункта 6–7, 11 старого PR A. **[R2]** Исходное
-предложение «скопировать `--fail-on=none|degraded|lost` из
-`test-extraction-pack.ts`» отклонено — Codex верно указал, что
-`run-eval-corpus.ts` не имеет вердиктов `DEGRADED`/`LOST`, только per-case
-`PASS/FAIL`. Вместо копирования чужой семантики — своя, подходящая этому
-раннеру:
+Своя gate-семантика для `run-eval-corpus.ts` (не копия
+`--fail-on=none|degraded|lost` из `test-extraction-pack.ts` — там другие
+вердикты, `DEGRADED`/`LOST`, которых у golden corpus нет).
+
+**[R3] Добавлен `ActualDisposition` — CodeRabbit верно указал, что без него
+`MUST_HOLD → direct-answer` и `MAY_HOLD` невозможно вычислить из голого
+`PASS/FAIL`:**
 
 ```ts
+type ActualDisposition = 'DIRECT_ANSWER' | 'HOLD' | 'ERROR';
+
 type ExpectedDisposition =
-  | 'MUST_PASS'    // regression, если FAIL
-  | 'MUST_HOLD'    // regression, если бот дал прямой ответ вместо hold
-  | 'MAY_HOLD'     // hold допустим временно (например, кейс с нострификацией —
-                    // уже документирован как temporarily-acceptable hold)
+  | 'MUST_PASS'    // ожидаем прямой корректный ответ
+  | 'MUST_HOLD'    // ожидаем hold/clarification, не прямой ответ
+  | 'MAY_HOLD'     // и прямой ответ (если корректный), и hold — оба приемлемы
+                    // (например, кейс с нострификацией — temporarily-acceptable
+                    // hold, уже задокументирован)
   | 'KNOWN_FAIL';  // ожидаемо падает сегодня, не блокирует gate
 
 type CaseResult = 'PASS' | 'FAIL' | 'XFAIL' | 'XPASS';
-// XFAIL — KNOWN_FAIL и фактически FAIL: ожидаемо, не блокирует
-// XPASS — KNOWN_FAIL, но фактически PASS: неожиданное улучшение, требует
-//         ручного решения — либо снять KNOWN_FAIL, либо это ложный сигнал
+```
+
+Явная матрица `ExpectedDisposition × ActualDisposition → CaseResult`:
+
+```text
+MUST_PASS:
+  DIRECT_ANSWER + assertions passed → PASS
+  DIRECT_ANSWER + assertions failed → FAIL
+  HOLD                               → FAIL
+  ERROR                              → FAIL
+
+MUST_HOLD:
+  HOLD          → PASS
+  DIRECT_ANSWER → FAIL
+  ERROR         → FAIL
+
+MAY_HOLD:
+  HOLD                             → PASS
+  DIRECT_ANSWER + assertions pass  → PASS
+  DIRECT_ANSWER + assertions fail  → FAIL
+  ERROR                            → FAIL
+
+KNOWN_FAIL:
+  фактический FAIL (по любой из вышеуказанных логик) → XFAIL, не блокирует gate
+  фактический PASS                                    → XPASS, требует ручного
+                                                          review (снять
+                                                          KNOWN_FAIL или это
+                                                          ложный сигнал)
+  ERROR движка (исключение, не assertion)              → FAIL всегда, никогда
+                                                          не XFAIL
 ```
 
 Режимы запуска:
 
 ```bash
 --mode=baseline   # всегда пишет snapshot результатов, никогда не падает
---mode=gate       # exit 1 при: MUST_PASS→FAIL, MUST_HOLD→direct-answer,
-                  # KNOWN_FAIL→PASS (XPASS, требует ручного review baseline)
-                  # ошибка самого движка (исключение, не assertion) — всегда exit 1
+--mode=gate       # exit 1 при: MUST_PASS→FAIL, MUST_HOLD→FAIL, MAY_HOLD→FAIL,
+                  #   KNOWN_FAIL→XPASS (требует ручного review baseline)
+                  #   ошибка самого движка — всегда exit 1
 ```
 
 - **[P1]** 6 `known-good` кейсов без явного `requiresClarificationOrHold`
@@ -482,14 +610,16 @@ type CaseResult = 'PASS' | 'FAIL' | 'XFAIL' | 'XPASS';
   нострификацией — `MAY_HOLD`, не подряд всем шести одна и та же метка).
 - **[P1]** `telemetryMode: 'disabled'` — параметр на исполняемый вызов,
   глушащий fire-and-forget телеметрию (`HallucinationLog` и т.п.) именно на
-  eval-прогонах. Не убирает существующее поведение для реальных
-  пользовательских вопросов — только для `--mode=gate`/`--mode=baseline`.
+  eval-прогонах.
 
 **Acceptance criteria:**
 - `--mode=baseline` всегда формирует snapshot-артефакт, никогда не завершает
   процесс с ненулевым кодом из-за содержимого кейсов;
-- `--mode=gate` возвращает exit 1 именно при перечисленных regression-условиях
-  и ни при каких других;
+- `ActualDisposition` вычисляется из реального ответа движка (наличие
+  hold/clarification маркера vs прямой ответ vs исключение) ДО сравнения с
+  `ExpectedDisposition`;
+- `--mode=gate` возвращает exit 1 ровно по матрице выше и ни при каких других
+  условиях;
 - PASS/FAIL/XFAIL/XPASS вычисляются по стабильным case ID, не по порядковому
   номеру в файле;
 - ни один `known-good` кейс не остаётся без явной `ExpectedDisposition`;
@@ -498,42 +628,37 @@ type CaseResult = 'PASS' | 'FAIL' | 'XFAIL' | 'XPASS';
 
 ### PR A4 — Документация [P1]
 
-Разбито из исходного пункта 8–9 старого PR A плюс новый пункт про
-review-статус.
-
 - Убрать вводящий в заблуждение заголовок «(ПЕРЕД 2.4, не после)» у Задачи 3.1
-  в `docs/plans/2026-08-05-aurora-knowledge-engine-v2.md` (см. §1.8 — сам
-  критический путь ниже уже верный, правится только заголовок).
+  в `docs/plans/2026-08-05-aurora-knowledge-engine-v2.md` (см. §1.8).
 - Truth table §2: явно продублировать `audience` в колонке «обязательные поля»
   для всех kind, где оно применимо.
-- **[R2] Строгий инвариант вместо простого переименования.** `reviewedBy` и
-  `reviewStatus` — не два имени одного понятия, а разные поля с зависимостью:
+- **Строгий инвариант вместо простого переименования, единый тип везде.**
+  `reviewedBy` и `reviewStatus` — разные поля с зависимостью:
 
   ```ts
   reviewStatus: 'UNCLASSIFIED' | 'REVIEWED';
   reviewedBy: string | null;
-  reviewedAt: Date | null;
+  reviewedAt: string | null;  // [R3] ISO-8601 string везде на границе JSON/
+                               // JSONL/Zod — CodeRabbit нашёл, что Revision 2
+                               // смешала Date/string между этим блоком и B1;
+                               // Date допустим ТОЛЬКО внутри runtime-кода после
+                               // явного parse, никогда в самом контракте
   // Инвариант: reviewStatus === 'REVIEWED' ⟺ reviewedBy и reviewedAt оба заданы
   ```
 
-  Для факета в состоянии `GLOBAL` (см. B1 ниже) отдельно хранится, кто именно
-  подтвердил глобальность ИМЕННО этого измерения — не переиспользовать
-  document-level `reviewedBy` для per-facet review. Truth table §2 и §5
-  приводятся к этому единому контракту в этом PR.
-- Зафиксировать явно в §2 truth table: `PRICE_RULE` описывает ПОЛИТИКУ расчёта
-  (коэффициенты, что входит в стоимость), не сами числа — не конкурирует с уже
-  типизированным `Tariff` (услуга/направление/единица/срок/даты/audience).
-  Правка одного предложения, не требует пилота (см. §4.3).
+  **[R3]** Этот инвариант документируется здесь как источник истины, но
+  ЗАКРЕПЛЯЕТСЯ кодом (Zod `.superRefine()`) в PR B1, не только текстом —
+  CodeRabbit верно указал, что текстового комментария недостаточно для
+  runtime-контракта.
+- Зафиксировать явно в §2 truth table: `PRICE_RULE` описывает ПОЛИТИКУ расчёта,
+  не сами числа — не конкурирует с уже типизированным `Tariff`.
 - Добавить в план задачу (см. §6) на конкретный numeric-evidence эксперимент
-  из §2.2 выше — не абстрактное "когда-нибудь dry-run", а измерение с
-  зафиксированным протоколом.
+  из §2.2 выше.
 
-### PR B1 — Типизированный доменный контракт [P1, depends-on A1–A4]
+### PR B1 — Типизированный доменный контракт [P1, depends-on A4]
 
-**[R2] `facets: Record<string, FacetValue>` отклонён** — легко превращается в
-новый EAV (`issuingCountry`/`issueCountry`/`issuerCountry`/`issuingContry` —
-все валидны для TypeScript, hard filter перестаёт совпадать при малейшей
-опечатке в ключе). Вместо этого — типизированный, но расширяемый registry:
+**`facets: Record<string, FacetValue>` отклонён** — легко превращается в новый
+EAV. Вместо этого — типизированный, но расширяемый registry:
 
 ```ts
 // src/lib/knowledge/applicability/facets.ts
@@ -558,49 +683,145 @@ type FacetState<T> =
   | { state: 'SCOPED'; include: readonly T[]; exclude?: readonly T[] };
 ```
 
-Обращение по ключу, отсутствующему в `FACET_REGISTRY`, — ошибка компиляции/
-runtime-валидации (fail-closed), не молчаливое игнорирование. `UNKNOWN` и
-`GLOBAL` — разные состояния, не взаимозаменяемые (нельзя случайно трактовать
-неизвестное как разрешение применять знание глобально — это уже пройденный
-урок текущего v1-бага). `audience`, `reviewStatus` и provenance — отдельные
-обязательные поля верхнего уровня `ApplicabilityProfile`, не элементы facets.
+**[R3] `NOT_APPLICABLE` и `UNKNOWN` — разные состояния, не одна и та же
+"отсутствующая фасета".** Ревью указало главную оставшуюся двусмысленность:
+`facets: { [K in FacetKey]?: FacetState<...> }` (опциональный ключ) кодирует
+ОБА случая одним и тем же "поле отсутствует" — «фасета неприменима к этому
+`kind`» и «фасета применима, но пока неизвестна». Это ровно тот класс ошибки,
+который весь план пытается уничтожить у `scenarioKey=null`. Решение — второй
+registry, привязывающий применимость фасет к `kind`:
 
-Конкретный набор facet-ключей сверх перечисленных в примере выше и их
-обязательность по `kind` — решает пилот (2.3), не эта задача (см. §4.1). B1
-даёт расширяемый типовой каркас, не финальный список измерений.
+```ts
+// src/lib/knowledge/applicability/kinds.ts
+const KNOWLEDGE_KIND_REGISTRY = {
+  PROCEDURE_STEP: {
+    applicableFacets: ['scenario', 'service'],
+    requiredFacets: ['scenario'],
+  },
+  DELIVERY_RULE: {
+    applicableFacets: ['scenario', 'deliveryCity'],
+    requiredFacets: ['scenario', 'deliveryCity'],
+  },
+  // ...остальные kind из truth table, включая TERM_DEFINITION/PRICE_RULE/
+  // EXCEPTION_RULE — конкретные applicable/required списки переносятся из
+  // truth table §2/§3.2 (уже нормализованных в PR A4) в этом PR, не заново
+  // придумываются
+} as const;
+```
+
+TypeScript-тип `ApplicabilityProfile.facets` остаётся структурно permissive
+(`Partial`-карта по всем `FacetKey` — полная per-`kind` условная типизация была
+бы избыточным усложнением для документа плана), но РЕАЛЬНОЕ разделение
+`NOT_APPLICABLE`/`UNKNOWN`/`GLOBAL`/`SCOPED` обеспечивается Zod
+`.superRefine()`, сверяющим ключи `facets` с `KNOWLEDGE_KIND_REGISTRY[kind]`:
+
+```text
+для каждого facet в KNOWLEDGE_KIND_REGISTRY[kind].applicableFacets:
+  ключ ДОЛЖЕН присутствовать в facets со значением UNKNOWN | GLOBAL | SCOPED
+для каждого facet НЕ из applicableFacets:
+  ключ НЕ ДОЛЖЕН присутствовать в facets вообще (не UNKNOWN — отсутствие)
+для каждого facet в requiredFacets:
+  если audience допускает клиентский auto-answer — UNKNOWN запрещён на этом
+  этапе валидации create/publish (см. B2 evaluateUnitEligibility, которая
+  дополнительно проверяет это в рантайме запроса)
+```
+
+Обращение по ключу, отсутствующему в `FACET_REGISTRY`, — ошибка компиляции/
+runtime-валидации (fail-closed), не молчаливое игнорирование.
+
+**[R3] `audience` возвращён к текущей семантике.** Revision 2 предложила
+`'CLIENT' | 'INTERNAL' | 'BOTH'` без определения, чем это отличается от уже
+существующих `CLIENT_SAFE`/`INTERNAL_ONLY` (видит ли `CLIENT` сотрудник? чем
+`BOTH` отличается от `CLIENT_SAFE`? как мигрировать текущие значения?) — ревью
+верно отклонило это как непроверенную смену модели без отдельного решения.
+Контракт B1 сохраняет действующую систему:
 
 ```ts
 export interface ApplicabilityProfile {
-  facets: { [K in FacetKey]?: FacetState<FacetValueOf<K>> };
-  audience: 'CLIENT' | 'INTERNAL' | 'BOTH';
+  kind: KnowledgeUnitKind;
+  facets: { [K in FacetKey]?: FacetState<FacetValueOf<K>> }; // валидируется
+                                                              // через superRefine
+                                                              // выше
+  audience: 'CLIENT_SAFE' | 'INTERNAL_ONLY';
   reviewStatus: 'UNCLASSIFIED' | 'REVIEWED';
   reviewedBy: string | null;
   reviewedAt: string | null;
 }
+```
+
+Расширение до отдельного `BOTH`/аналога — возможное будущее решение, но требует
+собственного анализа миграции существующих данных, не принимается попутно здесь.
+
+**[R3] QueryFrame: `negation: boolean` заменён на per-facet include/exclude с
+evidence, `missingRequiredFacets` убран из LLM-выхода.** Ревью указало два
+отдельных дефекта старого `QueryFrame`:
+
+1. Один глобальный `negation: boolean` не различает «мне нужен НЕ апостиль, а
+   легализация» (отрицание конкретного значения фасеты) и «а оригинал не
+   нужен?» (вопрос о требовании, не утверждение `originalRequired=false`).
+2. `missingRequiredFacets` — не факт вопроса, а результат сравнения вопроса с
+   требованиями конкретного `kind`. Вычислять его в LLM-построителе (PR D)
+   означает дублировать и рассинхронизировать логику, которая уже должна жить
+   в evaluator'е (PR B2, `evaluateScope`). Убирается из типа `QueryFrame`
+   полностью — `evaluateScope` вычисляет `missingFacets` сравнением
+   `QueryFrame.facets` с `KNOWLEDGE_KIND_REGISTRY[kind].requiredFacets`.
+
+```ts
+interface FacetEvidence {
+  source: 'CURRENT_MESSAGE' | 'HISTORY' | 'DETERMINISTIC';
+  messageId?: string;
+  quote: string;
+}
+
+type QueryFacetState<T> =
+  | { state: 'UNKNOWN' }
+  | {
+      state: 'KNOWN';
+      include: readonly T[];
+      exclude: readonly T[];
+      evidence: readonly FacetEvidence[];
+    };
+
+type QuestionAspect =
+  | 'ELIGIBILITY' | 'REQUIREMENT' | 'PRICE' | 'PROCEDURE' | 'DELIVERY';
 
 export interface QueryFrame {
   concepts: string[];              // канонические Concept ID (после 2.2)
-  facets: { [K in FacetKey]?: FacetValueOf<K> | 'UNKNOWN' };
-  negation: boolean;
-  missingRequiredFacets: FacetKey[];
-  ambiguities: string[];
+  facets: { [K in FacetKey]?: QueryFacetState<FacetValueOf<K>> };
+  questionAspects: QuestionAspect[]; // композитный вопрос ("сколько стоит X и
+                                      // нужен ли оригинал?") несёт несколько
+  ambiguities: string[];             // включая конфликт текущего сообщения с
+                                      // историей — см. PR D
 }
 ```
+
+Приоритет источников значения факета (реализуется в PR D, тип здесь только
+даёт место для evidence): явное значение в текущем сообщении сильнее истории;
+противоречие текущего сообщения с историей → запись в `ambiguities`, не
+молчаливый override; значение только в истории — используется, но
+`evidence[].source === 'HISTORY'` сохраняется для аудита.
 
 **Acceptance criteria:**
 - ни одного `Record<string, unknown>`/`Record<string, FacetValue>` для facet
   keys нигде в контракте;
 - неизвестный facet-ключ — ошибка на этапе валидации, не тихий no-op;
-- `UNKNOWN` не равен и не приводится неявно к `GLOBAL`;
-- `Zod`-схемы для `ApplicabilityProfile`/`QueryFrame` существуют и покрыты
-  unit-тестами на валидные/невалидные значения.
+- `UNKNOWN`, `NOT_APPLICABLE` (кодируется отсутствием ключа вне
+  `applicableFacets`) и `GLOBAL` — три разных, не взаимозаменяемых состояния,
+  подтверждённых тестами на `KNOWLEDGE_KIND_REGISTRY`;
+- Zod-схема `ApplicabilityProfile` содержит `.superRefine()`, проверяющий:
+  (а) presence/absence facets по `KNOWLEDGE_KIND_REGISTRY[kind]`, (б)
+  `reviewStatus === 'REVIEWED' ⟺ reviewedBy != null && reviewedAt != null`;
+  тесты покрывают ВСЕ комбинации `reviewStatus`×`reviewedBy`×`reviewedAt`
+  (валидные и невалидные), не только счастливый путь;
+- `QueryFrame` не содержит `missingRequiredFacets` и не содержит булевого
+  `negation` — оба заменены типами выше;
+- `Zod`-схемы для `ApplicabilityProfile`/`QueryFrame` покрыты unit-тестами на
+  валидные/невалидные значения.
 
 ### PR B2 — Evaluator'ы [P1, depends-on B1]
 
-**[R2]** Одной функции `evaluateApplicability(profile, query)` недостаточно —
-truth table сама различает независимые проверки (eligibility кандидата,
-scope-совпадение по фасетам, активация условия/триггера, разрешение конфликтов
-между несколькими units). Разбивается на четыре:
+Одной функции `evaluateApplicability(profile, query)` недостаточно — truth
+table сама различает независимые проверки. Разбивается на четыре:
 
 ```ts
 // 1. Годен ли unit вообще для рассмотрения (независимо от конкретного вопроса)
@@ -608,15 +829,18 @@ function evaluateUnitEligibility(
   unit: KnowledgeUnitLike,
   requestContext: RequestContext
 ): EligibilityDecision;
-// проверяет: status, reviewStatus, audience, validity, source revision
+// проверяет: status, reviewStatus, audience, validity, source revision,
+// а также requiredFacets из KNOWLEDGE_KIND_REGISTRY не UNKNOWN, если unit
+// должен участвовать в клиентском auto-answer (см. B1)
 
 // 2. Совпадает ли scope unit'а с фасетами вопроса
 function evaluateScope(
   profile: ApplicabilityProfile,
   query: QueryFrame
 ): ScopeDecision;
-// возвращает: MATCH | CONFLICT | UNKNOWN по каждой фасете,
-// missingFacets, conflictingFacets, reasons
+// возвращает: MATCH | CONFLICT | UNKNOWN по каждой ПРИМЕНИМОЙ (см.
+// KNOWLEDGE_KIND_REGISTRY[profile.kind]) фасете, missingFacets (вычислено
+// здесь, не в QueryFrame — см. B1), conflictingFacets, reasons
 
 // 3. Активно ли условие применения (triggerCondition) для этого запроса
 function evaluateTrigger(
@@ -634,7 +858,7 @@ function resolveKnowledgeSet(
 // numeric conflicts, unresolved conflicts
 ```
 
-Финальное решение обязано объяснять себя, не просто возвращать булево:
+Финальное решение обязано объяснять себя:
 
 ```ts
 {
@@ -646,240 +870,340 @@ function resolveKnowledgeSet(
 }
 ```
 
+**[R3] Table-driven тесты распределены по владельцу решения, не все через
+`evaluateScope`.** CodeRabbit верно указал на внутреннее противоречие Revision
+2: требование «каждая строка truth table» через `evaluateScope`, при том что
+сам документ уже выделяет отдельные eligibility/trigger/resolution проверки.
+Явное сопоставление:
+
+```text
+truth table §3.1 (SCOPE dimension matrix)        → evaluateScope suite
+truth table §3.2 (обязательные поля по kind)      → evaluateUnitEligibility suite
+truth table §3.3 (triggerCondition activation)    → evaluateTrigger suite
+truth table §3.4 (multi-unit conflict resolution) → resolveKnowledgeSet suite
+```
+
 **Acceptance criteria:**
-- каждая строка truth table (§3.1–§3.4 в `2026-08-05-applicability-truth-table.md`)
-  имеет отдельный table-driven тест, исполняющий именно `evaluateScope`;
-- `evaluateTrigger` и `resolveKnowledgeSet` (multi-unit conflict) покрыты
-  отдельными тестами, не разделяющими сценарии с `evaluateScope`;
+- каждая строка truth table сопоставлена ровно одной из четырёх suite выше —
+  ни одна не прогоняется повторно «на всякий случай» через `evaluateScope`;
+- `evaluateScope` вычисляет `missingFacets` детерминированно, сравнивая
+  `QueryFrame.facets` с `KNOWLEDGE_KIND_REGISTRY[profile.kind].requiredFacets`
+  (не читает `QueryFrame.missingRequiredFacets` — такого поля больше нет, см. B1);
+- `evaluateTrigger` и `resolveKnowledgeSet` покрыты отдельными тестами;
 - решения всех четырёх функций содержат машиночитаемые reason codes и (где
-  применимо) `missingFacets`/`conflictingFacets` — не только verdict;
+  применимо) `missingFacets`/`conflictingFacets`;
 - `scenario` не хардкожен как единственная обязательная ось ни в одной из
   четырёх функций (расширяемость под §4.1 сохранена).
 
 ### PR C — Provider structured-output adapter [P1, depends-on A1, B1]
 
-Единый способ получить от Anthropic/OpenAI валидированный по Zod-схеме объект,
-поверх `createChatCompletionDetailed` (PR A1):
+**[R3] Контракт приведён в соответствие с A1/A2 — Revision 2 не принимала
+`ExtractionRunConfig`/fallback-политику и не возвращала `attempts[]`, из-за
+чего PR E не смог бы гарантировать consistency retry и вычисление
+`ModelRelationship`:**
 
 ```ts
 async function structured<T>(opts: {
   schema: z.ZodType<T>;
   messages: ChatMessage[];
-  providerModels?: { anthropic?: string; openai?: string };
-}): Promise<{ data: T; servedByProvider: Provider; servedByModel: string }>;
+  runConfig: ExtractionRunConfig;      // provider, model, promptVersion (PR A2)
+  fallbackPolicy?: FallbackPolicy;      // из PR A1, дефолт NONE для structured
+                                         // вызовов (extraction/grader/QueryFrame
+                                         // требуют предсказуемости больше, чем
+                                         // отказоустойчивости)
+}): Promise<{ data: T } & ChatCompletionResult>;  // ChatCompletionResult из A1,
+                                                    // включая attempts[]
 ```
 
-Runtime-проверка через тот же Zod, что и в B1/B2 — извлечённые/построенные
-объекты (QueryFrame из D, extraction из E) проходят один и тот же класс
-валидации, что типы контракта.
+Runtime-проверка через тот же Zod, что и в B1/B2.
 
 **Acceptance criteria:**
 - невалидный по схеме ответ модели не проходит как "успех" молча — явная
   ошибка с диагностикой, какое поле не совпало;
+- результат всегда включает полный `attempts[]`, не только финальный
+  успешный вызов;
 - `servedByProvider`/`servedByModel` в результате всегда соответствуют
-  реально выполнившему вызов провайдеру (не заявленному в опциях).
+  реально выполнившему вызов провайдеру.
 
 ### PR D — QueryFrame builder [P1, depends-on B1, C, 2.2]
 
-Вход: вопрос пользователя + контекст переписки + канал/audience. Выход —
-`QueryFrame` (тип из B1): канонические concept ID (после 2.2 — Concept/
-ConceptAlias), атомарные facet-значения или `UNKNOWN`, `negation`,
-`missingRequiredFacets`, `ambiguities`. Реализуется через `structured()` (PR C).
+Вход: вопрос пользователя + история переписки + канал/audience. Выход —
+`QueryFrame` (тип из B1, после `[R3]`: per-facet `QueryFacetState` вместо
+глобального `negation`, без `missingRequiredFacets`). Реализуется через
+`structured()` (PR C).
+
+**[R3] Обработка истории переписки — явный контракт, не подразумеваемый.**
+CodeRabbit указал: если facet найден в истории, он не должен становиться
+`UNKNOWN` только потому, что отсутствует в последнем сообщении. Правило:
+
+```text
+facet есть в текущем сообщении               → state: KNOWN, evidence: CURRENT_MESSAGE
+facet есть только в истории                  → state: KNOWN, evidence: HISTORY
+facet в текущем сообщении ПРОТИВОРЕЧИТ истории → ambiguities += конфликт,
+                                                  state текущего сообщения
+                                                  побеждает (сильнее), но конфликт
+                                                  не замалчивается
+facet нигде не упомянут                       → state: UNKNOWN
+```
+
+`missingRequiredFacets` НЕ вычисляется здесь (см. B1/B2) — builder не знает и
+не должен знать про `KNOWLEDGE_KIND_REGISTRY`, это забота evaluator'а.
 
 **Acceptance criteria:**
-- построитель никогда не придумывает facet-значение, отсутствующее в вопросе
-  — при неуверенности возвращает `UNKNOWN`, не догадку;
-- негация распознаётся на наборе тестовых вопросов ("не апостиль, а
-  консульская легализация");
-- `missingRequiredFacets` вычисляется относительно `kind`-специфичных
-  обязательных полей из truth table (B1/B2), не хардкожен per-вопрос.
+- построитель никогда не придумывает facet-значение, отсутствующее и в
+  текущем сообщении, и в истории — при неуверенности возвращает `UNKNOWN`;
+- отрицание конкретного значения фасеты ("не апостиль, а консульская
+  легализация") даёт `exclude: ['apostille']`, не глобальный флаг;
+- вопрос-требование ("а оригинал не нужен?") распознаётся как
+  `questionAspects: ['REQUIREMENT']`, не как отрицание facet-значения;
+  композитный вопрос ("сколько стоит и нужен ли оригинал") даёт больше одного
+  `questionAspect`;
+- факт из истории, отсутствующий в последнем сообщении, НЕ становится
+  `UNKNOWN` (регрессионный тест на этот конкретный кейс, который CodeRabbit
+  указал явно);
+- конфликт текущего сообщения с историей попадает в `ambiguities`, не
+  разрешается молча.
 
 ### PR E — Структурная экстракция + provenance [P1, depends-on B1, C, 2.2]
 
 Экстрактор выдаёт не `{ruleCode, title, body, confidence, sourceSpan}`
-(текущая `ExtractedRuleStream`, подтверждено — структурного поля условия
-применимости в схеме нет вообще, см. находку в комментарии к translation-2n9),
-а:
+(текущая `ExtractedRuleStream` — структурного поля условия применимости в
+схеме нет вообще, см. находку в комментарии к translation-2n9), а:
 
 ```ts
 interface ExtractedKnowledgeUnit {
   kind: KnowledgeUnitKind;
-  facets: Partial<Record<FacetKey, FacetValue>>;
+
+  statement: string;   // [R3] само утверждение/нормализованный claim — ревью
+                        // указало, что предыдущая версия знала, К ЧЕМУ правило
+                        // применимо, но не знала, ЧТО оно утверждает
+  title?: string;
+
+  facets: Partial<{ [K in FacetKey]: FacetValueOf<K> }>; // [R3] CodeRabbit:
+                                                           // Partial<Record<
+                                                           // FacetKey,FacetValue>>
+                                                           // разрешал любое
+                                                           // значение для
+                                                           // любого ключа
+                                                           // (issuingCountry
+                                                           // мог получить
+                                                           // не-страну);
+                                                           // key-specific
+                                                           // mapped type это
+                                                           // исключает
   triggerCondition: TriggerCondition | null;
   numericConstraint: NumericConstraint | null;
-  parentRuleRef: string | null;
+  parentRuleRef: string | null;   // [R3] ссылается на стабильный source anchor
+                                    // или уже назначенный deterministic unit ID
+                                    // (см. PR F) — НЕ на эпемерную метку
+                                    // конкретного прогона вроде "R-17"
+
   sourceSpan: SourceSpan;
+  evidenceByField: Record<string, SourceSpan>;   // [R3] provenance по каждому
+                                                   // структурному полю отдельно,
+                                                   // не только по unit целиком
+  uncertainties: ExtractionUncertainty[];         // [R3] см. смягчённый
+                                                   // acceptance criterion ниже
 }
 ```
 
 Использует `ExtractionRunConfig` (PR A2) и `structured()` (PR C). Известные
-живые баги от синтетического прогона (translation-2n9, комментарий от
-2026-08-05) — потеря родительского контекста при фрагментации правила и
-молчаливый пропуск части правил при генерации QA-пар — фиксируются здесь как
-regression-тесты на реальных примерах из того прогона, не абстрактно.
+живые баги от синтетического прогона (translation-2n9) — потеря родительского
+контекста при фрагментации правила и молчаливый пропуск части правил при
+генерации QA-пар — фиксируются здесь как regression-тесты на реальных примерах
+из того прогона.
 
 **Acceptance criteria:**
-- ни одно извлечённое условие применимости не остаётся необработанной прозой
-  там, где `triggerCondition`/`numericConstraint` применимы по `kind`;
-- фрагментация длинного правила не теряет ссылку на `parentRuleRef`;
-- `sourceSpan` присутствует для каждого извлечённого unit'а (проверяемость
-  вручную на исходном документе).
+- **[R3, смягчено]** распознанное условие применимости структурируется в
+  `triggerCondition`/`numericConstraint`; НЕраспознанное или неуверенное
+  условие получает явную запись в `uncertainties` и блокируется от
+  auto-activation (не участвует в `evaluateTrigger` как `ACTIVE`) — ничего не
+  исчезает молча, но абсолютное «ни одно условие не остаётся прозой» было
+  нереалистичным требованием к LLM-экстракции;
+- `statement` присутствует и непусто для каждого извлечённого unit'а;
+- `facets` не допускает несовместимое с `FacetKey` значение (типоуровневая
+  проверка + Zod);
+- фрагментация длинного правила не теряет ссылку на `parentRuleRef`, и эта
+  ссылка разрешается в валидный source anchor или unit ID (PR F), не в
+  эпемерную метку прогона;
+- `sourceSpan` присутствует для unit'а целиком, `evidenceByField` — минимум
+  для `statement`, `facets`, `triggerCondition`, `numericConstraint` по
+  отдельности.
 
-### PR F — Human-review артефакт + временное persistence [P1, depends-on E]
+### PR F — Human-review артефакт + persistence [P1, depends-on E]
 
-НЕ production Prisma v2 (это всё ещё 2.4, после пилота). Минимально:
+**[R3] Формат — JSONL безусловно, без альтернативы «может быть временная
+таблица».** CodeRabbit указал на прямое противоречие в Revision 2 (текст
+одновременно разрешал временную таблицу и требовал plain JSON/JSONL для
+acceptance criterion). НЕ production Prisma v2 (это всё ещё 2.4, после пилота):
 
-- JSON/JSONL артефакты на файловой системе (или временная таблица, если проще
-  для скрипта ревью — решение по объёму, не по необходимости);
-- content hash + source revision hash на каждый unit;
+- JSONL-файлы на файловой системе — единственный контракт, без опционального
+  «или таблица». Проще, auditable, diffable, не создаёт преждевременную
+  полусхему.
+
+**[R3] Детерминированные ID — из pre-LLM source anchor, не из хэша LLM-вывода.**
+Ревью указало на ловушку: `unitId = hash(content)` делает unit "новым" при
+малейшей перефразировке моделью того же самого правила между прогонами.
+Порядок построения:
+
+```text
+1. Source anchor строится ДО и НЕЗАВИСИМО от LLM:
+   sourceRevisionHash + sectionPath + startOffset + endOffset + kind +
+   stable local discriminator (например, порядковый номер unit'а внутри
+   секции по результатам детерминированного chunking, не LLM-нумерации)
+
+2. unitId = hash(sourceRevisionHash + sourceAnchor + kind + discriminator)
+   — стабилен между прогонами экстракции по неизменному документу, даже если
+   LLM перефразировал statement
+
+3. contentHash = отдельный fingerprint от statement/facets/triggerCondition —
+   меняется при реальном дрейфе содержания, используется, чтобы ЗАМЕТИТЬ
+   изменение, не чтобы идентифицировать unit
+```
+
+`parentRuleRef` (PR E) ссылается на `unitId`, построенный этим способом, или
+на сырой source anchor, если родительский unit ещё не прошёл экстракцию.
+
+Дополнительно:
 - явные review-решения (`accept`/`reject`/`edit`) с `reviewedBy`/`reviewedAt`
-  по инварианту из A4;
-- стабильные ID, переживающие повторный прогон экстракции по тому же
-  документу (иначе 2.3 не сможет сравнивать итерации пилота).
+  по инварианту из B1/A4;
+- повторный прогон по неизменному документу не создаёт дубликат review-решения
+  для того же `unitId`.
 
 **Acceptance criteria:**
-- повторный прогон пилота по неизменному документу не создаёт дубликаты
-  review-решений для одного и того же unit'а (стабильный ID проверяется
-  тестом);
-- review-артефакт читаем без специального тулинга (plain JSON/JSONL) — пилот
-  ещё не обязан иметь UI.
+- persistence — JSONL, без исключений для этого пилота;
+- `unitId` стабилен между двумя прогонами экстракции одного и того же
+  document revision, даже если LLM изменил формулировку `statement`
+  (регрессионный тест: два прогона, одинаковый anchor, разный текст → тот же
+  `unitId`, разный `contentHash`);
+- `contentHash` меняется, когда меняется содержание, и используется именно
+  для обнаружения дрейфа, не для идентичности;
+- повторный прогон не создаёт дубликаты review-решений для одного `unitId`;
+- review-артефакт читаем без специального тулинга (plain JSONL).
 
 ---
 
-## §4. Открытые архитектурные вопросы — сознательно НЕ решаются сейчас
+## §4. Открытые архитектурные вопросы
 
-### 4.1 `scenario` как единственная главная ось — главный вопрос разбора
+### 4.1 `scenario` не единственная главная ось — **[R3] принято как инвариант, детали остаются за пилотом**
 
 Возражение по существу: для бюро переводов применимость реально зависит не
 только от scenario, а от `documentType`, `issuingCountry`, `documentForm`
-(оригинал/скан/копия), `languagePair`, `urgency`, `partner`,
-`deliveryRoute` и т.д. — если всё это снова свернуть в один `scenarioKey`,
-получится то же дерево, только длиннее (`apostille.education.russia.
-original.germany.urgent...`).
+(оригинал/скан/копия), `languagePair`, `urgency`, `partner`, `deliveryRoute` и
+т.д.
 
-**Не принимаю и не отвергаю сейчас.** Причина та же, по которой план (после
-двух ревью) требует пилот ДО финальной схемы: один синтетический документ про
-зуд НЕ может подтвердить или опровергнуть, нужны ли атомарные фасеты — он
-намеренно не о домене бюро переводов. Ответ на этот вопрос — единственная
-содержательная цель Задачи 2.3 (пилот на 3-5 РЕАЛЬНЫХ документах бюро,
-включая документ про Орёл/FPM, документ с ценами, документ про доставку,
-документ про оригинал/скан, документ про языковую пару — сам разбор предлагает
-близкий список категорий, использую его как чек-лист подбора документов для
-пилота).
+**[R3]** Revision 2 сформулировала это как «не принимаю и не отвергаю сейчас».
+Ревью раунда 3 указало, что для контракта B1 этого недостаточно — сам факт,
+что `scenario` НЕ является единственной осью, уже логически следует из
+необходимости `FACET_REGISTRY`/`KNOWLEDGE_KIND_REGISTRY` как расширяемых
+структур (иначе зачем вообще регистр из десяти фасет вместо одного поля).
+Формулировка уточняется: **инвариант «scenario не единственная ось» принят
+окончательно и не пересматривается пилотом.** Что ОСТАЁТСЯ открытым и решается
+именно пилотом (2.3) — это НЕ "нужны ли атомарные фасеты вообще", а:
 
-**[R2]** Что PR B1 ДЕЛАЕТ (не просто "должен сделать"), чтобы не блокировать
-этот вопрос: `FACET_REGISTRY` спроектирован как открытый для дополнения набор
-(добавление новой фасеты — новая запись в registry + новый конкретный
-`FacetValue`-тип, без переписывания `evaluateScope`/`evaluateTrigger`/
-`resolveKnowledgeSet` с нуля). Конкретный набор фасет сверх примера в B1
-решает пилот, не эта truth table.
+- какой конкретно каталог facet-ключей нужен сверх примера в B1
+  (`FACET_REGISTRY` уже сейчас содержит 10 ключей не просто для примера — это
+  рабочая гипотеза, которую пилот подтверждает или расширяет);
+- какие facet-ключи обязательны (`requiredFacets`) для каждого конкретного
+  `kind` в `KNOWLEDGE_KIND_REGISTRY` — это таблица, которую пилот населяет
+  данными, а не бинарное решение "нужна ли она".
+
+`FACET_REGISTRY`/`KNOWLEDGE_KIND_REGISTRY` спроектированы как открытые для
+дополнения (добавление новой фасеты — новая запись в registry + новый
+конкретный `FacetValue`-тип, без переписывания `evaluateScope`/`evaluateTrigger`/
+`resolveKnowledgeSet` с нуля) — именно поэтому принятие инварианта сейчас не
+блокирует пилот, а направляет его.
 
 ### 4.2 `TERM_DEFINITION` контекстно-зависим
 
 Согласен, что термин может значить разное в апостиле/нотариальном переводе/
 консульской легализации — сегодняшняя truth table делает `TERM_DEFINITION`
-безусловно document-scoped, что упрощение. Тот же ответ, что в 4.1: решается
-пилотом (найдётся ли в реальных документах бюро термин с контекстно-разным
-значением — вероятно да, но не гадаю без данных), не переписыванием truth
-table сейчас.
+безусловно document-scoped, что упрощение. Решается пилотом (найдётся ли в
+реальных документах бюро термин с контекстно-разным значением), не
+переписыванием truth table сейчас.
 
 ### 4.3 `PRICE_RULE` не должен конкурировать с `Tariff`
 
-Согласен по существу — `Tariff` уже типизирован (услуга, направление, единица,
-срок, даты действия, audience). `PRICE_RULE` в v2 должен описывать ПОЛИТИКУ
-расчёта (коэффициенты, что входит в стоимость), не сами числа. **[R2]**
-Правится в PR A4 (чисто текстовая правка truth table), не откладывается до
-2.4 — не требует пилота или кода.
+Согласен по существу — `Tariff` уже типизирован. `PRICE_RULE` в v2 должен
+описывать ПОЛИТИКУ расчёта, не сами числа. Правится в PR A4.
 
 ### 4.4 review-статус — не переименование, инвариант
 
-**[R2]** Добавлено по итогам ревью раунда 2. `reviewStatus` и `reviewedBy` —
-разные понятия (см. PR A4): один описывает процессный статус unit'а в целом,
-другой — кто и когда подтвердил конкретное решение (документ REVIEWED, ИЛИ
-конкретная фасета GLOBAL). Truth table не должна больше использовать их как
-взаимозаменяемые имена одного поля.
+`reviewStatus` и `reviewedBy` — разные понятия: один описывает процессный
+статус unit'а в целом, другой — кто и когда подтвердил конкретное решение.
+**[R3]** С Revision 3 это больше не только текстовый инвариант — закреплено
+Zod `.superRefine()` в PR B1 (см. там), с тестами на все комбинации.
 
 ---
 
-## §5. Явно НЕ делать в следующей сессии, пока PR A/B не закрыты
+## §5. Явно НЕ делать в следующей сессии
 
 - Никакой финальной Prisma-схемы v2 (Задача 2.4).
-- Никакого `pgvector`/vector-колонки (3.1/3.2) — не блокер PR A/B, но и не
-  часть их объёма.
+- Никакого `pgvector`/vector-колонки (3.1/3.2).
 - Никакого backfill 1535 правил эвристической классификацией.
 - Никакого массового переизвлечения корпуса.
-- Не мержить `PR #52` (LlmCallLog full logging) как есть — уже отслежено
-  как `translation-m0x`, без изменений в этом плане.
-- Не начинать 2.3 (пилот) до готовности B2, C, D, E, F — пилоту физически
-  нужны все пять, не только `evaluateApplicability` (**[R2]**: расширено —
-  исходная версия называла только PR B, чего было объективно недостаточно
-  для описанного end-to-end пилота).
-- **[R2]** Не путать безопасный backfill (`Document.scenarioKey` уже известен
-  → унаследовать в null-детей) с эвристической массовой классификацией 1535
-  правил — это два разных по риску действия, см. §6, `translation-8kf`.
-- **[R2]** Не мержить PR A одним куском — обязательно как минимум A1/A2/A3/A4
-  отдельными PR (разный blast radius, разная срочность отката).
-- **[R2]** Не вводить `facets: Record<string, unknown>` ни в каком виде —
-  только типизированный `FACET_REGISTRY` (B1).
+- Не мержить `PR #52` (LlmCallLog full logging) как есть — отслежено как
+  `translation-m0x`.
+- Не начинать 2.3 (пилот) до готовности B2, D И F одновременно (не только F —
+  см. §3, реальный граф зависимостей).
+- Не путать безопасный backfill (`Document.scenarioKey` уже известен →
+  унаследовать в null-детей) с эвристической массовой классификацией 1535
+  правил — см. §6, `translation-8kf`.
+- Не мержить PR A одним куском — обязательно как минимум A1/A2/A3/A4
+  отдельными PR.
+- Не вводить `facets: Record<string, unknown>` ни в каком виде.
+- **[R3]** Не называть провайдер/модель-совпадение grader'а `FULL independence`
+  — использовать фактическую `ModelRelationship`-матрицу (см. PR A2).
+- **[R3]** Не вычислять `missingRequiredFacets` в LLM/QueryFrame builder — это
+  детерминированная функция `evaluateScope` от `KNOWLEDGE_KIND_REGISTRY`.
+- **[R3]** Не строить `unitId` из хэша LLM-сгенерированного текста — только из
+  pre-LLM source anchor (см. PR F).
+- **[R3]** Не мержить эту Revision 3, пока не закрыты все 9 comments CodeRabbit
+  на диффе Revision 2 (закрыты этой редакцией — см. пометки `[R3]` выше) И не
+  получено новое содержательное ревью именно на диффе Revision 3 — тот же
+  двухступенчатый gate, который применяется к каждому PR A1–F ниже.
 
-**Порядок ревью для каждого PR A1–F** (учитывая процессную находку разбора):
-не мержить сразу по зелёному CI — дождаться хотя бы одного содержательного
-ревью (Grok/Codex/CodeRabbit) на диффе, а не только автоматической сборки.
-Предыдущий PR (#59) уже показал: содержательные находки пришли через 2 минуты
-ПОСЛЕ merge. Дать боту(-ам) реальное время до merge, не просто дождаться CI.
+**Порядок ревью для каждого PR A1–F:** не мержить сразу по зелёному CI —
+дождаться хотя бы одного содержательного ревью (Grok/Codex/CodeRabbit) на
+диффе. Предыдущий PR (#59) уже показал: содержательные находки пришли через 2
+минуты ПОСЛЕ merge.
 
 ---
 
 ## §6. Beads — изменения после утверждения плана
 
-**[R2]** Часть пункта, отслеженного в исходной версии как "новая задача",
-уже существует — не создавать дубликат. `translation-8kf` (создана в прошлой
-сессии, синхронизирована в этой) уже покрывает:
+`translation-8kf` (уже существует, синхронизирована с этой сессией) покрывает
+`Rule.create()`/`QAPair.create()` scenarioKey-наследование, безопасный backfill
+и sync-функцию для v1 — не дублируется здесь, технически не зависит от B1,
+остаётся исполнимой независимо в любой момент.
 
-- `Rule.create()`/`QAPair.create()` не наследуют `scenarioKey` — оба пути в
-  `commit.ts`, не только `QAPair`, как ошибочно сузила исходная версия этого
-  плана в пункте "Rule.create() не наследует scenarioKey" (было неполным —
-  сам `translation-8kf` называет оба);
-- безопасный backfill существующих `DocChunk`/`Rule`/`QAPair` ТОЛЬКО там, где
-  `Document.scenarioKey` уже известен (не эвристическая классификация
-  остальных 1535 — см. §5);
-- `setDocumentScenario()`-стиль sync-функция (по аналогии с
-  `setDocumentAudience()`) ИЛИ явно документированное решение её не делать;
-- regression-тест на все известные write path.
+**[R3] Граф зависимостей ниже заменяет полностью линейную версию из Revision
+2** — отражает реальные технические блокеры (см. §3), не порядок ревью:
 
-Действие в этой сессии: **не создавать новую задачу**. `translation-8kf`
-технически не зависит от B1 (сегодня `scenarioKey` — строковое поле, backfill
-известного→известного не требует нового доменного контракта) и остаётся
-исполнимой независимо, в любой момент, если появится время раньше PR A1–F.
-
-Новые задачи к созданию (после утверждения этого плана):
-
-- **P0** PR A1 — Provider routing & fallback contract, acceptance criteria из §3.
-- **P0** PR A2 — Extraction run consistency, `depends-on` A1.
-- **P1** PR A3 — Eval harness gate semantics, `depends-on` A2 (использует
-  `ExtractionRunConfig`/`GraderIndependence` для консистентности артефактов,
-  хотя технически может идти параллельно — оставляю зависимость как
-  документирующую порядок ревью, не как жёсткий технический блокер).
-- **P1** PR A4 — Документация (truth-table consistency, review-status
-  инвариант, заголовок 3.1, `PRICE_RULE` vs `Tariff`, numeric-evidence
-  эксперимент как отдельная задача с протоколом из §2.2).
-- **P1** PR B1 — Типизированный контракт (FacetRegistry/ApplicabilityProfile/
-  QueryFrame), `depends-on` A1–A4.
-- **P1** PR B2 — Evaluator'ы (eligibility/scope/trigger/resolution) +
-  exhaustive тесты, `depends-on` B1.
-- `translation-5ii` (2.2 Concept/ConceptAlias): обновить `depends-on` →
-  B2 (не только 2.1, как было в исходной версии плана).
-- **P1** PR C — Provider structured-output adapter, `depends-on` A1, B1.
-- **P1** PR D — QueryFrame builder, `depends-on` B1, C, 2.2.
-- **P1** PR E — Структурная экстракция + provenance, `depends-on` B1, C, 2.2.
-- **P1** PR F — Human-review артефакт + temp persistence, `depends-on` E.
-- Пилот 2.3: обновить `depends-on` → F (не только предыдущая формулировка,
-  зависевшая от одного PR B).
+- **P0** PR A1 — Provider routing & fallback contract. Без зависимостей.
+- **P0** PR A2 — Extraction run consistency. `depends-on` A1.
+- **P1** PR A3 — Eval harness gate semantics. Без зависимостей (может идти
+  параллельно с A1/A2/A4).
+- **P1** PR A4 — Документация. Без зависимостей (может идти параллельно с
+  A1/A2/A3).
+- **P1** PR B1 — Типизированный контракт (FacetRegistry, KnowledgeKindRegistry,
+  ApplicabilityProfile, QueryFrame). `depends-on` A4.
+- **P1** PR B2 — Evaluator'ы. `depends-on` B1.
+- `translation-5ii` (2.2 Concept/ConceptAlias): `depends-on` B2.
+- **P1** PR C — Provider structured-output adapter. `depends-on` A1, B1.
+- **P1** PR D — QueryFrame builder. `depends-on` B1, C, 2.2.
+- **P1** PR E — Структурная экстракция + provenance. `depends-on` A2, B1, C, 2.2.
+- **P1** PR F — Human-review артефакт + JSONL persistence. `depends-on` E.
+- Пилот 2.3: `depends-on` B2, D, F (**[R3]**: было ошибочно только F в Revision
+  2 — D является отдельной веткой, не поглощается цепочкой E→F).
 - **P2** numeric-evidence shadow-эксперимент (`unverified_numeric_evidence`,
-  §2.2) — отдельная от PR A4 по исполнению (нужен прогон на реальных
-  прод-вопросах за период, не только код), заводится вместе с A4,
-  `depends-on` A4.
+  §2.2). `depends-on` A4.
+- **[R3] Новая P2 задача**: временная политика `fallbackPolicy` по умолчанию
+  для вызовов без явно закреплённой модели (см. PR A1 — сейчас сохраняет
+  legacy `CROSS_PROVIDER` поведение намеренно, но это не постоянное решение) —
+  последовательная миграция всех call sites на явный `fallbackPolicy`.
+  `depends-on` A1, не блокирует A1 сам.
 
 Не трогаю очередь `bd ready` в этой сессии за пределами вышеперечисленного —
-создание перечисленных задач происходит ПОСЛЕ утверждения этой редакции
-плана, не раньше.
+создание перечисленных задач происходит ПОСЛЕ утверждения этой редакции плана
+(включая свежее содержательное ревью на диффе Revision 3), не раньше.
