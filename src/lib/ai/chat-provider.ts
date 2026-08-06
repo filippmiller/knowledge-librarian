@@ -665,6 +665,8 @@ interface AttemptGate {
   signal: AbortSignal;
   /** true, если попытку прервал наш таймаут, а не внешний signal вызывающего. */
   readonly timedOut: boolean;
+  /** Отмена по решению самой операции (отказ потребителя, переполнение буфера). */
+  abort(): void;
   cleanup(): void;
 }
 
@@ -707,6 +709,9 @@ function createAttemptGate(
     signal: controller.signal,
     get timedOut() {
       return timedOut;
+    },
+    abort() {
+      controller.abort();
     },
     cleanup() {
       if (timer) clearTimeout(timer);
@@ -1181,28 +1186,60 @@ export async function* streamChatCompletionTokens(
   yield* streamProviderTokens(provider, model, options, defaults, options.signal);
 }
 
+/**
+ * Верхняя граница НЕПРОЧИТАННЫХ токенов в буфере операции. Запрос к провайдеру
+ * идёт на полной скорости независимо от потребителя (см.
+ * `createChatCompletionStreamDetailed`), поэтому нужен потолок: он на порядки
+ * выше любого реального ответа — max_tokens ограничивает провайдера сам — и
+ * существует ради случая «потребитель не читает вовсе, а провайдер льёт
+ * бесконечно». Иначе гарантия разрешения completion покупалась бы
+ * неограниченной памятью.
+ */
+const STREAM_BUFFER_LIMIT_CHARS = 4_000_000;
+
 export interface ChatCompletionStreamOperation {
   /**
-   * Токены по мере поступления. Генератор ЛЕНИВЫЙ: запрос к провайдеру
-   * начинается с первой итерации. `completion` разрешается из финализации
-   * именно этого генератора, поэтому `tokens` обязан быть проитерирован
-   * (или явно закрыт `.return()`) — ждать одну лишь `completion`, не тронув
-   * `tokens`, значит ждать вечно.
+   * Токены по мере поступления. Итерировать НЕобязательно: запрос к провайдеру
+   * идёт независимо от потребителя, непрочитанные токены копятся в буфере
+   * операции, и потребитель, подключившийся позже, получит их с начала.
+   *
+   * Ранний `break` (или исключение в теле `for await`) отменяет запрос к
+   * провайдеру: незакрытый стрим продолжал бы качать токены и деньги.
    */
   tokens: AsyncIterable<string>;
   /**
-   * Метаданные прогона. `text` — накопленное на момент завершения (при раннем
-   * разрыве — префикс). Разрешается и при нормальном конце, и при раннем
-   * разрыве потребителем; отклоняется `ChatCompletionError` при ошибке
-   * провайдера. Начатое потребление стрима не подвисает ни на одном из путей.
+   * Метаданные прогона. Разрешается полным текстом при нормальном конце и
+   * префиксом при отказе потребителя; отклоняется `ChatCompletionError` при
+   * ошибке провайдера, таймауте и явной отмене.
+   *
+   * ГАРАНТИЯ: операция создана ⟹ `completion` рано или поздно settles, читал
+   * кто-нибудь `tokens` или нет. Единственная граница — время самого запроса к
+   * провайдеру: без `requestTimeoutMs`/`totalDeadlineMs` она равна тому, сколько
+   * провайдер держит соединение.
    */
   completion: Promise<ChatCompletionResult>;
+  /**
+   * Отменить операцию, не подключаясь к `tokens`. `completion` отклоняется
+   * `ChatCompletionError` с исходом `ABORTED` — так же, как при отмене через
+   * внешний `signal`. Повторный вызов и вызов после завершения ничего не делают.
+   */
+  abort(reason?: string): void;
 }
 
 /**
  * Стриминг без фоллбэка: подмена провайдера на середине уже отданного клиенту
  * текста склеила бы два разных ответа, поэтому `fallbackUsed` здесь всегда
  * `false`, а неудача — единственная попытка в `attempts[]`.
+ *
+ * Операция ЭАГЕРНАЯ: запрос уходит провайдеру в момент создания, а внутренний
+ * насос перекладывает токены в буфер сам. Ленивый вариант (запрос стартовал с
+ * первой итерации, `completion` разрешалась из `finally` генератора) был
+ * неисправим по устройству: `.return()` у НЕ запущенного async-генератора не
+ * выполняет ни тело, ни `finally`, а брошенный на `yield` генератор без
+ * `.return()` не финализируется вовсе — то есть «создал операцию и не стал
+ * читать токены» означало вечно висящую `completion`, удерживающую
+ * AbortController и слушатель signal. Эагерность убирает само условие: у
+ * разрешения `completion` больше нет предусловия со стороны потребителя.
  */
 export function createChatCompletionStreamDetailed(
   options: ChatCompletionOptions
@@ -1218,7 +1255,7 @@ export function createChatCompletionStreamDetailed(
     resolveCompletion = resolve;
     rejectCompletion = reject;
   });
-  // Потребитель вправе не ждать `completion`; без этого его отклонение стало бы
+  // Потребитель вправе не ждать `completion`; без этого её отклонение стало бы
   // unhandled rejection и уронило бы процесс.
   completion.catch(() => {});
 
@@ -1226,32 +1263,55 @@ export function createChatCompletionStreamDetailed(
   // ошибки должен называть тот бюджет, который реально сработал.
   const requestBudget = options.requestTimeoutMs ?? Number.POSITIVE_INFINITY;
   const deadlineBudget = options.totalDeadlineMs ?? Number.POSITIVE_INFINITY;
-  const timeoutMs = Number.isFinite(Math.min(requestBudget, deadlineBudget))
-    ? Math.min(requestBudget, deadlineBudget)
-    : undefined;
+  const budget = Math.min(requestBudget, deadlineBudget);
+  const timeoutMs = Number.isFinite(budget) ? budget : undefined;
   const timeoutCode =
     requestBudget <= deadlineBudget ? 'ATTEMPT_TIMEOUT' : 'TOTAL_DEADLINE_EXCEEDED';
 
-  async function* run(): AsyncGenerator<string> {
-    const startedAt = new Date().toISOString();
-    const startedMs = Date.now();
-    const gate = createAttemptGate(options.signal, timeoutMs);
-    let text = '';
-    let settled = false;
+  const gate = createAttemptGate(options.signal, timeoutMs);
+  const startedAt = new Date().toISOString();
+  const startedMs = Date.now();
 
-    try {
-      for await (const token of streamProviderTokens(provider, model, options, defaults, gate.signal)) {
-        text += token;
-        yield token;
-      }
-      settled = true;
+  // --- буфер между насосом и (необязательным) потребителем ---
+  const buffered: string[] = [];
+  let bufferedChars = 0;
+  let queueClosed = false;
+  let queueFailure: unknown;
+  let waiters: (() => void)[] = [];
+
+  const wakeWaiters = () => {
+    const pending = waiters;
+    waiters = [];
+    for (const resume of pending) resume();
+  };
+
+  // --- состояние операции ---
+  let text = '';
+  let settled = false;
+  let cancelledByConsumer = false;
+  let overflowed = false;
+  let abortReason: string | undefined;
+
+  /** Единственная точка разрешения `completion`. `undefined` — нормальный конец. */
+  const settle = (error: unknown) => {
+    if (settled) return;
+    settled = true;
+
+    // Отказ потребителя — не сбой прогона: префикс уже получен и оплачен,
+    // поэтому исход разрешающий, но с честной пометкой в телеметрии.
+    const consumerGaveUp = error !== undefined && cancelledByConsumer && !overflowed;
+
+    if (error === undefined || consumerGaveUp) {
       attempts.push({
         provider,
         model,
         startedAt,
         latencyMs: Date.now() - startedMs,
-        outcome: 'SUCCESS',
+        outcome: error === undefined ? 'SUCCESS' : 'ABORTED',
+        ...(consumerGaveUp && { errorCode: 'CONSUMER_CANCELLED' }),
       });
+      queueClosed = true;
+      wakeWaiters();
       resolveCompletion({
         text,
         servedByProvider: provider,
@@ -1259,56 +1319,117 @@ export function createChatCompletionStreamDetailed(
         fallbackUsed: false,
         attempts,
       });
-    } catch (error) {
-      settled = true;
-      const aborted = isAbortError(error) || gate.signal.aborted;
-      const errorCode = aborted
-        ? gate.timedOut
-          ? timeoutCode
-          : 'ABORTED_BY_CALLER'
-        : extractErrorCode(error);
-      const statusCode = extractStatusCode(error);
-      attempts.push({
+      return;
+    }
+
+    const aborted = !overflowed && (isAbortError(error) || gate.signal.aborted);
+    const errorCode = aborted
+      ? gate.timedOut
+        ? timeoutCode
+        : 'ABORTED_BY_CALLER'
+      : extractErrorCode(error);
+    const statusCode = extractStatusCode(error);
+    attempts.push({
+      provider,
+      model,
+      startedAt,
+      latencyMs: Date.now() - startedMs,
+      outcome: aborted ? 'ABORTED' : 'ERROR',
+      ...(statusCode !== undefined && { statusCode }),
+      ...(errorCode && { errorCode }),
+    });
+
+    const failure = new ChatCompletionError(
+      abortReason !== undefined && errorCode === 'ABORTED_BY_CALLER'
+        ? abortReason
+        : rawMessageOf(error),
+      attempts,
+      { cause: error, errorCode, statusCode }
+    );
+    queueFailure = failure;
+    queueClosed = true;
+    wakeWaiters();
+    rejectCompletion(failure);
+  };
+
+  // Насос стартует СРАЗУ и разрешает `completion` из единственной точки в
+  // `finally` — так гарантия «создана ⟹ settles» не зависит от полноты разбора
+  // веток внутри.
+  const pump = (async () => {
+    let failure: unknown;
+    try {
+      for await (const token of streamProviderTokens(
         provider,
         model,
-        startedAt,
-        latencyMs: Date.now() - startedMs,
-        outcome: aborted ? 'ABORTED' : 'ERROR',
-        ...(statusCode !== undefined && { statusCode }),
-        ...(errorCode && { errorCode }),
-      });
-      rejectCompletion(
-        new ChatCompletionError(rawMessageOf(error), attempts, {
-          cause: error,
-          errorCode,
-          statusCode,
-        })
-      );
-      throw error;
+        options,
+        defaults,
+        gate.signal
+      )) {
+        text += token;
+        if (queueClosed) continue;
+        buffered.push(token);
+        bufferedChars += token.length;
+        wakeWaiters();
+        if (bufferedChars > STREAM_BUFFER_LIMIT_CHARS) {
+          overflowed = true;
+          gate.abort();
+          throw new ProviderRequestError(
+            `Stream buffer limit of ${STREAM_BUFFER_LIMIT_CHARS} characters exceeded: tokens arrive faster than the consumer reads them`,
+            { errorCode: 'STREAM_BUFFER_OVERFLOW' }
+          );
+        }
+      }
+    } catch (error) {
+      failure = error ?? new Error('Stream failed without an error value');
     } finally {
       gate.cleanup();
-      if (!settled) {
-        // Сюда попадаем при `break`/`return`/throw в теле `for await` у
-        // потребителя: движок вызывает generator.return(), и `completion`
-        // обязана разрешиться, а не зависнуть.
-        attempts.push({
-          provider,
-          model,
-          startedAt,
-          latencyMs: Date.now() - startedMs,
-          outcome: 'ABORTED',
-          errorCode: 'CONSUMER_CANCELLED',
-        });
-        resolveCompletion({
-          text,
-          servedByProvider: provider,
-          servedByModel: model,
-          fallbackUsed: false,
-          attempts,
-        });
-      }
+      settle(failure);
     }
-  }
+  })();
 
-  return { tokens: run(), completion };
+  const iterator: AsyncIterator<string> = {
+    async next(): Promise<IteratorResult<string>> {
+      for (;;) {
+        const token = buffered.shift();
+        if (token !== undefined) {
+          bufferedChars -= token.length;
+          return { value: token, done: false };
+        }
+        if (queueFailure !== undefined) {
+          // Ошибку отдаём потребителю ровно один раз; дальше поток закрыт.
+          const error = queueFailure;
+          queueFailure = undefined;
+          throw error;
+        }
+        if (queueClosed) return { value: undefined, done: true };
+        await new Promise<void>((resume) => waiters.push(resume));
+      }
+    },
+    async return(): Promise<IteratorResult<string>> {
+      if (!settled) {
+        cancelledByConsumer = true;
+        gate.abort();
+      }
+      // Буфер закрывается сразу: токены, успевшие прийти между отменой и
+      // фактическим закрытием соединения, попадут в `text` (мы их получили),
+      // но не будут ждать потребителя, который уже ушёл.
+      queueClosed = true;
+      buffered.length = 0;
+      bufferedChars = 0;
+      // Дожидаемся насоса: после выхода из `for await` состояние операции должно
+      // быть окончательным — `completion` разрешена, соединение закрыто.
+      await pump;
+      return { value: undefined, done: true };
+    },
+  };
+
+  return {
+    tokens: { [Symbol.asyncIterator]: () => iterator },
+    completion,
+    abort(reason?: string) {
+      if (settled) return;
+      abortReason = reason;
+      gate.abort();
+    },
+  };
 }

@@ -63,18 +63,78 @@ function hangUntilAbort(init?: RequestInit): Promise<Response> {
   });
 }
 
+function sseEvents(texts: string[]): string {
+  return texts
+    .map(
+      (text) =>
+        `data: ${JSON.stringify({
+          type: 'content_block_delta',
+          delta: { text },
+        })}\n`
+    )
+    .join('');
+}
+
 function sseResponse(texts: string[]): Response {
-  const body =
-    texts
-      .map(
-        (text) =>
-          `data: ${JSON.stringify({
-            type: 'content_block_delta',
-            delta: { text },
-          })}\n`
-      )
-      .join('') + 'data: [DONE]\n';
+  const body = sseEvents(texts) + 'data: [DONE]\n';
   return new Response(new TextEncoder().encode(body), { status: 200 });
+}
+
+/**
+ * SSE-ответ, застывающий после первой порции. Эагерный насос читает токены сам,
+ * поэтому без такого шлюза «потребитель разорвал стрим на середине» превратился
+ * бы в гонку с уже дочитанным ответом.
+ */
+function gatedSseResponse(first: string[], rest: string[]) {
+  let release!: () => void;
+  const gate = new Promise<'released'>((resolve) => {
+    release = () => resolve('released');
+  });
+  const encoder = new TextEncoder();
+
+  const fetchImpl = (_url: string, init?: RequestInit): Promise<Response> => {
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(encoder.encode(sseEvents(first)));
+
+        const signal = init?.signal;
+        const aborted = new Promise<'aborted'>((resolve) => {
+          if (!signal) return;
+          if (signal.aborted) resolve('aborted');
+          else signal.addEventListener('abort', () => resolve('aborted'), { once: true });
+        });
+
+        if ((await Promise.race([gate, aborted])) === 'aborted') {
+          controller.error(abortError());
+          return;
+        }
+        controller.enqueue(encoder.encode(sseEvents(rest) + 'data: [DONE]\n'));
+        controller.close();
+      },
+      cancel() {
+        release();
+      },
+    });
+    return Promise.resolve(new Response(body, { status: 200 }));
+  };
+
+  return { fetchImpl, release };
+}
+
+/**
+ * Слушатели внешнего signal обязаны сниматься на любом пути завершения —
+ * иначе долгоживущий контроллер вызывающего копит их от операции к операции.
+ */
+function trackSignalListeners(signal: AbortSignal) {
+  const added = vi.spyOn(signal, 'addEventListener');
+  const removed = vi.spyOn(signal, 'removeEventListener');
+  return {
+    expectAllReleased() {
+      for (const [, handler] of added.mock.calls) {
+        expect(removed.mock.calls.some(([, other]) => other === handler)).toBe(true);
+      }
+    },
+  };
 }
 
 function anthropicRequestBodies(): Record<string, unknown>[] {
@@ -693,12 +753,114 @@ describe('streaming', () => {
     expect(metadata.attempts[0].outcome).toBe('SUCCESS');
   });
 
-  it('ранний разрыв потребителем не подвешивает completion', async () => {
+  it('completion разрешается, даже если tokens не читали ВООБЩЕ', async () => {
+    // Ровно тот случай, ради которого операция стала эагерной: у ленивого
+    // генератора тело (и его finally) не выполнялось, пока никто не итерировал,
+    // и completion висела вечно вместе с AbortController и слушателем signal.
+    fetchMock.mockResolvedValue(sseResponse(['foo', 'bar']));
+
+    const operation = createChatCompletionStreamDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+    });
+
+    const metadata = await operation.completion;
+    expect(metadata.text).toBe('foobar');
+    expect(metadata.attempts).toHaveLength(1);
+    expect(metadata.attempts[0].outcome).toBe('SUCCESS');
+  });
+
+  it('таймер попытки снимается на пути «tokens не читали»', async () => {
+    vi.useFakeTimers();
+    try {
+      fetchMock.mockResolvedValue(sseResponse(['foo']));
+
+      const operation = createChatCompletionStreamDetailed({
+        messages: MESSAGES,
+        provider: 'anthropic',
+        requestTimeoutMs: 30_000,
+      });
+      // Проверка живая: до завершения таймер действительно висит.
+      expect(vi.getTimerCount()).toBe(1);
+
+      await operation.completion;
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('слушатель внешнего signal снимается, даже если tokens не читали', async () => {
+    fetchMock.mockResolvedValue(sseResponse(['foo']));
+    const controller = new AbortController();
+    const listeners = trackSignalListeners(controller.signal);
+
+    const operation = createChatCompletionStreamDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      signal: controller.signal,
+    });
+
+    await operation.completion;
+    listeners.expectAllReleased();
+  });
+
+  it('abort() до первого чтения отклоняет completion и не оставляет висяков', async () => {
+    fetchMock.mockImplementation((_url: string, init?: RequestInit) =>
+      hangUntilAbort(init)
+    );
+    const controller = new AbortController();
+    const listeners = trackSignalListeners(controller.signal);
+
+    const operation = createChatCompletionStreamDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      signal: controller.signal,
+    });
+    operation.abort('caller changed its mind');
+
+    const error = (await operation.completion.catch(
+      (e: unknown) => e
+    )) as ChatCompletionError;
+    expect(error).toBeInstanceOf(ChatCompletionError);
+    expect(error.message).toBe('caller changed its mind');
+    expect(error.attempts[0]).toMatchObject({
+      outcome: 'ABORTED',
+      errorCode: 'ABORTED_BY_CALLER',
+    });
+    listeners.expectAllReleased();
+
+    // Повторный abort() и abort() после завершения — no-op, не второй attempt.
+    operation.abort();
+    expect(error.attempts).toHaveLength(1);
+  });
+
+  it('потребитель, подключившийся ПОСЛЕ завершения, получает все токены', async () => {
     fetchMock.mockResolvedValue(sseResponse(['one', 'two', 'three']));
 
     const operation = createChatCompletionStreamDetailed({
       messages: MESSAGES,
       provider: 'anthropic',
+    });
+
+    const metadata = await operation.completion;
+    expect(metadata.text).toBe('onetwothree');
+
+    const tokens: string[] = [];
+    for await (const token of operation.tokens) tokens.push(token);
+    expect(tokens).toEqual(['one', 'two', 'three']);
+  });
+
+  it('ранний разрыв на середине стрима: completion разрешается префиксом', async () => {
+    const gated = gatedSseResponse(['one'], ['two', 'three']);
+    fetchMock.mockImplementation(gated.fetchImpl);
+    const controller = new AbortController();
+    const listeners = trackSignalListeners(controller.signal);
+
+    const operation = createChatCompletionStreamDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      signal: controller.signal,
     });
 
     const tokens: string[] = [];
@@ -715,10 +877,38 @@ describe('streaming', () => {
       outcome: 'ABORTED',
       errorCode: 'CONSUMER_CANCELLED',
     });
+    // Оставшиеся токены провайдер уже не отдаёт — соединение закрыто.
+    expect(metadata.text).not.toContain('two');
+    listeners.expectAllReleased();
   });
 
-  it('исключение в теле потребителя тоже не подвешивает completion', async () => {
-    fetchMock.mockResolvedValue(sseResponse(['one', 'two']));
+  it('буфер непрочитанных токенов ограничен сверху', async () => {
+    // Эагерность не должна покупаться неограниченной памятью: если потребителя
+    // нет, а провайдер льёт без конца, операция обязана оборваться сама.
+    const chunk = 'x'.repeat(100_000);
+    fetchMock.mockResolvedValue(
+      sseResponse(Array.from({ length: 41 }, () => chunk))
+    );
+
+    const operation = createChatCompletionStreamDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+    });
+
+    const error = (await operation.completion.catch(
+      (e: unknown) => e
+    )) as ChatCompletionError;
+    expect(error).toBeInstanceOf(ChatCompletionError);
+    expect(error.errorCode).toBe('STREAM_BUFFER_OVERFLOW');
+    expect(error.attempts[0]).toMatchObject({
+      outcome: 'ERROR',
+      errorCode: 'STREAM_BUFFER_OVERFLOW',
+    });
+  });
+
+  it('исключение в теле потребителя закрывает стрим так же, как break', async () => {
+    const gated = gatedSseResponse(['one'], ['two']);
+    fetchMock.mockImplementation(gated.fetchImpl);
 
     const operation = createChatCompletionStreamDetailed({
       messages: MESSAGES,
@@ -727,17 +917,40 @@ describe('streaming', () => {
 
     await expect(
       (async () => {
-        for await (const _token of operation.tokens) {
-          throw new Error('consumer blew up');
+        for await (const token of operation.tokens) {
+          throw new Error(`consumer blew up on ${token}`);
         }
       })()
-    ).rejects.toThrow('consumer blew up');
+    ).rejects.toThrow('consumer blew up on one');
 
     const metadata = await operation.completion;
     expect(metadata.attempts[0].errorCode).toBe('CONSUMER_CANCELLED');
   });
 
-  it('ошибка провайдера отклоняет completion с ChatCompletionError', async () => {
+  it('ошибка провайдера ДО первого токена отклоняет completion без потребителя', async () => {
+    fetchMock.mockResolvedValue(anthropicFailure(503, 'upstream unavailable'));
+    const controller = new AbortController();
+    const listeners = trackSignalListeners(controller.signal);
+
+    const operation = createChatCompletionStreamDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      signal: controller.signal,
+    });
+
+    const error = (await operation.completion.catch(
+      (e: unknown) => e
+    )) as ChatCompletionError;
+    expect(error).toBeInstanceOf(ChatCompletionError);
+    expect(error.attempts).toHaveLength(1);
+    expect(error.attempts[0]).toMatchObject({ outcome: 'ERROR', statusCode: 503 });
+    // Текст — сырое сообщение провайдера, без сводки попыток.
+    expect(error.message).toBe('Anthropic API error (503): upstream unavailable');
+    expect(error.statusCode).toBe(503);
+    listeners.expectAllReleased();
+  });
+
+  it('ошибка провайдера доходит и до потребителя tokens', async () => {
     fetchMock.mockResolvedValue(anthropicFailure(503, 'upstream unavailable'));
 
     const operation = createChatCompletionStreamDetailed({
@@ -747,19 +960,11 @@ describe('streaming', () => {
 
     await expect(
       (async () => {
-        for await (const _token of operation.tokens) {
-          // no-op
-        }
+        for await (const token of operation.tokens) void token;
       })()
     ).rejects.toThrow('Anthropic API error (503)');
 
-    const error = (await operation.completion.catch(
-      (e: unknown) => e
-    )) as ChatCompletionError;
-    expect(error).toBeInstanceOf(ChatCompletionError);
-    expect(error.attempts).toHaveLength(1);
-    expect(error.attempts[0]).toMatchObject({ outcome: 'ERROR', statusCode: 503 });
-    expect(error.message).toContain('upstream unavailable');
+    await expect(operation.completion).rejects.toBeInstanceOf(ChatCompletionError);
   });
 
   it('внешняя отмена стрима отмечается ABORTED, не ERROR', async () => {
@@ -768,6 +973,7 @@ describe('streaming', () => {
       setTimeout(() => controller.abort(), 10);
       return hangUntilAbort(init);
     });
+    const listeners = trackSignalListeners(controller.signal);
 
     const operation = createChatCompletionStreamDetailed({
       messages: MESSAGES,
@@ -777,9 +983,7 @@ describe('streaming', () => {
 
     await expect(
       (async () => {
-        for await (const _token of operation.tokens) {
-          // no-op
-        }
+        for await (const token of operation.tokens) void token;
       })()
     ).rejects.toThrow();
 
@@ -789,6 +993,27 @@ describe('streaming', () => {
     expect(error.attempts[0]).toMatchObject({
       outcome: 'ABORTED',
       errorCode: 'ABORTED_BY_CALLER',
+    });
+    listeners.expectAllReleased();
+  });
+
+  it('таймаут стрима отмечается собственным кодом бюджета', async () => {
+    fetchMock.mockImplementation((_url: string, init?: RequestInit) =>
+      hangUntilAbort(init)
+    );
+
+    const operation = createChatCompletionStreamDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      requestTimeoutMs: 20,
+    });
+
+    const error = (await operation.completion.catch(
+      (e: unknown) => e
+    )) as ChatCompletionError;
+    expect(error.attempts[0]).toMatchObject({
+      outcome: 'ABORTED',
+      errorCode: 'ATTEMPT_TIMEOUT',
     });
   });
 });
