@@ -77,9 +77,16 @@
  *
  * GRADER_PROVIDER / GRADER_MODEL (env, опциональны) — провайдер и модель для
  * оценивающих вызовов. Экзаменатор на той же модели, что и экстрактор, делит
- * с ним характер ошибок и склонен одобрять собственный стиль формулировок;
- * если они совпали, скрипт печатает предупреждение и помечает прогон как
- * неавтономный в артефакте.
+ * с ним характер ошибок и склонен одобрять собственный стиль формулировок.
+ *
+ * Отношение сторон считается по ФАКТИЧЕСКИ ответившим provider/model из
+ * журнала вызовов (`ModelRelationship`, src/lib/ai/extraction-run.ts), а не по
+ * наличию env-переменных: при `ANTHROPIC_MODEL=X`, `GRADER_MODEL=X` и
+ * незаданном `EXTRACTION_MODEL` сравнение сырых env объявляло судью
+ * независимым, хотя обе стороны ехали на одной модели X. Артефакт хранит сам
+ * факт (`ModelRelationship`); вывод «можно ли считать судью независимым» —
+ * отдельная функция поверх факта, и слово «независим» не появляется в отчёте
+ * без указания отношения, на котором он основан.
  */
 import 'dotenv/config';
 import { readFileSync, writeFileSync, mkdirSync } from 'fs';
@@ -93,7 +100,23 @@ import {
   type KnowledgeExtractionStreamResult,
   type ExtractedRuleStream,
 } from '../src/lib/ai/knowledge-extractor-stream';
-import { createChatCompletion, type Provider } from '../src/lib/ai/chat-provider';
+import {
+  createChatCompletionDetailed,
+  type CompletionRunConfig,
+} from '../src/lib/ai/chat-provider';
+import {
+  assessGraderIndependence,
+  describeGraderIndependence,
+  recordFailedCall,
+  recordSuccessfulCall,
+  relateIdentities,
+  resolveExtractionRunConfig,
+  resolveGraderRunConfig,
+  summarizeRunModels,
+  type ExtractionRunConfig,
+  type LlmCallContext,
+  type LlmCallRecord,
+} from '../src/lib/ai/extraction-run';
 
 /**
  * Версия промптов экзаменатора. Пишется в артефакт: вердикты, полученные на
@@ -327,24 +350,39 @@ function loadCases(casesPath: string): TestCase[] {
 
 // ──────────────────────────────── извлечение ────────────────────────────────
 
-async function runExtraction(documentText: string): Promise<KnowledgeExtractionStreamResult> {
+async function runExtraction(
+  documentText: string,
+  runConfig: ExtractionRunConfig
+): Promise<{ result: KnowledgeExtractionStreamResult; calls: LlmCallRecord[] }> {
   let result: KnowledgeExtractionStreamResult | null = null;
   let tokenCount = 0;
+  const calls: LlmCallRecord[] = [];
 
-  for await (const event of streamKnowledgeExtraction(documentText, [])) {
+  for await (const event of streamKnowledgeExtraction(documentText, [], { runConfig })) {
     if (event.type === 'batch_progress') {
       console.log('[batch_progress]', event.data);
     } else if (event.type === 'batch_skipped') {
       console.warn('[batch_skipped]', event.data);
     } else if (event.type === 'token') {
       tokenCount++;
+    } else if (event.type === 'llm_call') {
+      calls.push(event.data);
+      const served =
+        event.data.servedByProvider && event.data.servedByModel
+          ? `${event.data.servedByProvider}/${event.data.servedByModel}`
+          : '(не ответил никто)';
+      console.log(
+        `[llm_call] ${event.data.role} ${event.data.label}: ${event.data.outcome}, фактически ${served}${
+          event.data.fallbackUsed ? ' (через резерв)' : ''
+        }`
+      );
     } else if (event.type === 'result') {
-      result = event.data as KnowledgeExtractionStreamResult;
+      result = event.data;
     }
   }
   console.log(`Streamed ${tokenCount} token chunks.\n`);
   if (!result) throw new Error('no result event received from streamKnowledgeExtraction');
-  return result;
+  return { result, calls };
 }
 
 // ──────────────────── слой 1: структурные поля (без LLM) ────────────────────
@@ -606,18 +644,32 @@ DEGRADED = фактов не выдумано, но потеряно услов�
 LOST = есть утверждение, которого нет в источнике, либо число искажено, либо ограничение снято.`;
 }
 
-interface GraderConfig {
-  provider: Provider;
-  model: string | null;
+/**
+ * Сессия судьи: разрезолвленная конфигурация (уже конкретная модель, а не
+ * «дефолт провайдера») плюс журнал, куда попадает КАЖДЫЙ вызов, включая
+ * упавшие. `ModelRelationship` считается по этому журналу.
+ */
+interface GraderSession {
+  config: CompletionRunConfig;
+  calls: LlmCallRecord[];
 }
 
 async function callGrader(
   prompt: string,
-  config: GraderConfig
+  session: GraderSession,
+  label: string
 ): Promise<{ ok: true; data: GraderResponse } | { ok: false; error: string; raw: string }> {
+  const callContext: LlmCallContext = {
+    role: 'GRADER',
+    batchIndex: null,
+    label,
+    config: session.config,
+    sourceText: prompt,
+  };
+
   let raw = '';
   try {
-    raw = await createChatCompletion({
+    const completion = await createChatCompletionDetailed({
       messages: [
         { role: 'system', content: GRADER_SYSTEM_PROMPT },
         { role: 'user', content: prompt },
@@ -625,10 +677,20 @@ async function callGrader(
       temperature: 0,
       responseFormat: 'json_object',
       maxTokens: 1200,
-      provider: config.provider,
-      ...(config.model ? { model: config.model } : {}),
+      // Модель закреплена ВСЕГДА, даже когда GRADER_MODEL не задан: иначе
+      // «модель судьи» в артефакте была бы предположением о дефолте, а не тем,
+      // что поехало в API.
+      provider: session.config.provider,
+      model: session.config.model,
+      promptVersion: session.config.promptVersion,
+      fallbackPolicy: session.config.fallbackPolicy,
     });
+    session.calls.push(recordSuccessfulCall(callContext, completion));
+    raw = completion.text;
   } catch (error) {
+    // ChatCompletionError (A1) наследует Error и несёт `attempts[]` — они уже
+    // сохранены записью выше; наружу по-прежнему уходит только текст.
+    session.calls.push(recordFailedCall(callContext, error));
     return { ok: false, error: error instanceof Error ? error.message : String(error), raw: '' };
   }
 
@@ -655,9 +717,9 @@ async function grade(
   mode: GradeMode,
   prompt: string,
   rules: ExtractedRuleStream[],
-  config: GraderConfig
+  session: GraderSession
 ): Promise<GradeRecord> {
-  const result = await callGrader(prompt, config);
+  const result = await callGrader(prompt, session, `${caseId}/${mode}`);
   const gradedRuleCodes = rules.map((rule) => rule.ruleCode);
 
   if (!result.ok) {
@@ -720,22 +782,21 @@ function formatVerdictCounts(records: GradeRecord[]): string {
     .join(', ');
 }
 
-function resolveGlobalProvider(): Provider {
-  // Повторяет getProvider() из chat-provider.ts (не экспортирован). Нужен
-  // только для отчёта и проверки независимости судьи — маршрутизация вызовов
-  // остаётся за самим chat-provider.
-  const provider = (process.env.AI_PROVIDER || '').toLowerCase();
-  if (provider === 'anthropic') return 'anthropic';
-  if (provider === 'openai') return 'openai';
-  return process.env.ANTHROPIC_API_KEY ? 'anthropic' : 'openai';
-}
-
-function resolveGraderProvider(): Provider {
-  const raw = (process.env.GRADER_PROVIDER || '').toLowerCase();
-  if (raw === '') return resolveGlobalProvider();
-  if (raw === 'anthropic' || raw === 'openai') return raw;
-  console.error(`GRADER_PROVIDER принимает anthropic|openai, получено: ${process.env.GRADER_PROVIDER}`);
-  process.exit(1);
+/** Резолв конфигураций живёт в src/lib/ai/extraction-run.ts (там же, где он
+ *  тестируется); скрипту остаётся только превратить ошибку в код возврата. */
+function resolveRunConfigsOrExit(): {
+  extraction: ExtractionRunConfig;
+  grader: CompletionRunConfig;
+} {
+  try {
+    return {
+      extraction: resolveExtractionRunConfig(),
+      grader: resolveGraderRunConfig(PROMPT_VERSION),
+    };
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
 }
 
 function gitSha(): string | null {
@@ -754,24 +815,33 @@ function gitSha(): string | null {
 async function main() {
   const { docPath, casesPath, failOn, skipFidelity } = parseArgs();
 
-  const extractionProvider = resolveGlobalProvider();
-  const graderProvider = resolveGraderProvider();
-  // null = «модель по умолчанию у провайдера». Сравниваются именно исходные
-  // настройки, а не разрезолвленные имена: если обе пусты, обе стороны придут
-  // к одной и той же дефолтной модели — то есть независимости нет.
-  const extractionModel = process.env.EXTRACTION_MODEL || null;
-  const graderModel = process.env.GRADER_MODEL || null;
-  const graderIsIndependent = graderProvider !== extractionProvider || graderModel !== extractionModel;
+  // Обе конфигурации разрезолвлены до конкретных provider/model ДО прогона:
+  // сравнивать сырые env нельзя — при незаданном EXTRACTION_MODEL и
+  // GRADER_MODEL=X сравнение `null !== 'X'` объявляло бы стороны разными,
+  // хотя обе поехали бы на одной и той же модели X.
+  const { extraction: extractionRunConfig, grader: graderRunConfig } = resolveRunConfigsOrExit();
+  const plannedRelationship = relateIdentities(
+    { provider: extractionRunConfig.provider, model: extractionRunConfig.model },
+    { provider: graderRunConfig.provider, model: graderRunConfig.model }
+  );
 
   console.log('=== EXTRACTION PACK TEST (isolated, no DB writes) ===');
   console.log(`Document: ${docPath}`);
-  console.log(`Извлечение: провайдер=${extractionProvider}, модель=${extractionModel ?? '(дефолт провайдера)'}`);
-  console.log(`Экзаменатор: провайдер=${graderProvider}, модель=${graderModel ?? '(дефолт провайдера)'}`);
-  if (!graderIsIndependent) {
+  console.log(
+    `Извлечение: провайдер=${extractionRunConfig.provider}, модель=${extractionRunConfig.model}, ` +
+      `промпт=${extractionRunConfig.promptVersion}, схема=${extractionRunConfig.extractionSchemaVersion}, ` +
+      `фоллбэк=${extractionRunConfig.fallbackPolicy}`
+  );
+  console.log(
+    `Экзаменатор: провайдер=${graderRunConfig.provider}, модель=${graderRunConfig.model}, ` +
+      `промпт=${graderRunConfig.promptVersion}, фоллбэк=${graderRunConfig.fallbackPolicy}`
+  );
+  console.log(`План (по разрезолвленной конфигурации, до прогона): ${describeGraderIndependence(plannedRelationship)}`);
+  if (assessGraderIndependence(plannedRelationship) === 'NOT_INDEPENDENT') {
     console.log('');
-    console.log('!!! ВНИМАНИЕ: экзаменатор работает на том же провайдере и той же модели, что и экстрактор.');
-    console.log('!!! Оценка НЕ является независимой: судья делит с экстрактором характер ошибок и склонен');
-    console.log('!!! одобрять собственные формулировки. Задайте GRADER_PROVIDER и/или GRADER_MODEL.');
+    console.log('!!! ВНИМАНИЕ: экзаменатор поедет на той же модели, что и экстрактор. Судья делит с ним');
+    console.log('!!! характер ошибок и склонен одобрять собственные формулировки. Задайте GRADER_PROVIDER');
+    console.log('!!! и/или GRADER_MODEL. Фактическое отношение будет пересчитано по журналу вызовов в конце.');
     console.log('');
   }
   console.log(`--fail-on=${failOn}${failOn === 'none' ? ' (код возврата всегда 0)' : ''}`);
@@ -790,7 +860,7 @@ async function main() {
     console.log(`Кейсы: ${cases.length} позитивных, ${negativeCaseCount} негативных/уточняющих.\n`);
   }
 
-  const result = await runExtraction(documentText);
+  const { result, calls: extractionCalls } = await runExtraction(documentText, extractionRunConfig);
 
   console.log(
     `Extracted ${result.rules.length} rules, ${result.qaPairs.length} QA pairs, ${result.uncertainties.length} uncertainties.\n`
@@ -861,9 +931,10 @@ async function main() {
   }
 
   const grades: GradeRecord[] = [];
+  const graderCalls: LlmCallRecord[] = [];
 
   if (casesPath) {
-    const graderConfig: GraderConfig = { provider: graderProvider, model: graderModel };
+    const graderSession: GraderSession = { config: graderRunConfig, calls: graderCalls };
     const fidelityCandidates = result.rules.filter((rule) => sourceNumberByRuleCode.has(rule.ruleCode));
     const plannedCalls =
       (cases.length + negativeCaseCount) * 2 + (skipFidelity ? 0 : fidelityCandidates.length);
@@ -885,7 +956,7 @@ async function main() {
         'usability_all',
         buildUsabilityPrompt(testCase, result.rules, 'all'),
         result.rules,
-        graderConfig
+        graderSession
       );
       grades.push(allRecord);
 
@@ -901,7 +972,7 @@ async function main() {
               'usability_scoped',
               buildUsabilityPrompt(testCase, scopedRules, 'scoped'),
               scopedRules,
-              graderConfig
+              graderSession
             );
       grades.push(scopedRecord);
 
@@ -917,7 +988,7 @@ async function main() {
           'precision_all',
           buildPrecisionPrompt(negativeCase, testCase, result.rules, 'all'),
           result.rules,
-          graderConfig
+          graderSession
         );
         grades.push(negativeAll);
 
@@ -933,7 +1004,7 @@ async function main() {
                 'precision_scoped',
                 buildPrecisionPrompt(negativeCase, testCase, scopedRules, 'scoped'),
                 scopedRules,
-                graderConfig
+                graderSession
               );
         grades.push(negativeScoped);
 
@@ -967,7 +1038,7 @@ async function main() {
           'fidelity',
           buildFidelityPrompt(rule, sourceRule?.text ?? ''),
           [rule],
-          graderConfig
+          graderSession
         );
         grades.push(record);
         console.log(`${rule.ruleCode.padEnd(8)} источник ${sourceNumber}: ${record.verdict}`);
@@ -984,11 +1055,29 @@ async function main() {
     console.log('\n(no --cases given, skipping LLM grading — слои 1 и 2 выполнены)');
   }
 
+  // ── фактическое отношение моделей ──
+  // Считается ПОСЛЕ прогона: до него известна только запрошенная конфигурация,
+  // а ответить мог резерв.
+  const models = summarizeRunModels(extractionCalls, graderCalls);
+  const listIdentities = (summary: { servedIdentities: { provider: string; model: string }[] }) =>
+    summary.servedIdentities.map((id) => `${id.provider}/${id.model}`).join(', ') || '(нет данных)';
+
   // ── сводка ──
   const byMode = (mode: GradeMode) => grades.filter((record) => record.mode === mode);
   console.log('\n' + '─'.repeat(72));
   console.log('СВОДКА');
   console.log('─'.repeat(72));
+  console.log(
+    `  Вызовы извлечения:             ${models.extraction.calls} (${models.extraction.modelConsistency}) → ${listIdentities(models.extraction)}`
+  );
+  console.log(
+    `  Вызовы судьи:                  ${models.grader.calls} (${models.grader.modelConsistency}) → ${listIdentities(models.grader)}`
+  );
+  console.log(`  Отношение моделей (по факту):  ${models.statement}`);
+  if (models.extraction.modelConsistency === 'MIXED') {
+    console.log('  !!! Батчи/retry внутри одного прогона обслужены РАЗНЫМИ моделями: извлечение не однородно,');
+    console.log('  !!! и сравнивать этот прогон с однородным как регрессию нельзя.');
+  }
   console.log(`  Структурные поля применимости: ${rulesWithAnyField}/${total} правил (${structuralPercent}%)`);
   console.log(`  Цитаты найдены в источнике:    ${quotesOk}/${quoteChecks.length}`);
   if (grades.length > 0) {
@@ -1039,11 +1128,22 @@ async function main() {
           docPath,
           casesPath,
           documentLength: documentText.length,
-          extraction: { provider: extractionProvider, model: extractionModel },
-          grader: { provider: graderProvider, model: graderModel, independent: graderIsIndependent },
+          extraction: { runConfig: extractionRunConfig, ...models.extraction },
+          grader: { runConfig: graderRunConfig, ...models.grader },
+          // ФАКТ отдельно от интерпретации: `relationship` переживает смену
+          // policy, `independence` — нет.
+          modelRelationship: {
+            planned: plannedRelationship,
+            observed: models.relationship,
+            independence: models.independence,
+            statement: models.statement,
+          },
           failOn,
           exitCode,
         },
+        // Каждый батч, каждый retry, каждый вызов судьи — с фактическим
+        // исполнителем, версией промпта и хэшем текста, о котором был вызов.
+        llmCalls: [...extractionCalls, ...graderCalls],
         structural: { totalRules: total, rulesWithAnyField, fields: coverage },
         quotes: quoteChecks,
         sourceMapping: {
