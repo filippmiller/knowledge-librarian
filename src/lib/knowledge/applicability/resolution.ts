@@ -179,18 +179,37 @@ export function resolveKnowledgeSet(
   const byId = new Map(candidates.map((candidate) => [candidate.unitId, candidate]));
 
   // ── Шаг 2. Явная замена (`supersedes`) ────────────────────────────────────
+  //
   // Заменять вправе только ВЫБРАННЫЙ кандидат: удержанный сам под вопросом, и
   // позволить ему вытеснить работающее правило значило бы решить неизвестностью.
-  for (const unitId of [...selectedIds]) {
+  //
+  // Замена ТРАНЗИТИВНА: если v3 заменяет v2, а v2 — v1, устарели оба. Поэтому
+  // заявки собираются одним проходом по ИСХОДНОМУ набору — цепочка снимается
+  // целиком, и результат не зависит от порядка обхода.
+  //
+  // Взаимная замена (A заменяет B и B заменяет A) — противоречие в данных.
+  // Применить её порядком нельзя: результат зависел бы от сортировки выдачи, а
+  // удаление обоих схлопнуло бы набор кандидатов в пустой — недопустимый исход.
+  // Такая пара остаётся на месте и уходит человеку.
+  const initiallySelected = new Set(selectedIds);
+  const supersededBy = new Map<string, string>();
+  for (const unitId of initiallySelected) {
     const candidate = byId.get(unitId);
     if (candidate === undefined) continue;
-    for (const supersededId of candidate.supersedes) {
-      const position = selectedIds.indexOf(supersededId);
-      if (position >= 0) {
-        selectedIds.splice(position, 1);
-        exclude(supersededId, 'superseded_by_newer_unit', unitId);
+    for (const targetId of candidate.supersedes) {
+      if (targetId === unitId || !initiallySelected.has(targetId)) continue;
+      if (byId.get(targetId)?.supersedes.includes(unitId) === true) {
+        addReason('supersedes_cycle_unresolved');
+        requiresHumanReview = true;
+        continue;
       }
+      if (!supersededBy.has(targetId)) supersededBy.set(targetId, unitId);
     }
+  }
+  for (const [targetId, byUnitId] of supersededBy) {
+    const position = selectedIds.indexOf(targetId);
+    if (position >= 0) selectedIds.splice(position, 1);
+    exclude(targetId, 'superseded_by_newer_unit', byUnitId);
   }
 
   // ── Шаг 3. Активное исключение переопределяет своего родителя (§4.1 п.2) ──

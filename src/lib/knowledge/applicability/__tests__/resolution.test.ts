@@ -350,6 +350,64 @@ describe('§4.1 п.3 / §4.2 — числовые конфликты', () => {
     expect(decision.disposition).toBe('ANSWER');
   });
 
+  it('цепочка замен снимается целиком: v3 → v2 → v1 оставляет только v3', () => {
+    const decision = resolveKnowledgeSet(
+      [
+        candidate({ ...priceCandidate('v1', seconds(1)) }),
+        candidate({ ...priceCandidate('v2', seconds(2)), supersedes: ['v1'] }),
+        candidate({ ...priceCandidate('v3', seconds(3)), supersedes: ['v2'] }),
+      ],
+      QUERY
+    );
+
+    expect(decision.selected).toEqual(['v3']);
+    expect(decision.numericConflicts).toEqual([]);
+    expect(decision.disposition).toBe('ANSWER');
+  });
+
+  it('результат замены не зависит от порядка кандидатов в выдаче', () => {
+    const build = (order: readonly string[]) => {
+      const units: Record<string, EvaluatedCandidate> = {
+        v1: candidate({ ...priceCandidate('v1', seconds(1)) }),
+        v2: candidate({ ...priceCandidate('v2', seconds(2)), supersedes: ['v1'] }),
+        v3: candidate({ ...priceCandidate('v3', seconds(3)), supersedes: ['v2'] }),
+      };
+      return resolveKnowledgeSet(
+        order.map((id) => units[id]),
+        QUERY
+      );
+    };
+
+    expect(build(['v1', 'v2', 'v3']).selected).toEqual(build(['v3', 'v2', 'v1']).selected);
+    expect(build(['v2', 'v3', 'v1']).selected).toEqual(['v3']);
+  });
+
+  it('взаимная замена не схлопывает набор в пустой — она уходит человеку', () => {
+    const decision = resolveKnowledgeSet(
+      [
+        candidate({ ...priceCandidate('a', seconds(3)), supersedes: ['b'] }),
+        candidate({ ...priceCandidate('b', seconds(5)), supersedes: ['a'] }),
+      ],
+      QUERY
+    );
+
+    expect(decision.selected).toEqual(['a', 'b']);
+    expect(decision.excluded).toEqual([]);
+    expect(decision.reasons).toContain('supersedes_cycle_unresolved');
+    expect(decision.requiresHumanReview).toBe(true);
+    expect(decision.disposition).toBe('HOLD');
+  });
+
+  it('замена на кандидата, которого нет в выдаче, никого не трогает', () => {
+    const decision = resolveKnowledgeSet(
+      [candidate({ ...priceCandidate('p1', seconds(3)), supersedes: ['её-нет-в-выдаче'] })],
+      QUERY
+    );
+
+    expect(decision.selected).toEqual(['p1']);
+    expect(decision.excluded).toEqual([]);
+  });
+
   it('§4.2: число в прозе (без структурного поля) governance не блокирует', () => {
     const decision = resolveKnowledgeSet(
       [priceCandidate('p1', null), priceCandidate('p2', null)],
