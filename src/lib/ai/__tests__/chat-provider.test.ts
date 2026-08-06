@@ -399,6 +399,74 @@ describe('createChatCompletionDetailed — полный отказ', () => {
   });
 });
 
+describe('createChatCompletionDetailed — что считается транзиентной ошибкой', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('структурный retryable-статус по-прежнему запускает retry', async () => {
+    vi.useFakeTimers();
+    fetchMock
+      .mockResolvedValueOnce(anthropicFailure(503, 'upstream hiccup'))
+      .mockResolvedValueOnce(anthropicOk('recovered'));
+
+    const pending = createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      fallbackPolicy: 'NONE',
+    });
+    // Первый backoff — BASE_DELAY_MS (1000мс).
+    await vi.advanceTimersByTimeAsync(1000);
+
+    const result = await pending;
+    expect(result.text).toBe('recovered');
+    expect(result.attempts).toHaveLength(2);
+    expect(result.attempts[0]).toMatchObject({ outcome: 'ERROR', statusCode: 503 });
+    expect(result.attempts[1].outcome).toBe('SUCCESS');
+  });
+
+  it('число, похожее на статус, В ТЕКСТЕ сообщения retry НЕ запускает', async () => {
+    // Иначе любая ошибка, чей текст содержит «(429)» — например эхо чужого
+    // payload — превращалась бы в четыре обращения к API и ~7с backoff.
+    vi.stubEnv('AI_PROVIDER', 'openai');
+    openaiCreate.mockRejectedValue(new Error('stream chunk (429) failed to parse'));
+
+    const error = (await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'openai',
+      fallbackPolicy: 'NONE',
+    }).catch((e: unknown) => e)) as ChatCompletionError;
+
+    expect(error).toBeInstanceOf(ChatCompletionError);
+    expect(openaiCreate).toHaveBeenCalledTimes(1);
+    expect(error.attempts).toHaveLength(1);
+    // Выдуманный статус не должен попадать и в телеметрию.
+    expect(error.attempts[0].statusCode).toBeUndefined();
+  });
+
+  it('нормализованный код ошибки провайдера запускает retry без всякого статуса', async () => {
+    vi.useFakeTimers();
+    vi.stubEnv('AI_PROVIDER', 'openai');
+    openaiCreate
+      .mockRejectedValueOnce(
+        Object.assign(new Error('fetch failed'), {
+          cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+        })
+      )
+      .mockResolvedValueOnce(openaiOk('recovered'));
+
+    const pending = createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'openai',
+      fallbackPolicy: 'NONE',
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+
+    await expect(pending).resolves.toMatchObject({ text: 'recovered' });
+    expect(openaiCreate).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('createChatCompletionDetailed — таймауты и отмена', () => {
   it('таймаут попытки внутри totalDeadlineMs: ABORTED + резерв успевает', async () => {
     fetchMock.mockImplementation((_url: string, init?: RequestInit) =>

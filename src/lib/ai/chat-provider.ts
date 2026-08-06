@@ -492,6 +492,15 @@ function coerceJsonSyntax(candidate: string): string {
 }
 
 const RETRYABLE_STATUS_CODES = [429, 529, 503, 502];
+/** Нормализованные коды ошибок (не числа), означающие транзиентный сбой. */
+const RETRYABLE_ERROR_CODES = new Set([
+  'overloaded_error',
+  'rate_limit_error',
+  'econnreset',
+  'econnrefused',
+  'etimedout',
+  'epipe',
+]);
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
 
@@ -502,24 +511,64 @@ const ABORT_ERROR_NAMES = new Set([
   'APIConnectionTimeoutError',
 ]);
 
+/**
+ * Ошибка и её цепочка `cause`. undici прячет настоящий сетевой `code`
+ * (`ECONNRESET` и подобные) на уровень глубже, чем брошенный наружу
+ * `TypeError: fetch failed`, поэтому смотреть только на верхний объект мало.
+ */
+function* errorChain(error: unknown, maxDepth = 5): Generator<object> {
+  let current = error;
+  for (let depth = 0; depth < maxDepth; depth++) {
+    if (typeof current !== 'object' || current === null) return;
+    yield current;
+    current = (current as { cause?: unknown }).cause;
+  }
+}
+
+function readNumber(source: unknown, key: string): number | undefined {
+  if (typeof source !== 'object' || source === null) return undefined;
+  const value = (source as Record<string, unknown>)[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * HTTP-статус берётся ТОЛЬКО из структурных полей ошибки: наш
+ * `ProviderRequestError.statusCode`, `status`/`statusCode` SDK-ошибок,
+ * `response.status`. Разбор трёхзначного числа из текста сообщения убран
+ * сознательно — сообщение провайдера это свободный текст, и «(429)» внутри
+ * чужой прозы не должно ни попадать в телеметрию как статус, ни запускать
+ * три ретрая с backoff по ошибке, которая ретраю не подлежит.
+ */
 function extractStatusCode(error: unknown): number | undefined {
-  if (error instanceof ProviderRequestError) return error.statusCode;
-  const status = (error as { status?: unknown; statusCode?: unknown } | null)?.status;
-  if (typeof status === 'number') return status;
-  const statusCode = (error as { statusCode?: unknown } | null)?.statusCode;
-  if (typeof statusCode === 'number') return statusCode;
-  if (error instanceof Error) {
-    const match = /\((\d{3})\)/.exec(error.message);
-    if (match) return Number(match[1]);
+  for (const node of errorChain(error)) {
+    const status =
+      readNumber(node, 'status') ??
+      readNumber(node, 'statusCode') ??
+      readNumber((node as { response?: unknown }).response, 'status');
+    if (status !== undefined) return status;
   }
   return undefined;
 }
 
 function extractErrorCode(error: unknown): string | undefined {
-  if (error instanceof ProviderRequestError && error.errorCode) return error.errorCode;
-  const code = (error as { code?: unknown } | null)?.code;
-  if (typeof code === 'string') return code;
-  if (error instanceof Error && error.name && error.name !== 'Error') return error.name;
+  for (const node of errorChain(error)) {
+    if (node instanceof ProviderRequestError) {
+      if (node.errorCode) return node.errorCode;
+      continue;
+    }
+    const code = (node as { code?: unknown }).code;
+    if (typeof code === 'string' && code) return code;
+  }
+  // Имя класса — последний и наименее информативный источник. Собственную
+  // обёртку сюда не пускаем: «ProviderRequestError» не код ошибки провайдера.
+  if (
+    error instanceof Error &&
+    !(error instanceof ProviderRequestError) &&
+    error.name &&
+    error.name !== 'Error'
+  ) {
+    return error.name;
+  }
   return undefined;
 }
 
@@ -528,17 +577,29 @@ function isAbortError(error: unknown): boolean {
   return typeof name === 'string' && ABORT_ERROR_NAMES.has(name);
 }
 
+/**
+ * Транзиентность определяется нормализованным сигналом — структурным статусом
+ * или кодом ошибки. Текст сообщения остаётся последним рубежом только для
+ * НЕчисловых маркеров: число, найденное в свободном тексте, статусом не
+ * является.
+ */
 function isRetryableError(error: unknown): boolean {
   if (isAbortError(error)) return false;
+
   const status = extractStatusCode(error);
   if (status !== undefined && RETRYABLE_STATUS_CODES.includes(status)) return true;
+
+  const code = extractErrorCode(error)?.toLowerCase();
+  if (code && RETRYABLE_ERROR_CODES.has(code)) return true;
+
   if (error instanceof Error) {
     const msg = error.message;
-    return RETRYABLE_STATUS_CODES.some(code => msg.includes(`(${code})`)) ||
+    return (
       msg.includes('overloaded') ||
       msg.includes('rate_limit') ||
       msg.includes('ECONNRESET') ||
-      msg.includes('ETIMEDOUT');
+      msg.includes('ETIMEDOUT')
+    );
   }
   return false;
 }
