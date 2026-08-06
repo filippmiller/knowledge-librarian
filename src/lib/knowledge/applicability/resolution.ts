@@ -216,7 +216,20 @@ export function resolveKnowledgeSet(
   const overridden: OverriddenCandidate[] = [];
   for (const unitId of [...selectedIds]) {
     const candidate = byId.get(unitId);
-    if (candidate?.kind !== 'EXCEPTION_RULE' || candidate.parentRuleRef === null) continue;
+    if (candidate?.kind !== 'EXCEPTION_RULE') continue;
+
+    // Исключение БЕЗ родителя — не «исключение, которому некого переопределять»,
+    // а испорченная запись: §2 делает `parentRuleRef` обязательным для
+    // EXCEPTION_RULE. Раньше такой unit просто пропускал шаг переопределения и
+    // оставался в выборке — то есть отвечал КАК САМОСТОЯТЕЛЬНОЕ ПРАВИЛО, хотя
+    // по смыслу он лишь оговорка к чему-то, чего в ответе нет. Тип кандидата
+    // допускает null (миграции, ручной ввод), поэтому проверка нужна в рантайме.
+    if (candidate.parentRuleRef === null) {
+      requiresHumanReview = true;
+      addReason('exception_without_parent');
+      continue;
+    }
+
     const position = selectedIds.indexOf(candidate.parentRuleRef);
     if (position >= 0) {
       selectedIds.splice(position, 1);

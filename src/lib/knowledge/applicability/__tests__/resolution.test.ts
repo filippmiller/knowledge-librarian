@@ -605,6 +605,30 @@ describe('жёсткая фильтрация не убивает recall', () =>
     expect(decision.undetermined).toEqual([{ unitId: 'rule-1', reason: 'scope_unknown_held' }]);
   });
 
+  it('исключение БЕЗ родителя не отвечает как самостоятельное правило', () => {
+    // Находка ревью на PR. §2 делает parentRuleRef обязательным для
+    // EXCEPTION_RULE, но тип кандидата допускает null (миграции, ручной ввод).
+    // Раньше такой unit просто пропускал шаг переопределения и ОСТАВАЛСЯ в
+    // выборке — то есть отвечал как обычное правило, хотя по смыслу он лишь
+    // оговорка к чему-то, чего в ответе нет.
+    const decision = resolveKnowledgeSet(
+      [
+        candidate({
+          unitId: 'orphan-exception',
+          kind: 'EXCEPTION_RULE',
+          scope: scopeOf('EXCEPTION_RULE'),
+          trigger: triggerIn('PUBLIC'),
+          parentRuleRef: null,
+        }),
+      ],
+      QUERY
+    );
+
+    expect(decision.disposition).not.toBe('ANSWER');
+    expect(decision.requiresHumanReview).toBe(true);
+    expect(decision.reasons).toContain('exception_without_parent');
+  });
+
   it('пустой вход — HOLD с явной причиной, а не тихий «ответ ни на чём»', () => {
     const decision = resolveKnowledgeSet([], QUERY);
 

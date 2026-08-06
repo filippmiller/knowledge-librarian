@@ -322,6 +322,31 @@ describe('окно действия', () => {
       eligible: false,
       reason: 'validity_window_malformed',
     },
+    // Date.parse принимает такое молча: '0' превращается в 2000-й год, голая
+    // дата — в полночь UTC, 30 февраля — в 2 марта. То есть испорченное
+    // значение читалось бы как валидное окно, и unit оказывался бы годен по
+    // данным, которых нет.
+    {
+      label: 'мусор, который Date.parse проглатывает: "0"',
+      validFrom: '0',
+      validUntil: null,
+      eligible: false,
+      reason: 'validity_window_malformed',
+    },
+    {
+      label: 'голая дата без времени и зоны',
+      validFrom: '2026-08-01',
+      validUntil: null,
+      eligible: false,
+      reason: 'validity_window_malformed',
+    },
+    {
+      label: 'несуществующая дата 30 февраля',
+      validFrom: '2026-02-30T00:00:00Z',
+      validUntil: null,
+      eligible: false,
+      reason: 'validity_window_malformed',
+    },
   ])('$label → eligible=$eligible', ({ validFrom, validUntil, eligible, reason }) => {
     const decision = evaluateUnitEligibility(
       buildUnit({ validFrom, validUntil }),

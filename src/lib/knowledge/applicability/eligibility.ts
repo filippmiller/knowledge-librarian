@@ -108,9 +108,30 @@ function audienceOutcome(
   return { verdict: 'MATCH' };
 }
 
+/**
+ * Строгий ISO-8601 с временем и зоной — ровно тот формат, в котором контракт
+ * хранит отметки времени (B1, §5.1).
+ *
+ * `Date.parse` в одиночку сюда не годится: он принимает `'0'`, голую дату и
+ * прочее, что движок Node вольно нормализует. То есть испорченное значение
+ * читалось бы как ВАЛИДНОЕ окно действия, и unit оказывался бы годен по
+ * данным, которых нет. Отдельно ловим переполнение (`2026-02-30`): строка
+ * разбирается, но Date молча переносит её на март, и окно уезжает.
+ */
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
 function parseInstant(value: string): number | null {
+  if (!ISO_INSTANT.test(value)) return null;
+
   const parsed = Date.parse(value);
-  return Number.isNaN(parsed) ? null : parsed;
+  if (Number.isNaN(parsed)) return null;
+
+  // Дата-переполнение: '2026-02-30T00:00:00Z' проходит regex и Date.parse, но
+  // соответствует 2 марта. Сверяем календарную часть с тем, что получилось.
+  const iso = new Date(parsed).toISOString();
+  if (iso.slice(0, 10) !== value.slice(0, 10) && value.endsWith('Z')) return null;
+
+  return parsed;
 }
 
 /**
