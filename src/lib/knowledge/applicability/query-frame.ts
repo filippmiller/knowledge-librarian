@@ -6,6 +6,7 @@ import {
   type FacetKey,
   type FacetValueOf,
 } from './facets';
+import { nonBlankString } from './text';
 import {
   TRIGGER_FACT_KEYS,
   TRIGGER_FACT_REGISTRY,
@@ -43,8 +44,11 @@ export interface FacetEvidence {
 
 export const facetEvidenceSchema = z.strictObject({
   source: z.enum(EVIDENCE_SOURCES),
-  messageId: z.string().min(1).optional(),
-  quote: z.string().min(1),
+  messageId: nonBlankString('messageId не может состоять из одних пробелов').optional(),
+  // Цитата из пробелов удовлетворяла бы требованию «значение подкреплено
+  // источником», не подкрепляя ничем: evaluator'ы B2 приняли бы решение по
+  // значению, которое нечем перепроверить в trace.
+  quote: nonBlankString('quote обязана содержать текст источника, а не пробелы'),
 });
 
 /**
@@ -187,7 +191,7 @@ export const queryFrameSchema = z.strictObject({
   facets: queryFacetMapSchema,
   triggerFacts: queryFactMapSchema,
   questionAspects: z.array(z.enum(QUESTION_ASPECTS)).readonly(),
-  ambiguities: z.array(z.string().min(1)).readonly(),
+  ambiguities: z.array(nonBlankString('описание неоднозначности не может быть пустым')).readonly(),
 });
 
 /**

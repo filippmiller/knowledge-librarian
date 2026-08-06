@@ -6,6 +6,7 @@
  * ни Prisma, ни LLM, ни ввода-вывода — только типы, реестры и Zod-схемы.
  * Evaluator'ы, которые ими пользуются, приходят в PR B2.
  */
+export * from './text';
 export * from './review';
 export * from './facets';
 export * from './kinds';

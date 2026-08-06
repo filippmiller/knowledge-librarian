@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { nonBlankString } from './text';
 
 /**
  * Примитивы ревью — общие для unit-уровневой тройки (`ApplicabilityProfile`)
@@ -21,9 +22,9 @@ export const reviewStatusSchema = z.enum(REVIEW_STATUSES);
  * неотличимо от «не подтверждено», а именно это различие несёт весь §5.1.
  * Строка из одних пробелов — та же пустая строка, только проходящая `.min(1)`.
  */
-export const reviewerIdSchema = z
-  .string()
-  .regex(/\S/, 'reviewedBy не может быть пустым или состоять из одних пробелов');
+export const reviewerIdSchema = nonBlankString(
+  'reviewedBy не может быть пустым или состоять из одних пробелов'
+);
 
 /**
  * Когда подтверждено. Строго ISO-8601 с датой И временем: `2026-08-06`

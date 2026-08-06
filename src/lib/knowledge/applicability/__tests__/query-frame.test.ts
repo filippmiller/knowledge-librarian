@@ -211,6 +211,92 @@ describe('триггер-факты — отдельный реестр, не ф
   });
 });
 
+describe('строковые поля кадра — «заполнено» значит «содержит текст»', () => {
+  const BLANKS = ['', ' ', '   ', '\t', '\n'];
+
+  it.each(BLANKS)('quote=%j не считается свидетельством', (blank) => {
+    // Иначе KNOWN проходит требование «значение подкреплено источником», не
+    // будучи подкреплённым ничем, и evaluator B2 решает по непроверяемому вводу.
+    expect(
+      isValid(
+        frame({
+          facets: {
+            ...UNKNOWN_QUERY_FACETS,
+            scenario: {
+              state: 'KNOWN',
+              include: ['apostille'],
+              exclude: [],
+              evidence: [{ source: 'CURRENT_MESSAGE', quote: blank }],
+            },
+          },
+        })
+      )
+    ).toBe(false);
+  });
+
+  it.each(BLANKS)('quote=%j не считается свидетельством и для триггер-факта', (blank) => {
+    expect(
+      isValid(
+        frame({
+          triggerFacts: {
+            ...UNKNOWN_TRIGGER_FACTS,
+            privacyContext: {
+              state: 'KNOWN',
+              value: 'PUBLIC',
+              evidence: [{ source: 'CURRENT_MESSAGE', quote: blank }],
+            },
+          },
+        })
+      )
+    ).toBe(false);
+  });
+
+  it.each(BLANKS)('messageId=%j отвергается', (blank) => {
+    expect(
+      isValid(
+        frame({
+          facets: {
+            ...UNKNOWN_QUERY_FACETS,
+            scenario: {
+              state: 'KNOWN',
+              include: ['apostille'],
+              exclude: [],
+              evidence: [{ source: 'HISTORY', messageId: blank, quote: 'про апостиль' }],
+            },
+          },
+        })
+      )
+    ).toBe(false);
+  });
+
+  it.each(BLANKS)('ambiguities=[%j] отвергается', (blank) => {
+    expect(isValid(frame({ ambiguities: [blank] }))).toBe(false);
+  });
+
+  it.each(BLANKS)('concepts=[%j] отвергается', (blank) => {
+    expect(isValid(frame({ concepts: [blank] }))).toBe(false);
+  });
+
+  it('значение фасеты в кадре сверяется с реестром сценариев так же, как в профиле', () => {
+    const withScenario = (value: string) =>
+      isValid(
+        frame({
+          facets: {
+            ...UNKNOWN_QUERY_FACETS,
+            scenario: {
+              state: 'KNOWN',
+              include: [value],
+              exclude: [],
+              evidence: EVIDENCE,
+            },
+          },
+        })
+      );
+    expect(withScenario('apostille.zags.spb')).toBe(true);
+    expect(withScenario('apostille.zags.sbp')).toBe(false);
+  });
+});
+
 describe('прочие поля кадра', () => {
   it('неизвестный ключ фасеты отвергается', () => {
     expect(isValid(frame({ facets: { ...UNKNOWN_QUERY_FACETS, issuerCountry: { state: 'UNKNOWN' } } })))
