@@ -500,6 +500,9 @@ describe('createChatCompletionDetailed — таймауты и отмена', ()
   });
 
   it('превышение totalDeadlineMs: резерв не начинается', async () => {
+    // Решение принимается по ЗАПИСАННОМУ исходу попытки: таймер может
+    // сработать на доли миллисекунды раньше срока, и перемер часов показал бы
+    // «бюджет ещё есть» уже после наступления дедлайна.
     fetchMock.mockImplementation((_url: string, init?: RequestInit) =>
       hangUntilAbort(init)
     );

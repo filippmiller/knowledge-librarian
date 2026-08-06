@@ -899,6 +899,11 @@ export async function createChatCompletionDetailed(
   let primaryError: unknown;
   let fallbackError: unknown;
   let callerAborted = false;
+  // Факт исчерпания дедлайна фиксируется по ЗАПИСАННОМУ исходу попытки, а не
+  // перемером часов: таймер libuv вправе сработать на доли миллисекунды раньше
+  // срока, и повторный `remainingMs() > 0` мог показать остаток бюджета уже
+  // после того, как дедлайн формально наступил — и запустить резерв.
+  let deadlineExceeded = false;
 
   const runOne = async (
     provider: Provider,
@@ -919,6 +924,7 @@ export async function createChatCompletionDetailed(
       if (isPrimary) primaryError = result.error;
       else fallbackError = result.error;
       if (result.attempt.errorCode === 'ABORTED_BY_CALLER') callerAborted = true;
+      if (result.attempt.errorCode === 'TOTAL_DEADLINE_EXCEEDED') deadlineExceeded = true;
     }
     return result;
   };
@@ -962,7 +968,13 @@ export async function createChatCompletionDetailed(
     );
   }
 
-  if (fallbackTarget && !callerAborted && hasApiKey(fallbackTarget.provider) && remainingMs() > 0) {
+  if (
+    fallbackTarget &&
+    !callerAborted &&
+    !deadlineExceeded &&
+    hasApiKey(fallbackTarget.provider) &&
+    remainingMs() > 0
+  ) {
     console.warn(
       `[chat-provider] ${primaryProvider} failed after retries, falling back to ${fallbackTarget.provider}/${fallbackTarget.model}`
     );
