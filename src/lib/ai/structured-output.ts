@@ -1,6 +1,7 @@
 import type { z } from 'zod';
 import {
   createChatCompletionDetailed,
+  extractJsonCandidate,
   type ChatCompletionResult,
   type ChatMessage,
   type CompletionAttempt,
@@ -81,11 +82,15 @@ export type StructuredResult<T> = ChatCompletionResult & { data: T };
  * Отличает «нормализация лишь сняла обёртку» от «нормализация достроила
  * оборванный JSON».
  *
+ * СТРАХОВКА, а не основной признак: провайдер, назвавший причину остановки, уже
+ * ответил на этот вопрос точно (см. `structured()`), и эвристика нужна только
+ * для тех, кто промолчал. Своих сил у неё мало — оборванный ответ, случайно
+ * оказавшийся валидным JSON, она не поймает в принципе.
+ *
  * Снятие markdown-заборов и мусора вокруг — это нормально: сырой текст не
  * парсится, потому что вокруг JSON есть лишнее, но данные целы. Опасен другой
  * случай — сырой текст не парсится, потому что ОБОРВАН, и нормализация
- * достроила его до валидного, отбросив хвост. Различаем по длине: ремонт
- * обрезанного ответа всегда теряет содержимое, а снятие обёртки — нет.
+ * достроила его до валидного, отбросив хвост.
  */
 function wasRepaired(rawText: string, normalizedText: string): boolean {
   const raw = rawText.trim();
@@ -108,12 +113,27 @@ function wasRepaired(rawText: string, normalizedText: string): boolean {
   // «достроили обрыв» по БАЛАНСУ СКОБОК, а не по длине: markdown-забор вокруг
   // целого JSON длину меняет, но скобки в нём сбалансированы, а у оборванного
   // ответа — нет. Сравнение длин здесь давало ложные срабатывания на заборах.
-  return !hasBalancedJsonBrackets(raw);
+  //
+  // Баланс считается по ТОМУ ЖЕ СРЕЗУ, что увидит нормализация, а не по всему
+  // сырому тексту: `normalizeJsonResponse()` отбрасывает всё до первой `{`/`[`,
+  // поэтому непарная `]` в прозаическом вступлении на результат не влияет — и
+  // помечать из-за неё целый ответ оборванным было бы ложным срабатыванием.
+  const candidate = extractJsonCandidate(raw);
+  if (candidate === undefined) return false; // JSON-начала нет вовсе — не обрыв
+
+  return !hasBalancedJsonBrackets(candidate);
 }
 
-/** Баланс `{}`/`[]` с пропуском содержимого строк и экранирования. */
+/**
+ * Баланс `{}`/`[]` с пропуском содержимого строк и экранирования.
+ *
+ * Стек, а не счётчик глубины: счётчик считает закрывателем что угодно, поэтому
+ * `{ ]` сходился у него в ноль и читался как сбалансированный — ровно тот
+ * оборванный ответ, ради которого проверка и существует. Каждый закрыватель
+ * обязан совпасть по ТИПУ со своим открывателем.
+ */
 function hasBalancedJsonBrackets(text: string): boolean {
-  let depth = 0;
+  const stack: ('{' | '[')[] = [];
   let inString = false;
   let escaped = false;
 
@@ -127,12 +147,19 @@ function hasBalancedJsonBrackets(text: string): boolean {
       else if (char === '"') inString = false;
       continue;
     }
-    if (char === '"') inString = true;
-    else if (char === '{' || char === '[') depth++;
-    else if (char === '}' || char === ']') depth--;
+    if (char === '"') {
+      inString = true;
+    } else if (char === '{' || char === '[') {
+      stack.push(char);
+    } else if (char === '}' || char === ']') {
+      const opener = stack.pop();
+      if (opener === undefined) return false; // закрыватель без открывателя
+      if (char === '}' && opener !== '{') return false;
+      if (char === ']' && opener !== '[') return false;
+    }
   }
 
-  return depth === 0 && !inString;
+  return stack.length === 0 && !inString;
 }
 
 /** Одна претензия схемы к ответу модели: путь до поля + причина. */
@@ -357,8 +384,34 @@ export async function structured<T>(
   // здесь опасно: ответ, оборванный ПОСЛЕ целого элемента массива
   // (`{"units":[{...},{...}],`), чинится в объект, который схему ПРОХОДИТ, просто
   // с меньшим числом units. Тихая потеря знания вместо retry — ровно то, чего
-  // structured-контракт допускать не должен. Признак ремонта: сырой ответ сам по
-  // себе не парсится, а нормализованный парсится.
+  // structured-контракт допускать не должен.
+  //
+  // ПЕРВИЧНЫЙ признак — слово самого провайдера: `finish_reason: 'length'` у
+  // OpenAI и `stop_reason: 'max_tokens'` у Anthropic приезжают сюда как
+  // `terminationReason === 'MAX_TOKENS'`. Это факт от API, а не догадка по
+  // тексту, и он ловит случай, недоступный никакой эвристике: ответ, оборванный
+  // ровно на границе элемента, остаётся синтаксически валидным JSON — сырой
+  // текст парсится, скобки сбалансированы, и по виду отличить его от целого
+  // нельзя. Отвергаем такой ответ ДО разбора.
+  if (result.terminationReason === 'MAX_TOKENS') {
+    throw new StructuredOutputError(
+      'TRUNCATED_JSON',
+      [
+        {
+          path: '',
+          code: 'truncated_by_provider',
+          message:
+            'провайдер сообщил, что упёрся в лимит токенов (finish_reason=length / stop_reason=max_tokens): выдача оборвана, нужен повторный вызов с большим бюджетом',
+        },
+      ],
+      result
+    );
+  }
+
+  // Страховка для провайдеров, которые причину НЕ назвали: сырой ответ сам по
+  // себе не парсится, а нормализованный парсится — значит скобки достроили за
+  // модель. Молчание провайдера ничего не гарантирует, поэтому эвристику здесь
+  // не выключаем.
   if (result.rawText !== undefined && wasRepaired(result.rawText, result.text)) {
     throw new StructuredOutputError(
       'TRUNCATED_JSON',

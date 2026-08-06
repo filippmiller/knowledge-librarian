@@ -25,10 +25,14 @@ const MESSAGES: ChatCompletionOptions['messages'] = [
 
 let fetchMock: ReturnType<typeof vi.fn>;
 
-function anthropicOk(text: string): Response {
-  return new Response(JSON.stringify({ content: [{ type: 'text', text }] }), {
-    status: 200,
-  });
+function anthropicOk(text: string, stopReason?: string): Response {
+  return new Response(
+    JSON.stringify({
+      content: [{ type: 'text', text }],
+      ...(stopReason !== undefined && { stop_reason: stopReason }),
+    }),
+    { status: 200 }
+  );
 }
 
 /** 500 не входит в RETRYABLE_STATUS_CODES — фоллбэк начинается сразу, без sleep. */
@@ -36,8 +40,15 @@ function anthropicFailure(status = 500, body = 'anthropic is down'): Response {
   return new Response(body, { status });
 }
 
-function openaiOk(text: string) {
-  return { choices: [{ message: { content: text } }] };
+function openaiOk(text: string, finishReason?: string) {
+  return {
+    choices: [
+      {
+        message: { content: text },
+        ...(finishReason !== undefined && { finish_reason: finishReason }),
+      },
+    ],
+  };
 }
 
 function openaiFailure(message = 'openai is down') {
@@ -78,6 +89,40 @@ function sseEvents(texts: string[]): string {
 function sseResponse(texts: string[]): Response {
   const body = sseEvents(texts) + 'data: [DONE]\n';
   return new Response(new TextEncoder().encode(body), { status: 200 });
+}
+
+/**
+ * Причину остановки Anthropic присылает служебным событием `message_delta` в
+ * самом конце потока — токеном она не приходит.
+ */
+function sseResponseWithStopReason(texts: string[], stopReason: string): Response {
+  const stopEvent = `data: ${JSON.stringify({
+    type: 'message_delta',
+    delta: { stop_reason: stopReason },
+  })}\n`;
+  const body = sseEvents(texts) + stopEvent + 'data: [DONE]\n';
+  return new Response(new TextEncoder().encode(body), { status: 200 });
+}
+
+/** Минимальный async-iterable в форме стрима OpenAI SDK. */
+function openaiStream(chunks: { content?: string; finishReason?: string }[]) {
+  return {
+    async *[Symbol.asyncIterator]() {
+      for (const chunk of chunks) {
+        yield {
+          choices: [
+            {
+              delta:
+                chunk.content !== undefined ? { content: chunk.content } : {},
+              ...(chunk.finishReason !== undefined && {
+                finish_reason: chunk.finishReason,
+              }),
+            },
+          ],
+        };
+      }
+    },
+  };
 }
 
 /**
@@ -1090,5 +1135,149 @@ describe('streaming', () => {
       outcome: 'ABORTED',
       errorCode: 'ATTEMPT_TIMEOUT',
     });
+  });
+});
+
+/**
+ * Причина остановки — единственный ДОСТОВЕРНЫЙ признак обрыва: провайдер
+ * сообщает его сам. Спелллинг у вендоров разный (`finish_reason` против
+ * `stop_reason`, `length` против `max_tokens`), наружу едет общий словарь.
+ */
+describe('нормализованная причина завершения', () => {
+  it('Anthropic stop_reason=max_tokens → MAX_TOKENS', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('обрублено', 'max_tokens'));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+    });
+
+    expect(result.terminationReason).toBe('MAX_TOKENS');
+  });
+
+  it('Anthropic stop_reason=end_turn → COMPLETE', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('целиком', 'end_turn'));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+    });
+
+    expect(result.terminationReason).toBe('COMPLETE');
+  });
+
+  it('OpenAI finish_reason=length → MAX_TOKENS', async () => {
+    openaiCreate.mockResolvedValue(openaiOk('обрублено', 'length'));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'openai',
+    });
+
+    expect(result.terminationReason).toBe('MAX_TOKENS');
+  });
+
+  it('OpenAI finish_reason=stop → COMPLETE', async () => {
+    openaiCreate.mockResolvedValue(openaiOk('целиком', 'stop'));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'openai',
+    });
+
+    expect(result.terminationReason).toBe('COMPLETE');
+  });
+
+  // Не COMPLETE: выдача оборвалась не по своей воле, и выдавать это за нормальное
+  // завершение нельзя.
+  it('прочие причины (content_filter, refusal) → OTHER, а не COMPLETE', async () => {
+    openaiCreate.mockResolvedValue(openaiOk('', 'content_filter'));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'openai',
+    });
+
+    expect(result.terminationReason).toBe('OTHER');
+  });
+
+  // Молчание провайдера — не то же самое, что COMPLETE: гарантий оно не даёт, и
+  // выдавать их за него значило бы отключить эвристику там, где она единственная.
+  it('провайдер промолчал → поле отсутствует, а не COMPLETE', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('без причины'));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+    });
+
+    expect(result.terminationReason).toBeUndefined();
+  });
+
+  it('причина доезжает и на резерве, а не только на первичном провайдере', async () => {
+    fetchMock.mockResolvedValue(anthropicFailure());
+    openaiCreate.mockResolvedValue(openaiOk('резерв обрубило', 'length'));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      fallbackPolicy: 'CROSS_PROVIDER',
+    });
+
+    expect(result.fallbackUsed).toBe(true);
+    expect(result.servedByProvider).toBe('openai');
+    expect(result.terminationReason).toBe('MAX_TOKENS');
+  });
+
+  it('на стриминге Anthropic обрыв тоже доезжает до completion', async () => {
+    fetchMock.mockResolvedValue(
+      sseResponseWithStopReason(['{"units":[', '{"a":1}'], 'max_tokens')
+    );
+
+    const operation = createChatCompletionStreamDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+    });
+    for await (const _token of operation.tokens) {
+      // насос читает сам; здесь важно дождаться конца потока
+    }
+
+    const metadata = await operation.completion;
+    expect(metadata.terminationReason).toBe('MAX_TOKENS');
+    expect(metadata.attempts[0].outcome).toBe('SUCCESS');
+  });
+
+  it('на стриминге Anthropic нормальное завершение отмечается COMPLETE', async () => {
+    fetchMock.mockResolvedValue(sseResponseWithStopReason(['ok'], 'end_turn'));
+
+    const operation = createChatCompletionStreamDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+    });
+    for await (const _token of operation.tokens) {
+      // дочитываем поток
+    }
+
+    expect((await operation.completion).terminationReason).toBe('COMPLETE');
+  });
+
+  it('на стриминге OpenAI finish_reason=length доезжает до completion', async () => {
+    openaiCreate.mockResolvedValue(
+      openaiStream([
+        { content: '{"units":[' },
+        { content: '{"a":1}' },
+        { finishReason: 'length' },
+      ])
+    );
+
+    const operation = createChatCompletionStreamDetailed({
+      messages: MESSAGES,
+      provider: 'openai',
+    });
+    const tokens: string[] = [];
+    for await (const token of operation.tokens) tokens.push(token);
+
+    expect(tokens).toEqual(['{"units":[', '{"a":1}']);
+    expect((await operation.completion).terminationReason).toBe('MAX_TOKENS');
   });
 });
