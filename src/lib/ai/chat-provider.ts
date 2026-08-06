@@ -1295,6 +1295,7 @@ export function createChatCompletionStreamDetailed(
   let settled = false;
   let cancelledByConsumer = false;
   let overflowed = false;
+  let abortRequested = false;
   let abortReason: string | undefined;
 
   /** Единственная точка разрешения `completion`. `undefined` — нормальный конец. */
@@ -1303,8 +1304,11 @@ export function createChatCompletionStreamDetailed(
     settled = true;
 
     // Отказ потребителя — не сбой прогона: префикс уже получен и оплачен,
-    // поэтому исход разрешающий, но с честной пометкой в телеметрии.
-    const consumerGaveUp = error !== undefined && cancelledByConsumer && !overflowed;
+    // поэтому исход разрешающий, но с честной пометкой в телеметрии. Явный
+    // `abort()` важнее: если его позвали, `completion` обязана отклониться,
+    // даже когда потребитель следом вышел из `for await`.
+    const consumerGaveUp =
+      error !== undefined && cancelledByConsumer && !overflowed && !abortRequested;
 
     if (error === undefined || consumerGaveUp) {
       attempts.push({
@@ -1433,6 +1437,7 @@ export function createChatCompletionStreamDetailed(
     completion,
     abort(reason?: string) {
       if (settled) return;
+      abortRequested = true;
       // Причину фиксирует ПЕРВАЯ отмена: `abort('почему')` с последующим
       // безаргументным `abort()` не должен стирать уже названную причину.
       if (abortReason === undefined) abortReason = reason;

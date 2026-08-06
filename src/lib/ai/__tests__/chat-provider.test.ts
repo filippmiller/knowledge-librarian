@@ -884,6 +884,34 @@ describe('streaming', () => {
     listeners.expectAllReleased();
   });
 
+  it('явный abort() важнее выхода потребителя из for await', async () => {
+    // Иначе `operation.abort(); break;` тихо превращался бы в разрешённую
+    // completion, хотя вызывающий явно объявил прогон неудавшимся.
+    const gated = gatedSseResponse(['one'], ['two']);
+    fetchMock.mockImplementation(gated.fetchImpl);
+
+    const operation = createChatCompletionStreamDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+    });
+
+    for await (const token of operation.tokens) {
+      expect(token).toBe('one');
+      operation.abort('caller gave up');
+      break;
+    }
+
+    const error = (await operation.completion.catch(
+      (e: unknown) => e
+    )) as ChatCompletionError;
+    expect(error).toBeInstanceOf(ChatCompletionError);
+    expect(error.message).toBe('caller gave up');
+    expect(error.attempts[0]).toMatchObject({
+      outcome: 'ABORTED',
+      errorCode: 'ABORTED_BY_CALLER',
+    });
+  });
+
   it('буфер непрочитанных токенов ограничен сверху', async () => {
     // Эагерность не должна покупаться неограниченной памятью: если потребителя
     // нет, а провайдер льёт без конца, операция обязана оборваться сама.
