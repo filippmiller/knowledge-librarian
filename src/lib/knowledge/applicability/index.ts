@@ -8,8 +8,11 @@
  */
 export * from './text';
 export * from './review';
+export * from './concepts';
+export * from './concept-registry';
 export * from './facets';
 export * from './kinds';
 export * from './trigger-facts';
 export * from './profile';
 export * from './query-frame';
+export * from './query-frame-builder';
