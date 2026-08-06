@@ -185,6 +185,36 @@ describe('structured() — успешный разбор', () => {
     expect(result.data).toEqual(VALID_PAYLOAD);
   });
 
+  // Обрыв — самый опасный случай: нормализация достраивает скобки, схема
+  // проходит, и вызывающий получает «успех» с молчаливо потерянными данными
+  // вместо повтора запроса.
+  it('оборванный ответ отвергается, а не «чинится» с потерей данных', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('{"service":"apostille","pricePerPage":100,'));
+
+    await expect(
+      structured({ schema: priceSchema, messages: MESSAGES, runConfig: runConfig() })
+    ).rejects.toMatchObject({ reason: 'TRUNCATED_JSON' });
+  });
+
+  it('у отказа по обрыву сохраняются attempts[] и фактический исполнитель', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('{"service":"apostille",'));
+
+    const error = (await structured({
+      schema: priceSchema,
+      messages: MESSAGES,
+      runConfig: runConfig(),
+    }).catch((e: unknown) => e)) as StructuredOutputError;
+
+    expect(error).toBeInstanceOf(StructuredOutputError);
+    // Причину проверяем явно: без неё тест проходит и с выключенной защитой —
+    // «починенный» огрызок всё равно валит схему, и наружу летит
+    // StructuredOutputError, просто с другой причиной. Тест, который не
+    // отличает эти два случая, ничего и не проверяет.
+    expect(error.reason).toBe('TRUNCATED_JSON');
+    expect(error.result.attempts.length).toBeGreaterThan(0);
+    expect(error.result.servedByProvider).toBe('anthropic');
+  });
+
   it('attempts[] доходит до вызывающего вместе с фактическим исполнителем', async () => {
     fetchMock.mockResolvedValue(anthropicOk(JSON.stringify(VALID_PAYLOAD)));
 

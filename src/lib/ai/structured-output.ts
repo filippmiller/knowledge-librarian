@@ -77,6 +77,64 @@ export interface StructuredOptions<T> {
  */
 export type StructuredResult<T> = ChatCompletionResult & { data: T };
 
+/**
+ * Отличает «нормализация лишь сняла обёртку» от «нормализация достроила
+ * оборванный JSON».
+ *
+ * Снятие markdown-заборов и мусора вокруг — это нормально: сырой текст не
+ * парсится, потому что вокруг JSON есть лишнее, но данные целы. Опасен другой
+ * случай — сырой текст не парсится, потому что ОБОРВАН, и нормализация
+ * достроила его до валидного, отбросив хвост. Различаем по длине: ремонт
+ * обрезанного ответа всегда теряет содержимое, а снятие обёртки — нет.
+ */
+function wasRepaired(rawText: string, normalizedText: string): boolean {
+  const raw = rawText.trim();
+  if (!raw) return false;
+
+  try {
+    JSON.parse(raw);
+    return false; // сырой ответ сам по себе валиден — чинить было нечего
+  } catch {
+    // разбираемся ниже
+  }
+
+  try {
+    JSON.parse(normalizedText);
+  } catch {
+    return false; // нормализованный тоже не парсится — это INVALID_JSON, не обрыв
+  }
+
+  // Сырой не парсится, нормализованный парсится. Отличаем «сняли обёртку» от
+  // «достроили обрыв» по БАЛАНСУ СКОБОК, а не по длине: markdown-забор вокруг
+  // целого JSON длину меняет, но скобки в нём сбалансированы, а у оборванного
+  // ответа — нет. Сравнение длин здесь давало ложные срабатывания на заборах.
+  return !hasBalancedJsonBrackets(raw);
+}
+
+/** Баланс `{}`/`[]` с пропуском содержимого строк и экранирования. */
+function hasBalancedJsonBrackets(text: string): boolean {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (const char of text) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (inString) {
+      if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === '{' || char === '[') depth++;
+    else if (char === '}' || char === ']') depth--;
+  }
+
+  return depth === 0 && !inString;
+}
+
 /** Одна претензия схемы к ответу модели: путь до поля + причина. */
 export interface StructuredIssue {
   /** Путь в нотации `facets.scenario.state` / `notes[1]`. */
@@ -95,7 +153,14 @@ export type StructuredFailureReason =
    * наружу голый `Error` без `attempts[]`, то есть ровно ту телеметрию, ради
    * которой адаптер и возвращает полный результат вызова.
    */
-  | 'SCHEMA_THREW';
+  | 'SCHEMA_THREW'
+  /**
+   * Ответ провайдера оборван на полуслове. Нормализация умеет «починить» такой
+   * JSON, и результат может пройти схему — просто с меньшим числом элементов
+   * массива. Отдельная причина, а не `INVALID_JSON`: тут вызывающему нужен
+   * повтор запроса, а не разбор претензий к полям.
+   */
+  | 'TRUNCATED_JSON';
 
 /**
  * Ответ пришёл, но контракту не соответствует.
@@ -181,6 +246,10 @@ function buildMessage(
   if (reason === 'SCHEMA_THREW') {
     const cause = issues[0]?.message ?? 'причина не определена';
     return `structured(): схема упала на ответе ${served}, вердикта нет: ${cause}`;
+  }
+
+  if (reason === 'TRUNCATED_JSON') {
+    return `structured(): ответ ${served} оборван — нормализация «починила» бы его с потерей данных, нужен повтор`;
   }
 
   const listed = issues
@@ -282,6 +351,28 @@ export async function structured<T>(
     ...(opts.temperature !== undefined && { temperature: opts.temperature }),
     ...(opts.signal && { signal: opts.signal }),
   });
+
+  // Обрезанный ответ НЕ чинится молча. `normalizeJsonResponse()` достраивает
+  // скобки и отбрасывает хвостовой огрызок — для v1-синтеза это правильно, но
+  // здесь опасно: ответ, оборванный ПОСЛЕ целого элемента массива
+  // (`{"units":[{...},{...}],`), чинится в объект, который схему ПРОХОДИТ, просто
+  // с меньшим числом units. Тихая потеря знания вместо retry — ровно то, чего
+  // structured-контракт допускать не должен. Признак ремонта: сырой ответ сам по
+  // себе не парсится, а нормализованный парсится.
+  if (result.rawText !== undefined && wasRepaired(result.rawText, result.text)) {
+    throw new StructuredOutputError(
+      'TRUNCATED_JSON',
+      [
+        {
+          path: '',
+          code: 'truncated_response',
+          message:
+            'ответ провайдера оборван и был бы «починен» нормализацией: часть данных потеряна, нужен повторный вызов',
+        },
+      ],
+      result
+    );
+  }
 
   // Резерв провайдера НЕ спасает от несоответствия схеме, и это осознанно:
   // `createChatCompletionDetailed` возвращается на первом же ответе провайдера,

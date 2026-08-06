@@ -90,6 +90,20 @@ export interface CompletionAttempt {
 
 export interface ChatCompletionResult {
   text: string;
+  /**
+   * Ответ провайдера ДО `normalizeJsonResponse()`.
+   *
+   * Нормализация чинит обрезанный JSON (достраивает скобки, отбрасывает
+   * хвостовой огрызок), и это правильно для v1-синтеза, но для structured-вызова
+   * опасно: ответ, обрезанный после целого элемента массива, чинится в объект,
+   * который СХЕМУ ПРОХОДИТ — просто с меньшим числом units. Молчаливая потеря
+   * знания вместо retry. Вызывающий, которому важна полнота, сверяет `rawText`
+   * сам (см. `structured()`), а `text` остаётся прежним для всех остальных.
+   *
+   * Опционально ТОЛЬКО ради тестовых моков, собирающих результат вручную:
+   * боевой путь заполняет поле всегда.
+   */
+  rawText?: string;
   servedByProvider: Provider;
   servedByModel: string;
   fallbackUsed: boolean;
@@ -803,6 +817,31 @@ async function callAnthropic(
   return content.trim();
 }
 
+/**
+ * OpenAI отклоняет `response_format: json_object`, если ни в одном сообщении не
+ * упомянут JSON — это требование их API, а не наша перестраховка. Anthropic-путь
+ * такую инструкцию добавляет в `system` (см. `buildAnthropicPayload`), а
+ * OpenAI-путь до этого отправлял `options.messages` как есть: любой вызывающий,
+ * не написавший слово JSON в промпте сам, получал 400 на живом вызове, а на
+ * моках проходил. Инструкция добавляется ТОЛЬКО когда её ещё нет, чтобы не
+ * дублировать её у тех, кто уже просит JSON своими словами.
+ */
+function withOpenAiJsonInstruction(options: ChatCompletionOptions): ChatMessage[] {
+  if (options.responseFormat !== 'json_object') return options.messages;
+
+  const alreadyAsksForJson = options.messages.some((m) => /json/i.test(m.content));
+  if (alreadyAsksForJson) return options.messages;
+
+  return [
+    ...options.messages,
+    {
+      role: 'system',
+      content:
+        'Respond with valid JSON only. Use double quotes for all keys and string values. Do not wrap in markdown or add commentary.',
+    },
+  ];
+}
+
 async function callOpenAI(
   options: ChatCompletionOptions,
   model: string,
@@ -812,7 +851,7 @@ async function callOpenAI(
   const response = await openai.chat.completions.create(
     {
       model,
-      messages: options.messages,
+      messages: withOpenAiJsonInstruction(options),
       temperature: defaults.temperature,
       ...(options.maxTokens && { max_tokens: options.maxTokens }),
       ...(options.responseFormat && {
@@ -826,7 +865,7 @@ async function callOpenAI(
 }
 
 type AttemptResult =
-  | { ok: true; text: string; attempt: CompletionAttempt }
+  | { ok: true; text: string; rawText: string; attempt: CompletionAttempt }
   | { ok: false; error: unknown; attempt: CompletionAttempt };
 
 async function runCompletionAttempt(
@@ -853,6 +892,7 @@ async function runCompletionAttempt(
     return {
       ok: true,
       text,
+      rawText: raw,
       attempt: {
         provider,
         model,
@@ -970,6 +1010,7 @@ export async function createChatCompletionDetailed(
     if (result.ok) {
       return {
         text: result.text,
+        rawText: result.rawText,
         servedByProvider: primaryProvider,
         servedByModel: primaryModel,
         fallbackUsed: false,
@@ -1017,6 +1058,7 @@ export async function createChatCompletionDetailed(
     if (result.ok) {
       return {
         text: result.text,
+        rawText: result.rawText,
         servedByProvider: fallbackTarget.provider,
         servedByModel: fallbackTarget.model,
         fallbackUsed: true,

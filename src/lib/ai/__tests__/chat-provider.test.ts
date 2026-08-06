@@ -298,6 +298,51 @@ describe('createChatCompletionDetailed — primary success', () => {
   });
 });
 
+describe('OpenAI JSON-режим требует упоминания JSON в сообщениях', () => {
+  // OpenAI отклоняет response_format:json_object, если слово JSON не встречается
+  // ни в одном сообщении — это их API-требование. Anthropic-путь такую
+  // инструкцию добавлял, OpenAI-путь слал messages как есть: на моках зелено, на
+  // живом вызове 400. Ровно тот класс «в тестах работает, в проде нет».
+  it('добавляет инструкцию, когда вызывающий про JSON не написал', async () => {
+    openaiCreate.mockResolvedValue(openaiOk('{"ok":true}'));
+
+    await createChatCompletionDetailed({
+      messages: [{ role: 'user', content: 'Извлеки правила из документа.' }],
+      provider: 'openai',
+      responseFormat: 'json_object',
+    });
+
+    const sent = openaiCreate.mock.calls[0][0].messages as { content: string }[];
+    expect(sent.some((m) => /json/i.test(m.content))).toBe(true);
+  });
+
+  it('не дублирует инструкцию, если вызывающий уже просит JSON', async () => {
+    openaiCreate.mockResolvedValue(openaiOk('{"ok":true}'));
+
+    await createChatCompletionDetailed({
+      messages: [{ role: 'user', content: 'Ответь в формате JSON.' }],
+      provider: 'openai',
+      responseFormat: 'json_object',
+    });
+
+    const sent = openaiCreate.mock.calls[0][0].messages as { content: string }[];
+    expect(sent).toHaveLength(1);
+  });
+
+  it('без json_object сообщения не трогаются', async () => {
+    openaiCreate.mockResolvedValue(openaiOk('просто текст'));
+
+    await createChatCompletionDetailed({
+      messages: [{ role: 'user', content: 'Расскажи про апостиль.' }],
+      provider: 'openai',
+    });
+
+    const sent = openaiCreate.mock.calls[0][0].messages as { content: string }[];
+    expect(sent).toHaveLength(1);
+    expect(/json/i.test(sent[0].content)).toBe(false);
+  });
+});
+
 describe('createChatCompletionDetailed — фоллбэк', () => {
   it('при providerModels уходит к резерву с ЕГО model ID, а не с закреплённым', async () => {
     fetchMock.mockResolvedValue(anthropicFailure());
