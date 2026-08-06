@@ -99,27 +99,39 @@ export interface ChatCompletionResult {
 
 /**
  * Полный отказ (первичный провайдер И резерв). Бросается вместо сырой ошибки
- * провайдера, чтобы телеметрия попыток не терялась в catch-блоке. Сегодняшние
- * call sites уже получают исключение при полном отказе — меняется только его
- * содержимое, не наличие.
+ * провайдера, чтобы телеметрия попыток не терялась в catch-блоке.
+ *
+ * `message` — СЫРОЕ сообщение первопричины, ровно как до provider-слоя, когда
+ * наружу летел `throw lastError`. Это осознанное ограничение: два сегодняшних
+ * потребителя читают текст как есть (`src/app/api/health/ai/route.ts` —
+ * `error.message`, `src/lib/ai/consistency-gate.ts` — `String(err)`), и ни один
+ * не должен разбирать новый формат. Вся добавленная диагностика живёт в
+ * структурных полях: `cause`, `attempts`, `errorCode`, `statusCode`.
  */
 export class ChatCompletionError extends Error {
   readonly attempts: CompletionAttempt[];
   readonly errorCode?: string;
+  readonly statusCode?: number;
 
   constructor(
     message: string,
     attempts: CompletionAttempt[],
-    options?: { cause?: unknown; errorCode?: string }
+    options?: { cause?: unknown; errorCode?: string; statusCode?: number }
   ) {
     super(message);
     this.name = 'ChatCompletionError';
     this.attempts = attempts;
     this.errorCode = options?.errorCode;
+    this.statusCode = options?.statusCode;
     if (options && 'cause' in options) {
       (this as { cause?: unknown }).cause = options.cause;
     }
   }
+}
+
+/** Текст первопричины без обёрток — то, что видели call sites до A1. */
+function rawMessageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /** Внутренняя ошибка одной HTTP-попытки — несёт статус для классификации. */
@@ -843,12 +855,6 @@ async function runCompletionAttempt(
   }
 }
 
-function describeFailure(attempts: CompletionAttempt[]): string {
-  return attempts
-    .map((a) => `${a.provider}/${a.model}:${a.outcome}${a.errorCode ? `(${a.errorCode})` : ''}`)
-    .join(', ');
-}
-
 /**
  * Основной вход. Возвращает не только текст, но и то, КТО и ЧЕМ его отдал —
  * без этого downstream не может честно посчитать `ModelRelationship` (A2).
@@ -976,25 +982,18 @@ export async function createChatCompletionDetailed(
     );
   }
 
-  // Наружу идёт ошибка ПЕРВИЧНОГО провайдера — так же, как до этого PR
-  // (`throw lastError`): именно её текст читают health-эндпоинт и
-  // consistency-gate. Ошибка резерва добавляется в хвост сообщения, чтобы не
-  // потеряться, но не подменяет собой первичную причину.
+  // Наружу идёт СЫРОЕ сообщение первичного провайдера — ровно то, что летело
+  // до provider-слоя через `throw lastError`. Ошибка резерва не приписывается к
+  // тексту: она уже ушла в console.error выше, а её статус и код лежат в
+  // attempts[]. Иначе health-эндпоинт и consistency-gate печатали бы
+  // пользователю сводку попыток вместо причины отказа.
   const rootError = primaryError ?? fallbackError;
-  const rootMessage = rootError instanceof Error ? rootError.message : String(rootError);
-  const fallbackNote =
-    fallbackError && fallbackError !== rootError
-      ? ` | fallback: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`
-      : '';
 
-  throw new ChatCompletionError(
-    `Chat completion failed (${describeFailure(attempts)}): ${rootMessage}${fallbackNote}`,
-    attempts,
-    {
-      cause: rootError,
-      errorCode: attempts[attempts.length - 1]?.errorCode,
-    }
-  );
+  throw new ChatCompletionError(rawMessageOf(rootError), attempts, {
+    cause: rootError,
+    errorCode: extractErrorCode(rootError),
+    statusCode: extractStatusCode(rootError),
+  });
 }
 
 /**
@@ -1234,13 +1233,11 @@ export function createChatCompletionStreamDetailed(
         ...(errorCode && { errorCode }),
       });
       rejectCompletion(
-        new ChatCompletionError(
-          `Chat completion stream failed (${describeFailure(attempts)}): ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-          attempts,
-          { cause: error, errorCode }
-        )
+        new ChatCompletionError(rawMessageOf(error), attempts, {
+          cause: error,
+          errorCode,
+          statusCode,
+        })
       );
       throw error;
     } finally {

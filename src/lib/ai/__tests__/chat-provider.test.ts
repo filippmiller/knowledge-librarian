@@ -380,7 +380,7 @@ describe('createChatCompletionDetailed — полный отказ', () => {
     expect(error.attempts.every((a) => a.outcome === 'ERROR')).toBe(true);
   });
 
-  it('сохраняет сообщение и cause ПЕРВИЧНОГО провайдера — диагностика не деградирует', async () => {
+  it('message — сырое сообщение ПЕРВИЧНОГО провайдера, без сводки попыток', async () => {
     fetchMock.mockResolvedValue(anthropicFailure(500, 'anthropic exploded'));
     openaiCreate.mockRejectedValue(openaiFailure('openai exploded'));
 
@@ -389,13 +389,22 @@ describe('createChatCompletionDetailed — полный отказ', () => {
       provider: 'anthropic',
     }).catch((e: unknown) => e)) as ChatCompletionError;
 
-    // health-эндпоинт читает error.message, consistency-gate — String(err)
-    expect(error.message).toContain('Anthropic API error (500)');
-    expect(error.message).toContain('anthropic exploded');
+    // Два сегодняшних потребителя читают текст как есть: health-эндпоинт —
+    // error.message, consistency-gate — String(err). Ни один не должен
+    // разбирать добавленный provider-слоем формат.
+    expect(error.message).toBe('Anthropic API error (500): anthropic exploded');
     expect(String(error)).toContain('anthropic exploded');
     expect((error.cause as Error).message).toContain('anthropic exploded');
-    // Ошибка резерва не теряется, но и не подменяет первичную причину.
-    expect(error.message).toContain('openai exploded');
+    expect(error.statusCode).toBe(500);
+
+    // Диагностика резерва не потеряна — она в структурных полях, не в тексте.
+    expect(error.message).not.toContain('openai exploded');
+    expect(error.attempts).toHaveLength(2);
+    expect(error.attempts[1]).toMatchObject({
+      provider: 'openai',
+      outcome: 'ERROR',
+      statusCode: 500,
+    });
   });
 });
 
