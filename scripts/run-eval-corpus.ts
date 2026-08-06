@@ -1,187 +1,164 @@
 /**
- * Golden regression corpus runner (Beads translation-2n9).
+ * Golden regression corpus runner (Beads translation-2n9, gate-семантика —
+ * translation-toh / план 2026-08-06 §3 PR A3).
  *
- * Runs every case in src/lib/ai/__tests__/fixtures/eval-corpus.json through
- * answerQuestionEnhanced() READ-ONLY and checks the result against the
- * case's `expect` block. Prints PASS/FAIL per case, then an aggregate
- * (pass rate, wrong-scope rate, hold rate).
+ * Гоняет каждый кейс из src/lib/ai/__tests__/fixtures/eval-corpus.json через
+ * answerQuestionEnhanced(), вычисляет РАСПОЛОЖЕНИЕ ответа (прямой ответ /
+ * удержание / ошибка) решением продовой политики доставки и сверяет его с
+ * явной `expectedDisposition` кейса по матрице из плана.
  *
- * Needs the production DB (retrieval + canonical QA lookups), so this is
- * NOT wired into CI — run it manually after any change to the v1 hot path
+ * Два режима, и разница между ними принципиальная:
+ *
+ *   --mode=baseline   снять снимок текущего состояния. НИКОГДА не падает из-за
+ *                     содержимого кейсов: свежий корпус законно содержит
+ *                     известные провалы (категория "retrieval-gap").
+ *   --mode=gate       регрессионный шлюз. exit 1 ровно по матрице: FAIL любого
+ *                     кейса и XPASS у KNOWN_FAIL (последний требует ручного
+ *                     пересмотра baseline). PASS и XFAIL шлюз не роняют.
+ *
+ * Нужна продовая база (retrieval + канонические Q&A), поэтому в CI не заведён —
+ * запускается вручную после любой правки горячего пути v1
  * (enhanced-answering-engine.ts / vector-search.ts / chat-provider.ts):
  *
- *   railway run npx tsx scripts/run-eval-corpus.ts
+ *   railway run npx tsx scripts/run-eval-corpus.ts --mode=baseline
+ *   railway run npx tsx scripts/run-eval-corpus.ts --mode=gate
  *   railway run npx tsx scripts/run-eval-corpus.ts --id=wrongscope-minsk-claude11
  *
- * The corpus is a plain JSON fixture, not a Prisma table (EvalCase) — chosen
- * because these cases are static regression fixtures checked into git, not
- * runtime data; a DB table would need its own migration and seeding step for
- * no benefit here. See docs/plans/2026-08-05-aurora-knowledge-engine-v2.md,
- * Задача 0.1, for why the corpus must exist before any hot-path change.
+ * Прогон НЕ пишет продовую телеметрию: движок зовётся с
+ * `telemetryMode: 'disabled'`, поэтому HallucinationLog не пополняется
+ * синтетикой корпуса (см. src/lib/ai/answer-telemetry.ts).
+ *
+ * Сам корпус — плоская JSON-фикстура, а не таблица Prisma: это статические
+ * регрессионные кейсы под git, не рантайм-данные. См.
+ * docs/plans/2026-08-05-aurora-knowledge-engine-v2.md, Задача 0.1.
  */
 
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { answerQuestionEnhanced, type EnhancedAnswerResult } from '../src/lib/ai/enhanced-answering-engine';
-import type { Audience } from '../src/lib/knowledge/audience';
+import { answerQuestionEnhanced } from '../src/lib/ai/enhanced-answering-engine';
+import {
+  createEngineAsk,
+  indexById,
+  parseCorpus,
+  runCorpus,
+  summarize,
+  type CaseRecord,
+  type EvalCase,
+} from '../src/lib/eval/corpus';
+import { parseRunArgs } from '../src/lib/eval/cli-args';
+import { computeExitCode } from '../src/lib/eval/disposition';
 
-interface EvalCaseExpect {
-  /** Answer must NOT contain any of these (case-insensitive) — wrong-scope/leakage guard. */
-  forbiddenSubstrings?: string[];
-  /** Answer must contain AT LEAST ONE of these (case-insensitive) — content-presence guard. */
-  expectedSubstrings?: string[];
-  /** needsClarification || requiresHumanReview || confidenceLevel==='insufficient' must equal this. */
-  requiresClarificationOrHold?: boolean;
-  /** result.confidence must be >= this. */
-  minConfidence?: number;
-  /** result.answerSource must be one of these. */
-  answerSourceIn?: Array<'knowledge_base' | 'general_ai' | 'deterministic_guardrail'>;
-}
+const CORPUS_PATH = path.join(__dirname, '../src/lib/ai/__tests__/fixtures/eval-corpus.json');
+const DEFAULT_OUT_DIR = path.join(__dirname, '../scratchpad/eval-corpus');
 
-interface EvalCase {
-  id: string;
-  category: string;
-  question: string;
-  audience: Audience;
-  source: string;
-  expect: EvalCaseExpect;
-  notes?: string;
-}
-
-interface CaseResult {
-  evalCase: EvalCase;
-  pass: boolean;
-  failures: string[];
-  result?: EnhancedAnswerResult;
-}
-
-function loadCorpus(): EvalCase[] {
-  const file = path.join(__dirname, '../src/lib/ai/__tests__/fixtures/eval-corpus.json');
-  return JSON.parse(readFileSync(file, 'utf8'));
-}
-
-function checkCase(evalCase: EvalCase, result: EnhancedAnswerResult): string[] {
-  const failures: string[] = [];
-  const { expect } = evalCase;
-  const answerLower = result.answer.toLowerCase();
-
-  if (expect.forbiddenSubstrings) {
-    for (const s of expect.forbiddenSubstrings) {
-      if (answerLower.includes(s.toLowerCase())) {
-        failures.push(`ответ содержит запрещённую подстроку "${s}"`);
-      }
-    }
-  }
-
-  if (expect.expectedSubstrings) {
-    const hasAny = expect.expectedSubstrings.some((s) => answerLower.includes(s.toLowerCase()));
-    if (!hasAny) {
-      failures.push(
-        `ответ не содержит ни одной из ожидаемых подстрок [${expect.expectedSubstrings.join(', ')}]`
-      );
-    }
-  }
-
-  if (expect.requiresClarificationOrHold !== undefined) {
-    const isHold =
-      result.needsClarification === true ||
-      result.requiresHumanReview === true ||
-      result.confidenceLevel === 'insufficient';
-    if (isHold !== expect.requiresClarificationOrHold) {
-      failures.push(
-        `ожидали requiresClarificationOrHold=${expect.requiresClarificationOrHold}, получили ${isHold} ` +
-          `(needsClarification=${result.needsClarification}, requiresHumanReview=${result.requiresHumanReview}, confidenceLevel=${result.confidenceLevel})`
-      );
-    }
-  }
-
-  if (expect.minConfidence !== undefined && result.confidence < expect.minConfidence) {
-    failures.push(
-      `уверенность ${result.confidence.toFixed(2)} ниже ожидаемого минимума ${expect.minConfidence}`
-    );
-  }
-
-  if (expect.answerSourceIn) {
-    if (!result.answerSource || !expect.answerSourceIn.includes(result.answerSource)) {
-      failures.push(
-        `answerSource=${result.answerSource ?? 'undefined'} не входит в ожидаемое [${expect.answerSourceIn.join(', ')}]`
-      );
-    }
-  }
-
-  return failures;
-}
-
-async function runCase(evalCase: EvalCase): Promise<CaseResult> {
+function gitSha(): string | null {
   try {
-    const result = await answerQuestionEnhanced({
-      question: evalCase.question,
-      audience: evalCase.audience,
-      includeDebug: false,
-    });
-    const failures = checkCase(evalCase, result);
-    return { evalCase, pass: failures.length === 0, failures, result };
-  } catch (e) {
-    return {
-      evalCase,
-      pass: false,
-      failures: [`движок упал: ${(e as Error).message}`],
-    };
+    return execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  } catch {
+    return null;
   }
 }
 
-async function main() {
-  const idFilter = process.argv.slice(2).find((a) => a.startsWith('--id='))?.slice('--id='.length);
-  const corpus = loadCorpus().filter((c) => !idFilter || c.id === idFilter);
+function formatCaseLine(record: CaseRecord): string {
+  const delivery = record.deliveryDecision ? `, delivery=${record.deliveryDecision}` : '';
+  return (
+    `${record.caseResult} ` +
+    `(ожидали ${record.expectedDisposition}, получили ${record.actualDisposition}${delivery})`
+  );
+}
 
-  if (corpus.length === 0) {
-    console.error('Корпус пуст (или --id не совпал ни с одним кейсом).');
-    process.exit(1);
+function printCase(record: CaseRecord): void {
+  console.log(formatCaseLine(record));
+  for (const failure of record.safetyFailures) console.log(`    ✗ SAFETY: ${failure}`);
+  for (const failure of record.assertionFailures) console.log(`    ✗ ${failure}`);
+  for (const warning of record.draftSafetyWarnings) console.log(`    ⚠ ${warning}`);
+  if (record.engineError) console.log(`    ✗ движок упал: ${record.engineError}`);
+}
+
+async function main(): Promise<void> {
+  const options = parseRunArgs(process.argv.slice(2));
+
+  const corpus: EvalCase[] = parseCorpus(JSON.parse(readFileSync(CORPUS_PATH, 'utf8')));
+  const selected = options.idFilter
+    ? corpus.filter((c) => c.id === options.idFilter)
+    : corpus;
+
+  if (selected.length === 0) {
+    // Операционная ошибка, а не содержимое кейсов: падаем в обоих режимах,
+    // иначе опечатка в --id выглядела бы как успешный прогон.
+    throw new Error(`--id=${options.idFilter} не совпал ни с одним кейсом корпуса.`);
   }
 
-  console.log(`Golden regression corpus: ${corpus.length} кейс(ов).\n`);
+  console.log(`Golden regression corpus: ${selected.length} кейс(ов), режим ${options.mode}.\n`);
 
-  const results: CaseResult[] = [];
-  for (const evalCase of corpus) {
-    process.stdout.write(`[${evalCase.category}] ${evalCase.id} … `);
-    const r = await runCase(evalCase);
-    results.push(r);
-    console.log(r.pass ? 'PASS' : 'FAIL');
-    if (!r.pass) {
-      for (const f of r.failures) console.log(`    ✗ ${f}`);
-    }
-  }
+  const ask = createEngineAsk((request) => answerQuestionEnhanced(request));
+  const records = await runCorpus(selected, ask, (record) => {
+    process.stdout.write(`[${record.category}] ${record.id} … `);
+    printCase(record);
+  });
 
-  const total = results.length;
-  const passed = results.filter((r) => r.pass).length;
-  const wrongScopeCases = results.filter((r) => r.evalCase.category === 'wrong-scope');
-  const wrongScopeFailed = wrongScopeCases.filter((r) => !r.pass).length;
-  const holdCount = results.filter(
-    (r) => r.result && (r.result.needsClarification || r.result.requiresHumanReview)
-  ).length;
+  const summary = summarize(records);
+  const exitCode = computeExitCode(options.mode, records.map((r) => r.caseResult));
 
   console.log('\n' + '─'.repeat(60));
   console.log('Агрегат:');
-  console.log(`  pass rate:        ${passed}/${total} (${((passed / total) * 100).toFixed(1)}%)`);
-  if (wrongScopeCases.length > 0) {
+  console.log(
+    `  вердикты:         PASS ${summary.byCaseResult.PASS} · FAIL ${summary.byCaseResult.FAIL} · ` +
+      `XFAIL ${summary.byCaseResult.XFAIL} · XPASS ${summary.byCaseResult.XPASS} (из ${summary.total})`
+  );
+  console.log(
+    `  расположения:     DIRECT_ANSWER ${summary.byActualDisposition.DIRECT_ANSWER} · ` +
+      `HOLD ${summary.byActualDisposition.HOLD} · ERROR ${summary.byActualDisposition.ERROR}`
+  );
+  console.log(`  hold rate:        ${(summary.holdRate * 100).toFixed(1)}%`);
+  if (summary.failedIds.length > 0) console.log(`  FAIL:             ${summary.failedIds.join(', ')}`);
+  if (summary.xpassIds.length > 0) {
+    console.log(`  XPASS:            ${summary.xpassIds.join(', ')} — снять KNOWN_FAIL или объяснить`);
+  }
+  if (summary.xfailIds.length > 0) console.log(`  XFAIL (ожидаемо): ${summary.xfailIds.join(', ')}`);
+  if (summary.errorIds.length > 0) console.log(`  ОШИБКИ ДВИЖКА:    ${summary.errorIds.join(', ')}`);
+
+  const ranAt = new Date().toISOString();
+  const outPath =
+    options.outPath ?? path.join(DEFAULT_OUT_DIR, `eval-corpus-${ranAt.replace(/[:.]/g, '-')}.json`);
+  mkdirSync(path.dirname(outPath), { recursive: true });
+  writeFileSync(
+    outPath,
+    JSON.stringify(
+      {
+        meta: {
+          ranAt,
+          gitSha: gitSha(),
+          mode: options.mode,
+          argv: process.argv.slice(2),
+          corpusPath: path.relative(path.join(__dirname, '..'), CORPUS_PATH),
+          caseCount: records.length,
+          telemetryMode: 'disabled',
+          exitCode,
+        },
+        summary,
+        // По СТАБИЛЬНЫМ id, а не по порядку в файле: перестановка кейсов не
+        // должна сдвигать diff двух снимков.
+        cases: indexById(records),
+      },
+      null,
+      2
+    ),
+    'utf8'
+  );
+  console.log(`\nСнимок: ${outPath}`);
+
+  if (options.mode === 'baseline' && summary.blockingIds.length > 0) {
     console.log(
-      `  wrong-scope rate: ${wrongScopeFailed}/${wrongScopeCases.length} (${((wrongScopeFailed / wrongScopeCases.length) * 100).toFixed(1)}%)`
+      `\nВ режиме gate этот прогон упал бы на: ${summary.blockingIds.join(', ')} (baseline не падает by design).`
     );
   }
-  console.log(`  hold rate:        ${holdCount}/${total} (${((holdCount / total) * 100).toFixed(1)}%)`);
 
-  const failedIds = results.filter((r) => !r.pass).map((r) => r.evalCase.id);
-  if (failedIds.length > 0) {
-    console.log(`\nFAILED: ${failedIds.join(', ')}`);
-  }
-
-  // Baseline run: captures current state for future diffing, does not gate
-  // this invocation's own exit code — a fresh corpus legitimately contains
-  // known-failing cases (see category "retrieval-gap").
-  process.exit(0);
+  process.exit(exitCode);
 }
 
 main().catch((error) => {
-  console.error(error);
+  console.error(error instanceof Error ? error.message : error);
   process.exit(1);
 });
