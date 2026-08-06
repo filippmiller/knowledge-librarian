@@ -99,27 +99,39 @@ export interface ChatCompletionResult {
 
 /**
  * Полный отказ (первичный провайдер И резерв). Бросается вместо сырой ошибки
- * провайдера, чтобы телеметрия попыток не терялась в catch-блоке. Сегодняшние
- * call sites уже получают исключение при полном отказе — меняется только его
- * содержимое, не наличие.
+ * провайдера, чтобы телеметрия попыток не терялась в catch-блоке.
+ *
+ * `message` — СЫРОЕ сообщение первопричины, ровно как до provider-слоя, когда
+ * наружу летел `throw lastError`. Это осознанное ограничение: два сегодняшних
+ * потребителя читают текст как есть (`src/app/api/health/ai/route.ts` —
+ * `error.message`, `src/lib/ai/consistency-gate.ts` — `String(err)`), и ни один
+ * не должен разбирать новый формат. Вся добавленная диагностика живёт в
+ * структурных полях: `cause`, `attempts`, `errorCode`, `statusCode`.
  */
 export class ChatCompletionError extends Error {
   readonly attempts: CompletionAttempt[];
   readonly errorCode?: string;
+  readonly statusCode?: number;
 
   constructor(
     message: string,
     attempts: CompletionAttempt[],
-    options?: { cause?: unknown; errorCode?: string }
+    options?: { cause?: unknown; errorCode?: string; statusCode?: number }
   ) {
     super(message);
     this.name = 'ChatCompletionError';
     this.attempts = attempts;
     this.errorCode = options?.errorCode;
+    this.statusCode = options?.statusCode;
     if (options && 'cause' in options) {
       (this as { cause?: unknown }).cause = options.cause;
     }
   }
+}
+
+/** Текст первопричины без обёрток — то, что видели call sites до A1. */
+function rawMessageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /** Внутренняя ошибка одной HTTP-попытки — несёт статус для классификации. */
@@ -138,8 +150,9 @@ class ProviderRequestError extends Error {
   }
 }
 
-// Читаются лениво, а не на импорте модуля: значение env на момент вызова —
-// то же, что фактически поехало в API, и его можно менять между прогонами.
+// Читаются на СТАРТЕ вызова, а не на импорте модуля: значение env на момент
+// вызова — то же, что фактически поехало в API, и его можно менять между
+// прогонами. Читать их повторно внутри попытки нельзя — см. resolveDefaults().
 function defaultAnthropicModel(): string {
   return process.env.ANTHROPIC_MODEL || 'claude-3-opus-20240229';
 }
@@ -171,10 +184,37 @@ function defaultModelFor(provider: Provider): string {
   return provider === 'anthropic' ? defaultAnthropicModel() : defaultOpenAIModel();
 }
 
-function hasApiKey(provider: Provider): boolean {
+/**
+ * Env-зависимые значения, снятые ОДИН РАЗ на старте вызова и живущие ровно
+ * столько, сколько живёт вызов.
+ *
+ * Дефолты читаются во время вызова (а не при импорте) сознательно — это делает
+ * слой тестируемым и позволяет менять конфигурацию между прогонами. Но внутри
+ * ОДНОГО вызова env обязан быть заморожен: между первичной попыткой и резервом
+ * проходит реальное время, и мутация env в этом окне иначе увела бы резерв на
+ * другую модель, другой бюджет токенов и другую температуру, чем те, ради
+ * которых вызов был начат. Прогон должен быть описуем одной конфигурацией.
+ */
+interface ResolvedDefaults {
+  temperature: number;
+  anthropicMaxTokens: number;
+  anthropicApiKey?: string;
+  openaiApiKey?: string;
+}
+
+function resolveDefaults(options: ChatCompletionOptions): ResolvedDefaults {
+  return {
+    temperature: options.temperature ?? defaultTemperature(),
+    anthropicMaxTokens: options.maxTokens ?? defaultAnthropicMaxTokens(),
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+    openaiApiKey: process.env.OPENAI_API_KEY,
+  };
+}
+
+function hasApiKey(provider: Provider, defaults: ResolvedDefaults): boolean {
   return provider === 'anthropic'
-    ? !!process.env.ANTHROPIC_API_KEY
-    : !!process.env.OPENAI_API_KEY;
+    ? !!defaults.anthropicApiKey
+    : !!defaults.openaiApiKey;
 }
 
 /**
@@ -492,6 +532,15 @@ function coerceJsonSyntax(candidate: string): string {
 }
 
 const RETRYABLE_STATUS_CODES = [429, 529, 503, 502];
+/** Нормализованные коды ошибок (не числа), означающие транзиентный сбой. */
+const RETRYABLE_ERROR_CODES = new Set([
+  'overloaded_error',
+  'rate_limit_error',
+  'econnreset',
+  'econnrefused',
+  'etimedout',
+  'epipe',
+]);
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
 
@@ -502,24 +551,64 @@ const ABORT_ERROR_NAMES = new Set([
   'APIConnectionTimeoutError',
 ]);
 
+/**
+ * Ошибка и её цепочка `cause`. undici прячет настоящий сетевой `code`
+ * (`ECONNRESET` и подобные) на уровень глубже, чем брошенный наружу
+ * `TypeError: fetch failed`, поэтому смотреть только на верхний объект мало.
+ */
+function* errorChain(error: unknown, maxDepth = 5): Generator<object> {
+  let current = error;
+  for (let depth = 0; depth < maxDepth; depth++) {
+    if (typeof current !== 'object' || current === null) return;
+    yield current;
+    current = (current as { cause?: unknown }).cause;
+  }
+}
+
+function readNumber(source: unknown, key: string): number | undefined {
+  if (typeof source !== 'object' || source === null) return undefined;
+  const value = (source as Record<string, unknown>)[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * HTTP-статус берётся ТОЛЬКО из структурных полей ошибки: наш
+ * `ProviderRequestError.statusCode`, `status`/`statusCode` SDK-ошибок,
+ * `response.status`. Разбор трёхзначного числа из текста сообщения убран
+ * сознательно — сообщение провайдера это свободный текст, и «(429)» внутри
+ * чужой прозы не должно ни попадать в телеметрию как статус, ни запускать
+ * три ретрая с backoff по ошибке, которая ретраю не подлежит.
+ */
 function extractStatusCode(error: unknown): number | undefined {
-  if (error instanceof ProviderRequestError) return error.statusCode;
-  const status = (error as { status?: unknown; statusCode?: unknown } | null)?.status;
-  if (typeof status === 'number') return status;
-  const statusCode = (error as { statusCode?: unknown } | null)?.statusCode;
-  if (typeof statusCode === 'number') return statusCode;
-  if (error instanceof Error) {
-    const match = /\((\d{3})\)/.exec(error.message);
-    if (match) return Number(match[1]);
+  for (const node of errorChain(error)) {
+    const status =
+      readNumber(node, 'status') ??
+      readNumber(node, 'statusCode') ??
+      readNumber((node as { response?: unknown }).response, 'status');
+    if (status !== undefined) return status;
   }
   return undefined;
 }
 
 function extractErrorCode(error: unknown): string | undefined {
-  if (error instanceof ProviderRequestError && error.errorCode) return error.errorCode;
-  const code = (error as { code?: unknown } | null)?.code;
-  if (typeof code === 'string') return code;
-  if (error instanceof Error && error.name && error.name !== 'Error') return error.name;
+  for (const node of errorChain(error)) {
+    if (node instanceof ProviderRequestError) {
+      if (node.errorCode) return node.errorCode;
+      continue;
+    }
+    const code = (node as { code?: unknown }).code;
+    if (typeof code === 'string' && code) return code;
+  }
+  // Имя класса — последний и наименее информативный источник. Собственную
+  // обёртку сюда не пускаем: «ProviderRequestError» не код ошибки провайдера.
+  if (
+    error instanceof Error &&
+    !(error instanceof ProviderRequestError) &&
+    error.name &&
+    error.name !== 'Error'
+  ) {
+    return error.name;
+  }
   return undefined;
 }
 
@@ -528,17 +617,29 @@ function isAbortError(error: unknown): boolean {
   return typeof name === 'string' && ABORT_ERROR_NAMES.has(name);
 }
 
+/**
+ * Транзиентность определяется нормализованным сигналом — структурным статусом
+ * или кодом ошибки. Текст сообщения остаётся последним рубежом только для
+ * НЕчисловых маркеров: число, найденное в свободном тексте, статусом не
+ * является.
+ */
 function isRetryableError(error: unknown): boolean {
   if (isAbortError(error)) return false;
+
   const status = extractStatusCode(error);
   if (status !== undefined && RETRYABLE_STATUS_CODES.includes(status)) return true;
+
+  const code = extractErrorCode(error)?.toLowerCase();
+  if (code && RETRYABLE_ERROR_CODES.has(code)) return true;
+
   if (error instanceof Error) {
     const msg = error.message;
-    return RETRYABLE_STATUS_CODES.some(code => msg.includes(`(${code})`)) ||
+    return (
       msg.includes('overloaded') ||
       msg.includes('rate_limit') ||
       msg.includes('ECONNRESET') ||
-      msg.includes('ETIMEDOUT');
+      msg.includes('ETIMEDOUT')
+    );
   }
   return false;
 }
@@ -564,6 +665,8 @@ interface AttemptGate {
   signal: AbortSignal;
   /** true, если попытку прервал наш таймаут, а не внешний signal вызывающего. */
   readonly timedOut: boolean;
+  /** Отмена по решению самой операции (отказ потребителя, переполнение буфера). */
+  abort(): void;
   cleanup(): void;
 }
 
@@ -607,6 +710,9 @@ function createAttemptGate(
     get timedOut() {
       return timedOut;
     },
+    abort() {
+      controller.abort();
+    },
     cleanup() {
       if (timer) clearTimeout(timer);
       externalSignal?.removeEventListener('abort', onExternalAbort);
@@ -644,10 +750,10 @@ async function postAnthropicMessages(
 async function callAnthropic(
   options: ChatCompletionOptions,
   model: string,
-  temperature: number,
+  defaults: ResolvedDefaults,
   signal: AbortSignal | undefined
 ): Promise<string> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = defaults.anthropicApiKey;
   if (!apiKey) {
     throw new ProviderRequestError('ANTHROPIC_API_KEY is not set', {
       errorCode: 'MISSING_API_KEY',
@@ -655,7 +761,8 @@ async function callAnthropic(
   }
 
   const { system, messages } = buildAnthropicPayload(options);
-  const maxTokens = options.maxTokens ?? defaultAnthropicMaxTokens();
+  const maxTokens = defaults.anthropicMaxTokens;
+  const temperature = defaults.temperature;
 
   let response = await postAnthropicMessages(apiKey, model, system, messages, maxTokens, temperature, signal);
 
@@ -699,14 +806,14 @@ async function callAnthropic(
 async function callOpenAI(
   options: ChatCompletionOptions,
   model: string,
-  temperature: number,
+  defaults: ResolvedDefaults,
   signal: AbortSignal | undefined
 ): Promise<string> {
   const response = await openai.chat.completions.create(
     {
       model,
       messages: options.messages,
-      temperature,
+      temperature: defaults.temperature,
       ...(options.maxTokens && { max_tokens: options.maxTokens }),
       ...(options.responseFormat && {
         response_format: { type: options.responseFormat },
@@ -726,7 +833,7 @@ async function runCompletionAttempt(
   provider: Provider,
   model: string,
   options: ChatCompletionOptions,
-  temperature: number,
+  defaults: ResolvedDefaults,
   timeoutMs: number | undefined,
   timeoutCode: string
 ): Promise<AttemptResult> {
@@ -737,8 +844,8 @@ async function runCompletionAttempt(
   try {
     const raw =
       provider === 'anthropic'
-        ? await callAnthropic(options, model, temperature, gate.signal)
-        : await callOpenAI(options, model, temperature, gate.signal);
+        ? await callAnthropic(options, model, defaults, gate.signal)
+        : await callOpenAI(options, model, defaults, gate.signal);
 
     const text =
       options.responseFormat === 'json_object' ? normalizeJsonResponse(raw) : raw;
@@ -782,12 +889,6 @@ async function runCompletionAttempt(
   }
 }
 
-function describeFailure(attempts: CompletionAttempt[]): string {
-  return attempts
-    .map((a) => `${a.provider}/${a.model}:${a.outcome}${a.errorCode ? `(${a.errorCode})` : ''}`)
-    .join(', ');
-}
-
 /**
  * Основной вход. Возвращает не только текст, но и то, КТО и ЧЕМ его отдал —
  * без этого downstream не может честно посчитать `ModelRelationship` (A2).
@@ -803,7 +904,8 @@ export async function createChatCompletionDetailed(
   const primaryProvider = options.provider ?? getProvider();
   const primaryModel = resolvePrimaryModel(primaryProvider, options);
   const plan = planFallback(options);
-  const temperature = options.temperature ?? defaultTemperature();
+  // Один снимок env на весь вызов: см. ResolvedDefaults.
+  const defaults = resolveDefaults(options);
 
   const remainingMs = (): number =>
     options.totalDeadlineMs === undefined
@@ -832,6 +934,11 @@ export async function createChatCompletionDetailed(
   let primaryError: unknown;
   let fallbackError: unknown;
   let callerAborted = false;
+  // Факт исчерпания дедлайна фиксируется по ЗАПИСАННОМУ исходу попытки, а не
+  // перемером часов: таймер libuv вправе сработать на доли миллисекунды раньше
+  // срока, и повторный `remainingMs() > 0` мог показать остаток бюджета уже
+  // после того, как дедлайн формально наступил — и запустить резерв.
+  let deadlineExceeded = false;
 
   const runOne = async (
     provider: Provider,
@@ -843,7 +950,7 @@ export async function createChatCompletionDetailed(
       provider,
       model,
       options,
-      temperature,
+      defaults,
       ms,
       code
     );
@@ -852,6 +959,7 @@ export async function createChatCompletionDetailed(
       if (isPrimary) primaryError = result.error;
       else fallbackError = result.error;
       if (result.attempt.errorCode === 'ABORTED_BY_CALLER') callerAborted = true;
+      if (result.attempt.errorCode === 'TOTAL_DEADLINE_EXCEEDED') deadlineExceeded = true;
     }
     return result;
   };
@@ -895,7 +1003,13 @@ export async function createChatCompletionDetailed(
     );
   }
 
-  if (fallbackTarget && !callerAborted && hasApiKey(fallbackTarget.provider) && remainingMs() > 0) {
+  if (
+    fallbackTarget &&
+    !callerAborted &&
+    !deadlineExceeded &&
+    hasApiKey(fallbackTarget.provider, defaults) &&
+    remainingMs() > 0
+  ) {
     console.warn(
       `[chat-provider] ${primaryProvider} failed after retries, falling back to ${fallbackTarget.provider}/${fallbackTarget.model}`
     );
@@ -915,25 +1029,18 @@ export async function createChatCompletionDetailed(
     );
   }
 
-  // Наружу идёт ошибка ПЕРВИЧНОГО провайдера — так же, как до этого PR
-  // (`throw lastError`): именно её текст читают health-эндпоинт и
-  // consistency-gate. Ошибка резерва добавляется в хвост сообщения, чтобы не
-  // потеряться, но не подменяет собой первичную причину.
+  // Наружу идёт СЫРОЕ сообщение первичного провайдера — ровно то, что летело
+  // до provider-слоя через `throw lastError`. Ошибка резерва не приписывается к
+  // тексту: она уже ушла в console.error выше, а её статус и код лежат в
+  // attempts[]. Иначе health-эндпоинт и consistency-gate печатали бы
+  // пользователю сводку попыток вместо причины отказа.
   const rootError = primaryError ?? fallbackError;
-  const rootMessage = rootError instanceof Error ? rootError.message : String(rootError);
-  const fallbackNote =
-    fallbackError && fallbackError !== rootError
-      ? ` | fallback: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`
-      : '';
 
-  throw new ChatCompletionError(
-    `Chat completion failed (${describeFailure(attempts)}): ${rootMessage}${fallbackNote}`,
-    attempts,
-    {
-      cause: rootError,
-      errorCode: attempts[attempts.length - 1]?.errorCode,
-    }
-  );
+  throw new ChatCompletionError(rawMessageOf(rootError), attempts, {
+    cause: rootError,
+    errorCode: extractErrorCode(rootError),
+    statusCode: extractStatusCode(rootError),
+  });
 }
 
 /**
@@ -950,12 +1057,13 @@ async function* streamProviderTokens(
   provider: Provider,
   model: string,
   options: ChatCompletionOptions,
+  defaults: ResolvedDefaults,
   signal: AbortSignal | undefined
 ): AsyncGenerator<string> {
-  const temperature = options.temperature ?? defaultTemperature();
+  const temperature = defaults.temperature;
 
   if (provider === 'anthropic') {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const apiKey = defaults.anthropicApiKey;
     if (!apiKey) {
       throw new ProviderRequestError('ANTHROPIC_API_KEY is not set', {
         errorCode: 'MISSING_API_KEY',
@@ -963,7 +1071,7 @@ async function* streamProviderTokens(
     }
 
     const { system, messages } = buildAnthropicPayload(options);
-    const maxTokens = options.maxTokens ?? defaultAnthropicMaxTokens();
+    const maxTokens = defaults.anthropicMaxTokens;
     const buildBody = (withTemperature: boolean) =>
       JSON.stringify({
         model,
@@ -1074,37 +1182,76 @@ export async function* streamChatCompletionTokens(
 ): AsyncGenerator<string> {
   const provider = options.provider ?? getProvider();
   const model = resolvePrimaryModel(provider, options);
-  yield* streamProviderTokens(provider, model, options, options.signal);
+  const defaults = resolveDefaults(options);
+  yield* streamProviderTokens(provider, model, options, defaults, options.signal);
 }
+
+/**
+ * Верхняя граница НЕПРОЧИТАННЫХ токенов в буфере операции. Запрос к провайдеру
+ * идёт на полной скорости независимо от потребителя (см.
+ * `createChatCompletionStreamDetailed`), поэтому нужен потолок: он на порядки
+ * выше любого реального ответа — max_tokens ограничивает провайдера сам — и
+ * существует ради случая «потребитель не читает вовсе, а провайдер льёт
+ * бесконечно». Иначе гарантия разрешения completion покупалась бы
+ * неограниченной памятью.
+ */
+const STREAM_BUFFER_LIMIT_CHARS = 4_000_000;
 
 export interface ChatCompletionStreamOperation {
   /**
-   * Токены по мере поступления. Генератор ЛЕНИВЫЙ: запрос к провайдеру
-   * начинается с первой итерации. `completion` разрешается из финализации
-   * именно этого генератора, поэтому `tokens` обязан быть проитерирован
-   * (или явно закрыт `.return()`) — ждать одну лишь `completion`, не тронув
-   * `tokens`, значит ждать вечно.
+   * Токены по мере поступления. Итерировать НЕобязательно: запрос к провайдеру
+   * идёт независимо от потребителя, непрочитанные токены копятся в буфере
+   * операции, и потребитель, подключившийся позже, получит их с начала.
+   *
+   * Ранний `break` (или исключение в теле `for await`) отменяет запрос к
+   * провайдеру: незакрытый стрим продолжал бы качать токены и деньги.
+   *
+   * Потребитель ОДИН. Как и у async-генератора, все `for await` делят один
+   * итератор и один буфер: второй потребитель не получит копию потока, он
+   * разберёт с первым одну и ту же очередь. Полный текст прогона всегда есть в
+   * `completion.text` — за ним и надо идти, если нужен «ещё один читатель».
    */
   tokens: AsyncIterable<string>;
   /**
-   * Метаданные прогона. `text` — накопленное на момент завершения (при раннем
-   * разрыве — префикс). Разрешается и при нормальном конце, и при раннем
-   * разрыве потребителем; отклоняется `ChatCompletionError` при ошибке
-   * провайдера. Начатое потребление стрима не подвисает ни на одном из путей.
+   * Метаданные прогона. Разрешается полным текстом при нормальном конце и
+   * префиксом при отказе потребителя; отклоняется `ChatCompletionError` при
+   * ошибке провайдера, таймауте и явной отмене.
+   *
+   * ГАРАНТИЯ: операция создана ⟹ `completion` рано или поздно settles, читал
+   * кто-нибудь `tokens` или нет. Единственная граница — время самого запроса к
+   * провайдеру: без `requestTimeoutMs`/`totalDeadlineMs` она равна тому, сколько
+   * провайдер держит соединение.
    */
   completion: Promise<ChatCompletionResult>;
+  /**
+   * Отменить операцию, не подключаясь к `tokens`. `completion` отклоняется
+   * `ChatCompletionError` с исходом `ABORTED` — так же, как при отмене через
+   * внешний `signal`. Повторный вызов и вызов после завершения ничего не делают.
+   */
+  abort(reason?: string): void;
 }
 
 /**
  * Стриминг без фоллбэка: подмена провайдера на середине уже отданного клиенту
  * текста склеила бы два разных ответа, поэтому `fallbackUsed` здесь всегда
  * `false`, а неудача — единственная попытка в `attempts[]`.
+ *
+ * Операция ЭАГЕРНАЯ: запрос уходит провайдеру в момент создания, а внутренний
+ * насос перекладывает токены в буфер сам. Ленивый вариант (запрос стартовал с
+ * первой итерации, `completion` разрешалась из `finally` генератора) был
+ * неисправим по устройству: `.return()` у НЕ запущенного async-генератора не
+ * выполняет ни тело, ни `finally`, а брошенный на `yield` генератор без
+ * `.return()` не финализируется вовсе — то есть «создал операцию и не стал
+ * читать токены» означало вечно висящую `completion`, удерживающую
+ * AbortController и слушатель signal. Эагерность убирает само условие: у
+ * разрешения `completion` больше нет предусловия со стороны потребителя.
  */
 export function createChatCompletionStreamDetailed(
   options: ChatCompletionOptions
 ): ChatCompletionStreamOperation {
   const provider = options.provider ?? getProvider();
   const model = resolvePrimaryModel(provider, options);
+  const defaults = resolveDefaults(options);
   const attempts: CompletionAttempt[] = [];
 
   let resolveCompletion!: (result: ChatCompletionResult) => void;
@@ -1113,7 +1260,7 @@ export function createChatCompletionStreamDetailed(
     resolveCompletion = resolve;
     rejectCompletion = reject;
   });
-  // Потребитель вправе не ждать `completion`; без этого его отклонение стало бы
+  // Потребитель вправе не ждать `completion`; без этого её отклонение стало бы
   // unhandled rejection и уронило бы процесс.
   completion.catch(() => {});
 
@@ -1121,32 +1268,59 @@ export function createChatCompletionStreamDetailed(
   // ошибки должен называть тот бюджет, который реально сработал.
   const requestBudget = options.requestTimeoutMs ?? Number.POSITIVE_INFINITY;
   const deadlineBudget = options.totalDeadlineMs ?? Number.POSITIVE_INFINITY;
-  const timeoutMs = Number.isFinite(Math.min(requestBudget, deadlineBudget))
-    ? Math.min(requestBudget, deadlineBudget)
-    : undefined;
+  const budget = Math.min(requestBudget, deadlineBudget);
+  const timeoutMs = Number.isFinite(budget) ? budget : undefined;
   const timeoutCode =
     requestBudget <= deadlineBudget ? 'ATTEMPT_TIMEOUT' : 'TOTAL_DEADLINE_EXCEEDED';
 
-  async function* run(): AsyncGenerator<string> {
-    const startedAt = new Date().toISOString();
-    const startedMs = Date.now();
-    const gate = createAttemptGate(options.signal, timeoutMs);
-    let text = '';
-    let settled = false;
+  const gate = createAttemptGate(options.signal, timeoutMs);
+  const startedAt = new Date().toISOString();
+  const startedMs = Date.now();
 
-    try {
-      for await (const token of streamProviderTokens(provider, model, options, gate.signal)) {
-        text += token;
-        yield token;
-      }
-      settled = true;
+  // --- буфер между насосом и (необязательным) потребителем ---
+  const buffered: string[] = [];
+  let bufferedChars = 0;
+  let queueClosed = false;
+  let queueFailure: unknown;
+  let waiters: (() => void)[] = [];
+
+  const wakeWaiters = () => {
+    const pending = waiters;
+    waiters = [];
+    for (const resume of pending) resume();
+  };
+
+  // --- состояние операции ---
+  let text = '';
+  let settled = false;
+  let cancelledByConsumer = false;
+  let overflowed = false;
+  let abortRequested = false;
+  let abortReason: string | undefined;
+
+  /** Единственная точка разрешения `completion`. `undefined` — нормальный конец. */
+  const settle = (error: unknown) => {
+    if (settled) return;
+    settled = true;
+
+    // Отказ потребителя — не сбой прогона: префикс уже получен и оплачен,
+    // поэтому исход разрешающий, но с честной пометкой в телеметрии. Явный
+    // `abort()` важнее: если его позвали, `completion` обязана отклониться,
+    // даже когда потребитель следом вышел из `for await`.
+    const consumerGaveUp =
+      error !== undefined && cancelledByConsumer && !overflowed && !abortRequested;
+
+    if (error === undefined || consumerGaveUp) {
       attempts.push({
         provider,
         model,
         startedAt,
         latencyMs: Date.now() - startedMs,
-        outcome: 'SUCCESS',
+        outcome: error === undefined ? 'SUCCESS' : 'ABORTED',
+        ...(consumerGaveUp && { errorCode: 'CONSUMER_CANCELLED' }),
       });
+      queueClosed = true;
+      wakeWaiters();
       resolveCompletion({
         text,
         servedByProvider: provider,
@@ -1154,58 +1328,120 @@ export function createChatCompletionStreamDetailed(
         fallbackUsed: false,
         attempts,
       });
-    } catch (error) {
-      settled = true;
-      const aborted = isAbortError(error) || gate.signal.aborted;
-      const errorCode = aborted
-        ? gate.timedOut
-          ? timeoutCode
-          : 'ABORTED_BY_CALLER'
-        : extractErrorCode(error);
-      const statusCode = extractStatusCode(error);
-      attempts.push({
+      return;
+    }
+
+    const aborted = !overflowed && (isAbortError(error) || gate.signal.aborted);
+    const errorCode = aborted
+      ? gate.timedOut
+        ? timeoutCode
+        : 'ABORTED_BY_CALLER'
+      : extractErrorCode(error);
+    const statusCode = extractStatusCode(error);
+    attempts.push({
+      provider,
+      model,
+      startedAt,
+      latencyMs: Date.now() - startedMs,
+      outcome: aborted ? 'ABORTED' : 'ERROR',
+      ...(statusCode !== undefined && { statusCode }),
+      ...(errorCode && { errorCode }),
+    });
+
+    const failure = new ChatCompletionError(
+      abortReason !== undefined && errorCode === 'ABORTED_BY_CALLER'
+        ? abortReason
+        : rawMessageOf(error),
+      attempts,
+      { cause: error, errorCode, statusCode }
+    );
+    queueFailure = failure;
+    queueClosed = true;
+    wakeWaiters();
+    rejectCompletion(failure);
+  };
+
+  // Насос стартует СРАЗУ и разрешает `completion` из единственной точки в
+  // `finally` — так гарантия «создана ⟹ settles» не зависит от полноты разбора
+  // веток внутри.
+  const pump = (async () => {
+    let failure: unknown;
+    try {
+      for await (const token of streamProviderTokens(
         provider,
         model,
-        startedAt,
-        latencyMs: Date.now() - startedMs,
-        outcome: aborted ? 'ABORTED' : 'ERROR',
-        ...(statusCode !== undefined && { statusCode }),
-        ...(errorCode && { errorCode }),
-      });
-      rejectCompletion(
-        new ChatCompletionError(
-          `Chat completion stream failed (${describeFailure(attempts)}): ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-          attempts,
-          { cause: error, errorCode }
-        )
-      );
-      throw error;
+        options,
+        defaults,
+        gate.signal
+      )) {
+        text += token;
+        if (queueClosed) continue;
+        buffered.push(token);
+        bufferedChars += token.length;
+        wakeWaiters();
+        if (bufferedChars > STREAM_BUFFER_LIMIT_CHARS) {
+          overflowed = true;
+          gate.abort();
+          throw new ProviderRequestError(
+            `Stream buffer limit of ${STREAM_BUFFER_LIMIT_CHARS} characters exceeded: tokens arrive faster than the consumer reads them`,
+            { errorCode: 'STREAM_BUFFER_OVERFLOW' }
+          );
+        }
+      }
+    } catch (error) {
+      failure = error ?? new Error('Stream failed without an error value');
     } finally {
       gate.cleanup();
-      if (!settled) {
-        // Сюда попадаем при `break`/`return`/throw в теле `for await` у
-        // потребителя: движок вызывает generator.return(), и `completion`
-        // обязана разрешиться, а не зависнуть.
-        attempts.push({
-          provider,
-          model,
-          startedAt,
-          latencyMs: Date.now() - startedMs,
-          outcome: 'ABORTED',
-          errorCode: 'CONSUMER_CANCELLED',
-        });
-        resolveCompletion({
-          text,
-          servedByProvider: provider,
-          servedByModel: model,
-          fallbackUsed: false,
-          attempts,
-        });
-      }
+      settle(failure);
     }
-  }
+  })();
 
-  return { tokens: run(), completion };
+  const iterator: AsyncIterator<string> = {
+    async next(): Promise<IteratorResult<string>> {
+      for (;;) {
+        const token = buffered.shift();
+        if (token !== undefined) {
+          bufferedChars -= token.length;
+          return { value: token, done: false };
+        }
+        if (queueFailure !== undefined) {
+          // Ошибку отдаём потребителю ровно один раз; дальше поток закрыт.
+          const error = queueFailure;
+          queueFailure = undefined;
+          throw error;
+        }
+        if (queueClosed) return { value: undefined, done: true };
+        await new Promise<void>((resume) => waiters.push(resume));
+      }
+    },
+    async return(): Promise<IteratorResult<string>> {
+      if (!settled) {
+        cancelledByConsumer = true;
+        gate.abort();
+      }
+      // Буфер закрывается сразу: токены, успевшие прийти между отменой и
+      // фактическим закрытием соединения, попадут в `text` (мы их получили),
+      // но не будут ждать потребителя, который уже ушёл.
+      queueClosed = true;
+      buffered.length = 0;
+      bufferedChars = 0;
+      // Дожидаемся насоса: после выхода из `for await` состояние операции должно
+      // быть окончательным — `completion` разрешена, соединение закрыто.
+      await pump;
+      return { value: undefined, done: true };
+    },
+  };
+
+  return {
+    tokens: { [Symbol.asyncIterator]: () => iterator },
+    completion,
+    abort(reason?: string) {
+      if (settled) return;
+      abortRequested = true;
+      // Причину фиксирует ПЕРВАЯ отмена: `abort('почему')` с последующим
+      // безаргументным `abort()` не должен стирать уже названную причину.
+      if (abortReason === undefined) abortReason = reason;
+      gate.abort();
+    },
+  };
 }
