@@ -176,6 +176,29 @@ describe('фикстура корпуса', () => {
       ])
     ).toThrow(/непустая строка/);
   });
+
+  // Подстрока из одних пробелов тише и опаснее пустой: " " в
+  // expectedSubstrings проходит почти по любому ответу, а в
+  // forbiddenSubstrings роняет любой ответ со словами. Гейт при этом
+  // выглядит зелёным/красным «по делу» — то есть врёт, а именно ему верить
+  // и полагается.
+  for (const key of ['expectedSubstrings', 'forbiddenSubstrings'] as const) {
+    it(`${key}: подстрока из одних пробелов значением не считается`, () => {
+      expect(() =>
+        parseCorpus([
+          {
+            id: 'ws-1',
+            category: 'c',
+            question: 'q',
+            audience: 'internal',
+            source: 's',
+            expectedDisposition: 'MUST_PASS',
+            expect: { [key]: ['   '] },
+          },
+        ])
+      ).toThrow(/непустых строк/);
+    });
+  }
 });
 
 describe('расположение = решение продовой политики доставки', () => {

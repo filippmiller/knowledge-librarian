@@ -268,7 +268,7 @@ function parseExpect(
     if (
       !Array.isArray(value) ||
       value.length === 0 ||
-      value.some((s) => typeof s !== 'string' || s.length === 0)
+      value.some((s) => typeof s !== 'string' || s.trim().length === 0)
     ) {
       push(`expect.${key}`, 'ожидался непустой массив непустых строк');
       ok = false;
