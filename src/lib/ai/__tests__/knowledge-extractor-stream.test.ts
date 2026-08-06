@@ -27,6 +27,7 @@ vi.mock('@/lib/ai/chat-provider', async (importOriginal) => ({
   createChatCompletionStreamDetailed: createChatCompletionStreamDetailedMock,
 }));
 
+import { ChatCompletionError } from '../chat-provider';
 import type {
   ChatCompletionOptions,
   ChatCompletionResult,
@@ -342,6 +343,40 @@ describe('журнал вызовов прогона', () => {
 
     expect(seen).toHaveLength(1);
     expect(seen[0]).toMatchObject({ role: 'EXTRACTION_PRIMARY', outcome: 'FAILED' });
+  });
+
+  // Итерация tokens пробрасывает СЫРУЮ ошибку провайдера, а attempts[] живёт в
+  // ChatCompletionError, которым отклоняется completion. Если записать сырую,
+  // у упавшего вызова окажется пустой список попыток — артефакт не скажет,
+  // какой провайдер и какая модель вообще пробовались. Для PR, вся суть
+  // которого «храним фактического исполнителя», это дыра именно там, где
+  // диагностика нужнее всего.
+  it('у упавшего стрима сохраняет attempts[] из ChatCompletionError, а не пустой список', async () => {
+    const attempts = [attempt('anthropic', 'claude-pinned-extractor')];
+    const rich = new ChatCompletionError('оба провайдера отказали', attempts);
+
+    createChatCompletionStreamDetailedMock.mockImplementation(() => ({
+      tokens: (async function* () {
+        // наружу — сырая ошибка провайдера, без attempts
+        throw new Error('stream died');
+        // eslint-disable-next-line no-unreachable
+        yield '';
+      })(),
+      completion: Promise.reject(rich),
+    }));
+
+    const seen: LlmCallRecord[] = [];
+    await expect(
+      (async () => {
+        for await (const event of streamKnowledgeExtraction('Короткий документ.', [])) {
+          if (event.type === 'llm_call') seen.push(event.data);
+        }
+      })()
+    ).rejects.toThrow('stream died'); // наружу по-прежнему летит исходная ошибка
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].outcome).toBe('FAILED');
+    expect(seen[0].attempts).toEqual(attempts);
   });
 });
 

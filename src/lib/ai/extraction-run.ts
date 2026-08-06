@@ -48,6 +48,14 @@ export const DEFAULT_EXTRACTION_FALLBACK_POLICY: FallbackPolicy = 'NONE';
  */
 export interface ExtractionRunConfig extends CompletionRunConfig {
   extractionSchemaVersion: string;
+  /**
+   * Модели резервного провайдера. Без них `planFallback()` понижает ЛЮБОЙ
+   * закреплённый прогон до `NONE` — а у прогона извлечения модель закреплена
+   * всегда. То есть без этого поля `fallbackPolicy: 'CROSS_PROVIDER'` можно
+   * задать, но сработать он не может никогда: настройка выглядела бы рабочей и
+   * молча ничего не делала.
+   */
+  providerModels?: { anthropic?: string; openai?: string };
 }
 
 /**
@@ -133,11 +141,14 @@ export function resolveGraderRunConfig(promptVersion: string): CompletionRunConf
  * primary и retry не было ДВУХ мест, где эти поля собираются вручную: разойтись
  * они могут только через эту функцию, а она одна.
  */
-export function toCompletionOptions(config: CompletionRunConfig): {
+export function toCompletionOptions(
+  config: CompletionRunConfig & { providerModels?: { anthropic?: string; openai?: string } }
+): {
   provider: Provider;
   model: string;
   promptVersion: string;
   fallbackPolicy: FallbackPolicy;
+  providerModels?: { anthropic?: string; openai?: string };
   requestTimeoutMs?: number;
   totalDeadlineMs?: number;
 } {
@@ -146,6 +157,7 @@ export function toCompletionOptions(config: CompletionRunConfig): {
     model: config.model,
     promptVersion: config.promptVersion,
     fallbackPolicy: config.fallbackPolicy,
+    ...(config.providerModels && { providerModels: config.providerModels }),
     ...(config.requestTimeoutMs !== undefined && {
       requestTimeoutMs: config.requestTimeoutMs,
     }),

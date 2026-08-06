@@ -389,7 +389,18 @@ ${batch}
       // Сбой самого стрима, как и раньше, валит документ целиком — но запись о
       // вызове обязана выйти наружу до этого, иначе в артефакте прогона просто
       // не будет следа от вызова, который его и убил.
-      yield { type: 'llm_call', data: recordFailedCall(primaryContext, error) };
+      //
+      // Итерация `tokens` пробрасывает СЫРУЮ ошибку провайдера, а `attempts[]`
+      // лежит в `ChatCompletionError`, которым отклоняется `completion`. Если
+      // записать сюда сырую ошибку, у упавшего вызова окажется пустой список
+      // попыток — то есть артефакт не скажет, какой провайдер и какая модель
+      // вообще пробовались. Ровно то, ради чего этот PR и делается.
+      const errorForRecord = await operation.completion.then(
+        () => error,
+        (completionError: unknown) => completionError
+      );
+      yield { type: 'llm_call', data: recordFailedCall(primaryContext, errorForRecord) };
+      // Наружу летит исходная ошибка: поведение вызывающего кода не меняется.
       throw error;
     }
 
