@@ -88,8 +88,29 @@ export interface CompletionAttempt {
   errorCode?: string;
 }
 
+/**
+ * Причина, по которой провайдер прекратил генерацию, — в НОРМАЛИЗОВАННОМ виде.
+ *
+ * Провайдеры сообщают её сами, но разными полями и разными словами: OpenAI —
+ * `finish_reason` (`length`), Anthropic — `stop_reason` (`max_tokens`). Наружу
+ * едет общий словарь, а не сырая строка вендора: вызывающий не должен знать,
+ * кто именно ответил, чтобы понять, оборвана ли выдача.
+ *
+ * `undefined` — провайдер причину не назвал (или результат собран моком). Это НЕ
+ * то же самое, что `COMPLETE`: молчание ничего не гарантирует, и на нём остаётся
+ * работать только эвристика (см. `structured()`).
+ */
+export type CompletionTerminationReason = 'COMPLETE' | 'MAX_TOKENS' | 'OTHER';
+
 export interface ChatCompletionResult {
   text: string;
+  /**
+   * Почему провайдер остановился. `MAX_TOKENS` означает обрыв на полуслове —
+   * это ФАКТ от API, а не догадка по тексту, и потому главный признак обрыва для
+   * `structured()`. Отдельная ветка `OTHER` существует, чтобы не выдавать
+   * `content_filter`/`refusal`/`tool_use` за нормальное завершение.
+   */
+  terminationReason?: CompletionTerminationReason;
   /**
    * Ответ провайдера ДО `normalizeJsonResponse()`.
    *
@@ -384,11 +405,19 @@ function buildAnthropicPayload(options: ChatCompletionOptions) {
 }
 
 /**
- * Robustly normalize and parse JSON from AI responses, even if truncated or wrapped in markdown.
+ * Кусок ответа, который `normalizeJsonResponse()` считает собственно JSON:
+ * markdown-забор снят, всё до первой `{`/`[` отброшено. `undefined` — JSON-начала
+ * в ответе нет вовсе.
+ *
+ * Экспортируется, потому что судить о ЦЕЛОСТНОСТИ ответа нужно ровно по тому
+ * срезу, который нормализация и увидит (см. `structured()`): считать баланс
+ * скобок по всему сырому тексту — значит ловить непарные скобки прозаического
+ * вступления, которое нормализация всё равно выбросит. Вторая копия этой
+ * нарезки разошлась бы с первой на первом же изменении разбора забора.
  */
-export function normalizeJsonResponse(raw: string): string {
+export function extractJsonCandidate(raw: string): string | undefined {
   let trimmed = raw.trim();
-  if (!trimmed) return '{}';
+  if (!trimmed) return undefined;
 
   // Strip code fences.  Use a position-based approach that is immune to ** inside JSON bodies.
   if (trimmed.startsWith('`')) {
@@ -410,18 +439,46 @@ export function normalizeJsonResponse(raw: string): string {
 
   // Find the first JSON-like start
   const startIndex = trimmed.search(/[{[]/);
-  if (startIndex === -1) return '{}';
-  trimmed = trimmed.slice(startIndex);
+  if (startIndex === -1) return undefined;
+  return trimmed.slice(startIndex);
+}
+
+/**
+ * Robustly normalize and parse JSON from AI responses, even if truncated or wrapped in markdown.
+ */
+export function normalizeJsonResponse(raw: string): string {
+  const candidate = extractJsonCandidate(raw);
+  if (candidate === undefined) return '{}';
 
   // Escape literal newlines/carriage-returns inside JSON string values.
   // The AI sometimes puts real \n in long body fields, which makes JSON.parse fail.
-  trimmed = escapeControlCharsInStrings(trimmed);
+  const escaped = escapeControlCharsInStrings(candidate);
 
   // Attempt to fix truncated JSON by closing open brackets/braces
-  const balanced = balanceJson(trimmed);
+  const balanced = balanceJson(escaped);
 
   const sanitized = coerceJsonSyntax(balanced);
   return sanitized;
+}
+
+/** OpenAI `finish_reason` → общий словарь. */
+function normalizeOpenAiFinishReason(
+  reason: string | null | undefined
+): CompletionTerminationReason | undefined {
+  if (!reason) return undefined;
+  if (reason === 'length') return 'MAX_TOKENS';
+  if (reason === 'stop') return 'COMPLETE';
+  return 'OTHER';
+}
+
+/** Anthropic `stop_reason` → общий словарь. */
+function normalizeAnthropicStopReason(
+  reason: string | null | undefined
+): CompletionTerminationReason | undefined {
+  if (!reason) return undefined;
+  if (reason === 'max_tokens') return 'MAX_TOKENS';
+  if (reason === 'end_turn' || reason === 'stop_sequence') return 'COMPLETE';
+  return 'OTHER';
 }
 
 /** Escape literal newlines/CRs that appear inside JSON string values. */
@@ -761,12 +818,22 @@ async function postAnthropicMessages(
   });
 }
 
+/**
+ * Ответ одной провайдерской попытки: текст ПЛЮС названная провайдером причина
+ * остановки. Возвращать один текст, как раньше, значило бы выбрасывать
+ * единственный достоверный признак обрыва — тот, который API сообщает прямо.
+ */
+interface ProviderResponse {
+  text: string;
+  terminationReason?: CompletionTerminationReason;
+}
+
 async function callAnthropic(
   options: ChatCompletionOptions,
   model: string,
   defaults: ResolvedDefaults,
   signal: AbortSignal | undefined
-): Promise<string> {
+): Promise<ProviderResponse> {
   const apiKey = defaults.anthropicApiKey;
   if (!apiKey) {
     throw new ProviderRequestError('ANTHROPIC_API_KEY is not set', {
@@ -801,6 +868,7 @@ async function callAnthropic(
 
   const data = (await response.json()) as {
     content?: { type: string; text?: string }[];
+    stop_reason?: string | null;
     error?: { message?: string; type?: string };
   };
 
@@ -814,7 +882,12 @@ async function callAnthropic(
     ? data.content.map((part) => part.text || '').join('')
     : '';
 
-  return content.trim();
+  const terminationReason = normalizeAnthropicStopReason(data.stop_reason);
+
+  return {
+    text: content.trim(),
+    ...(terminationReason && { terminationReason }),
+  };
 }
 
 /**
@@ -847,7 +920,7 @@ async function callOpenAI(
   model: string,
   defaults: ResolvedDefaults,
   signal: AbortSignal | undefined
-): Promise<string> {
+): Promise<ProviderResponse> {
   const response = await openai.chat.completions.create(
     {
       model,
@@ -861,11 +934,23 @@ async function callOpenAI(
     signal ? { signal } : undefined
   );
 
-  return response.choices[0]?.message?.content?.trim() || '';
+  const choice = response.choices[0];
+  const terminationReason = normalizeOpenAiFinishReason(choice?.finish_reason);
+
+  return {
+    text: choice?.message?.content?.trim() || '',
+    ...(terminationReason && { terminationReason }),
+  };
 }
 
 type AttemptResult =
-  | { ok: true; text: string; rawText: string; attempt: CompletionAttempt }
+  | {
+      ok: true;
+      text: string;
+      rawText: string;
+      terminationReason?: CompletionTerminationReason;
+      attempt: CompletionAttempt;
+    }
   | { ok: false; error: unknown; attempt: CompletionAttempt };
 
 async function runCompletionAttempt(
@@ -881,11 +966,12 @@ async function runCompletionAttempt(
   const gate = createAttemptGate(options.signal, timeoutMs);
 
   try {
-    const raw =
+    const response =
       provider === 'anthropic'
         ? await callAnthropic(options, model, defaults, gate.signal)
         : await callOpenAI(options, model, defaults, gate.signal);
 
+    const raw = response.text;
     const text =
       options.responseFormat === 'json_object' ? normalizeJsonResponse(raw) : raw;
 
@@ -893,6 +979,9 @@ async function runCompletionAttempt(
       ok: true,
       text,
       rawText: raw,
+      ...(response.terminationReason && {
+        terminationReason: response.terminationReason,
+      }),
       attempt: {
         provider,
         model,
@@ -1011,6 +1100,9 @@ export async function createChatCompletionDetailed(
       return {
         text: result.text,
         rawText: result.rawText,
+        ...(result.terminationReason && {
+          terminationReason: result.terminationReason,
+        }),
         servedByProvider: primaryProvider,
         servedByModel: primaryModel,
         fallbackUsed: false,
@@ -1059,6 +1151,9 @@ export async function createChatCompletionDetailed(
       return {
         text: result.text,
         rawText: result.rawText,
+        ...(result.terminationReason && {
+          terminationReason: result.terminationReason,
+        }),
         servedByProvider: fallbackTarget.provider,
         servedByModel: fallbackTarget.model,
         fallbackUsed: true,
@@ -1095,12 +1190,26 @@ export async function createChatCompletion(
   return (await createChatCompletionDetailed(options)).text;
 }
 
+/**
+ * Ящик для ВНЕПОЛОСНЫХ метаданных стрима.
+ *
+ * Генератор отдаёт токены значениями, и причина завершения в этот канал не
+ * помещается: она приходит служебным событием (`message_delta` у Anthropic,
+ * `finish_reason` последнего чанка у OpenAI), а не текстом. Менять тип yield на
+ * размеченное объединение значило бы сломать публичный
+ * `streamChatCompletionTokens`, который отдаёт наружу строки.
+ */
+interface StreamTerminationSink {
+  terminationReason?: CompletionTerminationReason;
+}
+
 async function* streamProviderTokens(
   provider: Provider,
   model: string,
   options: ChatCompletionOptions,
   defaults: ResolvedDefaults,
-  signal: AbortSignal | undefined
+  signal: AbortSignal | undefined,
+  sink?: StreamTerminationSink
 ): AsyncGenerator<string> {
   const temperature = defaults.temperature;
 
@@ -1183,6 +1292,12 @@ async function* streamProviderTokens(
             const data = JSON.parse(content);
             if (data.type === 'content_block_delta' && data.delta?.text) {
               yield data.delta.text;
+            } else if (data.type === 'message_delta' && data.delta?.stop_reason) {
+              // Причину остановки Anthropic присылает служебным событием в самом
+              // конце потока, а не текстом токена: без этой ветки обрыв на
+              // стриминге остался бы незамеченным.
+              const reason = normalizeAnthropicStopReason(data.delta.stop_reason);
+              if (sink && reason) sink.terminationReason = reason;
             }
           } catch {
             // Ignore parse errors for non-json lines
@@ -1211,7 +1326,12 @@ async function* streamProviderTokens(
   );
 
   for await (const chunk of stream) {
-    const content = chunk.choices[0]?.delta?.content || '';
+    const choice = chunk.choices[0];
+    // `finish_reason` едет на последнем чанке выбора, у остальных он null.
+    const reason = normalizeOpenAiFinishReason(choice?.finish_reason);
+    if (sink && reason) sink.terminationReason = reason;
+
+    const content = choice?.delta?.content || '';
     if (content) {
       yield content;
     }
@@ -1318,6 +1438,8 @@ export function createChatCompletionStreamDetailed(
   const gate = createAttemptGate(options.signal, timeoutMs);
   const startedAt = new Date().toISOString();
   const startedMs = Date.now();
+  // Заполняется насосом по служебному событию провайдера, читается в `settle()`.
+  const termination: StreamTerminationSink = {};
 
   // --- буфер между насосом и (необязательным) потребителем ---
   const buffered: string[] = [];
@@ -1365,6 +1487,9 @@ export function createChatCompletionStreamDetailed(
       wakeWaiters();
       resolveCompletion({
         text,
+        ...(termination.terminationReason && {
+          terminationReason: termination.terminationReason,
+        }),
         servedByProvider: provider,
         servedByModel: model,
         fallbackUsed: false,
@@ -1414,7 +1539,8 @@ export function createChatCompletionStreamDetailed(
         model,
         options,
         defaults,
-        gate.signal
+        gate.signal,
+        termination
       )) {
         text += token;
         if (queueClosed) continue;

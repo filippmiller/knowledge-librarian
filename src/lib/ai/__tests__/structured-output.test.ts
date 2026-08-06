@@ -44,10 +44,14 @@ const VALID_PAYLOAD: Price = {
 
 let fetchMock: ReturnType<typeof vi.fn>;
 
-function anthropicOk(text: string): Response {
-  return new Response(JSON.stringify({ content: [{ type: 'text', text }] }), {
-    status: 200,
-  });
+function anthropicOk(text: string, stopReason?: string): Response {
+  return new Response(
+    JSON.stringify({
+      content: [{ type: 'text', text }],
+      ...(stopReason !== undefined && { stop_reason: stopReason }),
+    }),
+    { status: 200 }
+  );
 }
 
 /** 500 не входит в RETRYABLE_STATUS_CODES — резерв начинается сразу, без sleep. */
@@ -55,8 +59,15 @@ function anthropicFailure(status = 500, body = 'anthropic is down'): Response {
   return new Response(body, { status });
 }
 
-function openaiOk(text: string) {
-  return { choices: [{ message: { content: text } }] };
+function openaiOk(text: string, finishReason?: string) {
+  return {
+    choices: [
+      {
+        message: { content: text },
+        ...(finishReason !== undefined && { finish_reason: finishReason }),
+      },
+    ],
+  };
 }
 
 function abortError(): Error {
@@ -213,6 +224,21 @@ describe('structured() — успешный разбор', () => {
     expect(error.reason).toBe('TRUNCATED_JSON');
     expect(error.result.attempts.length).toBeGreaterThan(0);
     expect(error.result.servedByProvider).toBe('anthropic');
+  });
+
+  it('нормальное завершение (stop_reason=end_turn) ничему не мешает', async () => {
+    fetchMock.mockResolvedValue(
+      anthropicOk(JSON.stringify(VALID_PAYLOAD), 'end_turn')
+    );
+
+    const result = await structured({
+      schema: priceSchema,
+      messages: MESSAGES,
+      runConfig: runConfig(),
+    });
+
+    expect(result.data).toEqual(VALID_PAYLOAD);
+    expect(result.terminationReason).toBe('COMPLETE');
   });
 
   it('attempts[] доходит до вызывающего вместе с фактическим исполнителем', async () => {
@@ -609,5 +635,125 @@ describe('structured() — отказ провайдера', () => {
       outcome: 'ABORTED',
       errorCode: 'ABORTED_BY_CALLER',
     });
+  });
+});
+
+/**
+ * Обрыв выдачи. Провайдер сообщает его САМ (`finish_reason: 'length'` у OpenAI,
+ * `stop_reason: 'max_tokens'` у Anthropic) — это факт, а не догадка; эвристика по
+ * скобкам остаётся страховкой для тех, кто промолчал.
+ */
+describe('structured() — детект обрыва', () => {
+  // ГЛАВНЫЙ случай. Оборвать выдачу можно ровно на границе элемента, и тогда
+  // текст остаётся синтаксически валидным JSON: сырой ответ парсится, скобки
+  // сбалансированы, схема проходит. Никакая эвристика по тексту такой обрыв не
+  // отличит от целого ответа — ловит его только слово провайдера.
+  it('stop_reason=max_tokens отвергает ответ, даже если текст сам по себе валидный JSON', async () => {
+    fetchMock.mockResolvedValue(
+      anthropicOk(JSON.stringify(VALID_PAYLOAD), 'max_tokens')
+    );
+
+    const error = await expectStructuredError(
+      structured({ schema: priceSchema, messages: MESSAGES, runConfig: runConfig() })
+    );
+
+    expect(error.reason).toBe('TRUNCATED_JSON');
+    expect(error.issues[0].code).toBe('truncated_by_provider');
+    // Ответ был бы принят: он валиден и схему проходит. Отвергнут именно по
+    // слову провайдера — иначе тест ничего не отличал бы.
+    expect(() => priceSchema.parse(JSON.parse(error.result.text))).not.toThrow();
+    expect(error.result.terminationReason).toBe('MAX_TOKENS');
+    expect(error.attempts.length).toBeGreaterThan(0);
+  });
+
+  it('finish_reason=length у OpenAI отвергает такой же валидный по виду ответ', async () => {
+    openaiCreate.mockResolvedValue(
+      openaiOk(JSON.stringify(VALID_PAYLOAD), 'length')
+    );
+
+    const error = await expectStructuredError(
+      structured({
+        schema: priceSchema,
+        messages: MESSAGES,
+        runConfig: runConfig({ provider: 'openai', model: 'gpt-test-primary' }),
+      })
+    );
+
+    expect(error.reason).toBe('TRUNCATED_JSON');
+    expect(error.issues[0].code).toBe('truncated_by_provider');
+    expect(error.result.terminationReason).toBe('MAX_TOKENS');
+    expect(error.result.servedByProvider).toBe('openai');
+  });
+
+  // Счётчик глубины считал закрывателем что угодно: '{' +1, ']' -1 — ноль,
+  // «сбалансировано». Нормализация превращает такой огрызок в '{}', схема на нём
+  // падает, и наружу летел SCHEMA_MISMATCH вместо обрыва.
+  it('«{ ]» не считается сбалансированным: закрыватель обязан совпасть по типу', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('{ ]'));
+
+    const error = await expectStructuredError(
+      structured({ schema: priceSchema, messages: MESSAGES, runConfig: runConfig() })
+    );
+
+    expect(error.reason).toBe('TRUNCATED_JSON');
+    expect(error.issues[0].code).toBe('truncated_response');
+  });
+
+  it('преждевременно закрытая структура тоже ловится', async () => {
+    // Массив закрыт фигурной скобкой — счётчик глубины сошёлся бы в ноль.
+    fetchMock.mockResolvedValue(
+      anthropicOk('{"kind":"PRICE","notes":["срочно"}')
+    );
+
+    const error = await expectStructuredError(
+      structured({ schema: priceSchema, messages: MESSAGES, runConfig: runConfig() })
+    );
+
+    expect(error.reason).toBe('TRUNCATED_JSON');
+  });
+
+  // Баланс считается по срезу, который увидит нормализация (всё от первой
+  // '{'/'['), а не по всему сырому тексту: непарная ']' во вступлении
+  // нормализацию не портит и обрывом не является.
+  it('проза с непарной «]» перед JSON разбирается, а не помечается обрывом', async () => {
+    const raw = 'Готово] Вот ответ: ' + JSON.stringify(VALID_PAYLOAD);
+    fetchMock.mockResolvedValue(anthropicOk(raw));
+
+    const result = await structured({
+      schema: priceSchema,
+      messages: MESSAGES,
+      runConfig: runConfig(),
+    });
+
+    expect(result.data).toEqual(VALID_PAYLOAD);
+  });
+
+  it('markdown-забор вокруг целого JSON по-прежнему не считается обрывом', async () => {
+    fetchMock.mockResolvedValue(
+      anthropicOk('```json\n' + JSON.stringify(VALID_PAYLOAD) + '\n```', 'end_turn')
+    );
+
+    const result = await structured({
+      schema: priceSchema,
+      messages: MESSAGES,
+      runConfig: runConfig(),
+    });
+
+    expect(result.data).toEqual(VALID_PAYLOAD);
+  });
+
+  // Провайдер сказал «закончил сам», но текст оборван — доверять слову провайдера
+  // как ОТРИЦАНИЮ обрыва нельзя, поэтому эвристика остаётся включённой.
+  it('эвристика продолжает работать при stop_reason=end_turn', async () => {
+    fetchMock.mockResolvedValue(
+      anthropicOk('{"kind":"PRICE","notes":["срочный тариф', 'end_turn')
+    );
+
+    const error = await expectStructuredError(
+      structured({ schema: priceSchema, messages: MESSAGES, runConfig: runConfig() })
+    );
+
+    expect(error.reason).toBe('TRUNCATED_JSON');
+    expect(error.issues[0].code).toBe('truncated_response');
   });
 });
