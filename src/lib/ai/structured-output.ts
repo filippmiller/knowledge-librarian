@@ -1,0 +1,255 @@
+import type { z } from 'zod';
+import {
+  createChatCompletionDetailed,
+  type ChatCompletionResult,
+  type ChatMessage,
+  type CompletionAttempt,
+  type CompletionRunConfig,
+  type FallbackPolicy,
+  type Provider,
+  type ProviderModelMap,
+} from '@/lib/ai/chat-provider';
+// toCompletionOptions живёт в extraction-run (A2) и остаётся ЕДИНСТВЕННЫМ местом,
+// где конфигурация прогона превращается в маршрутизирующие поля вызова. Собрать
+// их здесь вручную — ровно тот дубль, который A2 и удалял: разойтись primary,
+// retry и structured-вызов смогли бы только через три независимые копии.
+import { toCompletionOptions } from '@/lib/ai/extraction-run';
+
+/**
+ * Фоллбэк для structured-вызовов по умолчанию запрещён.
+ *
+ * Это не осторожность ради осторожности: `requestedFallbackPolicy()` в A1 при
+ * НЕзаданной политике выводит `CROSS_PROVIDER`, и structured-вызов, забывший
+ * задать политику, молча уезжал бы к другому вендору. Для extraction, судьи и
+ * QueryFrame это хуже отказа: их выдачу сравнивают между прогонами, а прогон,
+ * половина которого обслужена другой моделью, несравним ни с чем (A2 честно
+ * пометит его `MIXED`, но потерянного сравнения это не вернёт).
+ *
+ * Прогону, которому резерв действительно нужен, политика задаётся явно — и
+ * `servedByProvider`/`servedByModel` в результате покажут, кто ответил на самом
+ * деле.
+ */
+export const DEFAULT_STRUCTURED_FALLBACK_POLICY: FallbackPolicy = 'NONE';
+
+/**
+ * Конфигурация прогона для structured-вызова.
+ *
+ * Намеренно ШИРЕ, чем `ExtractionRunConfig` из A2, по двум причинам:
+ *
+ * 1. `extractionSchemaVersion` — поле артефакта ИЗВЛЕЧЕНИЯ, а не свойство
+ *    вызова. Требовать его здесь значило бы заставить судью (PR E) и
+ *    QueryFrame-builder (PR D) выдумывать версию схемы извлечения, к которой они
+ *    не имеют отношения, — то есть записывать в артефакт неправду ради типа.
+ *    `ExtractionRunConfig` при этом остаётся присваиваемым сюда структурно:
+ *    extraction-вызовы передают свою конфигурацию как есть.
+ *
+ * 2. `fallbackPolicy` необязателен, чтобы дефолт `NONE` был достижим по типам, а
+ *    не только через каст. Конфигурация, собранная без политики, обязана
+ *    получить `NONE`, а не унаследовать `CROSS_PROVIDER` из A1.
+ */
+export type StructuredRunConfig = Omit<CompletionRunConfig, 'fallbackPolicy'> & {
+  fallbackPolicy?: FallbackPolicy;
+  /**
+   * Модели резервного провайдера. Без них `planFallback()` понижает до `NONE`
+   * любой прогон с закреплённой моделью — а у structured-вызова модель
+   * закреплена всегда (`toCompletionOptions` отдаёт разрезолвленную строку).
+   */
+  providerModels?: ProviderModelMap;
+};
+
+export interface StructuredOptions<T> {
+  /** Тот же Zod, что и в контракте B1: одна валидация, а не «похожая». */
+  schema: z.ZodType<T>;
+  messages: ChatMessage[];
+  runConfig: StructuredRunConfig;
+  /** Переопределяет политику из `runConfig`. Не задано — берётся из неё. */
+  fallbackPolicy?: FallbackPolicy;
+  maxTokens?: number;
+  temperature?: number;
+  /** Внешняя отмена. Прерванная попытка попадает в `attempts[]` как `ABORTED`. */
+  signal?: AbortSignal;
+}
+
+/**
+ * Результат — ПОЛНЫЙ `ChatCompletionResult` плюс разобранные данные. `attempts[]`
+ * доходит до вызывающего целиком: по нему PR E считает `ModelRelationship`, и
+ * адаптер, отдающий только `data`, обнулил бы смысл A1/A2.
+ */
+export type StructuredResult<T> = ChatCompletionResult & { data: T };
+
+/** Одна претензия схемы к ответу модели: путь до поля + причина. */
+export interface StructuredIssue {
+  /** Путь в нотации `facets.scenario.state` / `notes[1]`. */
+  readonly path: string;
+  readonly code: string;
+  readonly message: string;
+}
+
+export type StructuredFailureReason = 'INVALID_JSON' | 'SCHEMA_MISMATCH';
+
+/**
+ * Ответ пришёл, но контракту не соответствует.
+ *
+ * Отдельный класс, а не `ChatCompletionError`: там «не ответил никто», здесь
+ * ответил конкретный провайдер конкретной моделью — и это известно
+ * (`result.servedByProvider`/`servedByModel`). Свалить их в один тип значило бы
+ * потерять единственное различие, ради которого журнал вызовов существует.
+ *
+ * `attempts` — геттер поверх `result.attempts`, а не копия: разойтись они не
+ * могут физически.
+ */
+export class StructuredOutputError extends Error {
+  readonly reason: StructuredFailureReason;
+  readonly issues: readonly StructuredIssue[];
+  /** Полный результат вызова, включая `attempts[]` и фактического исполнителя. */
+  readonly result: ChatCompletionResult;
+
+  constructor(
+    reason: StructuredFailureReason,
+    issues: readonly StructuredIssue[],
+    result: ChatCompletionResult,
+    options?: { cause?: unknown }
+  ) {
+    super(buildMessage(reason, issues, result));
+    this.name = 'StructuredOutputError';
+    this.reason = reason;
+    this.issues = issues;
+    this.result = result;
+    if (options && 'cause' in options) {
+      (this as { cause?: unknown }).cause = options.cause;
+    }
+  }
+
+  get attempts(): CompletionAttempt[] {
+    return this.result.attempts;
+  }
+
+  get servedByProvider(): Provider {
+    return this.result.servedByProvider;
+  }
+
+  get servedByModel(): string {
+    return this.result.servedByModel;
+  }
+}
+
+/** Сколько претензий печатается в сообщении, прежде чем оно станет нечитаемым. */
+const MAX_LISTED_ISSUES = 5;
+
+/**
+ * Путь до поля в человекочитаемой нотации. Пустой путь — претензия к корню
+ * ответа целиком (например, `Unrecognized key` у `strictObject`).
+ */
+function formatIssuePath(path: readonly PropertyKey[]): string {
+  if (path.length === 0) return '<корень ответа>';
+
+  let formatted = '';
+  for (const segment of path) {
+    if (typeof segment === 'number') {
+      formatted += `[${segment}]`;
+    } else if (typeof segment === 'symbol') {
+      formatted += `[${String(segment)}]`;
+    } else {
+      formatted += formatted === '' ? segment : `.${segment}`;
+    }
+  }
+  return formatted;
+}
+
+function buildMessage(
+  reason: StructuredFailureReason,
+  issues: readonly StructuredIssue[],
+  result: ChatCompletionResult
+): string {
+  const served = `${result.servedByProvider}/${result.servedByModel}`;
+
+  if (reason === 'INVALID_JSON') {
+    const cause = issues[0]?.message ?? 'причина не определена';
+    return `structured(): ответ ${served} не разобрался как JSON: ${cause}`;
+  }
+
+  const listed = issues
+    .slice(0, MAX_LISTED_ISSUES)
+    .map((issue) => `${issue.path}: ${issue.message} [${issue.code}]`)
+    .join('; ');
+  const hidden = issues.length - MAX_LISTED_ISSUES;
+  const tail = hidden > 0 ? `; и ещё ${hidden}` : '';
+
+  return `structured(): ответ ${served} не прошёл валидацию схемы (${issues.length} шт.): ${listed}${tail}`;
+}
+
+/**
+ * Чистая половина `structured()`: разбор и валидация уже полученного ответа.
+ *
+ * Вынесена отдельно, потому что это единственный способ проверить ветку
+ * «провайдер отдал неразбираемый JSON» — provider-слой в режиме `json_object`
+ * прогоняет текст через `normalizeJsonResponse()` и в худшем случае отдаёт `{}`,
+ * так что через живой вызов эта ветка недостижима. Реализация ОДНА: `structured()`
+ * вызывает эту же функцию, второй копии проверки не существует.
+ */
+export function validateStructuredPayload<T>(
+  schema: z.ZodType<T>,
+  result: ChatCompletionResult
+): T {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result.text);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new StructuredOutputError(
+      'INVALID_JSON',
+      [{ path: '<корень ответа>', code: 'invalid_json', message }],
+      result,
+      { cause: error }
+    );
+  }
+
+  const validation = schema.safeParse(parsed);
+  if (!validation.success) {
+    // Ни коэрсии, ни частичного приёма: ответ, не соответствующий схеме, — не
+    // «почти успех». Молча принятая половина объекта уехала бы в базу знаний
+    // неотличимой от полной.
+    const issues: StructuredIssue[] = validation.error.issues.map((issue) => ({
+      path: formatIssuePath(issue.path),
+      code: issue.code,
+      message: issue.message,
+    }));
+    throw new StructuredOutputError('SCHEMA_MISMATCH', issues, result);
+  }
+
+  return validation.data;
+}
+
+/**
+ * Вызов модели, ответ которого обязан соответствовать схеме.
+ *
+ * Возвращает `data` ВМЕСТЕ с полным результатом вызова: кто ответил, сработал ли
+ * резерв и все попытки по порядку. Downstream (PR D/E) записывает эти поля в
+ * артефакт прогона — адаптер, отдающий один `data`, заставил бы их пересчитывать
+ * маршрутизацию по env, то есть врать.
+ */
+export async function structured<T>(
+  opts: StructuredOptions<T>
+): Promise<StructuredResult<T>> {
+  const fallbackPolicy =
+    opts.fallbackPolicy ??
+    opts.runConfig.fallbackPolicy ??
+    DEFAULT_STRUCTURED_FALLBACK_POLICY;
+
+  const routing = toCompletionOptions({ ...opts.runConfig, fallbackPolicy });
+
+  const result = await createChatCompletionDetailed({
+    ...routing,
+    messages: opts.messages,
+    // JSON-режим обоих провайдеров + нормализация ответа — из provider-слоя, а не
+    // своя. Побочный эффект осознан: `result.text` здесь уже нормализованный, и
+    // ответ прозой доезжает до схемы как `{}` (претензии будут про отсутствующие
+    // поля, а не про «это не JSON»).
+    responseFormat: 'json_object',
+    ...(opts.maxTokens !== undefined && { maxTokens: opts.maxTokens }),
+    ...(opts.temperature !== undefined && { temperature: opts.temperature }),
+    ...(opts.signal && { signal: opts.signal }),
+  });
+
+  return { ...result, data: validateStructuredPayload(opts.schema, result) };
+}
