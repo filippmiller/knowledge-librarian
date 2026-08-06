@@ -15,3 +15,4 @@ export * from './kinds';
 export * from './trigger-facts';
 export * from './profile';
 export * from './query-frame';
+export * from './query-frame-builder';
