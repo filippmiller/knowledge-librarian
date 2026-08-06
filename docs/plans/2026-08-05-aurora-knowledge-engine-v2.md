@@ -21,8 +21,8 @@
 2. Практика Орёл/FPM не удаляется, правится её scope.
 3. Никакого `prisma db push` на прод — только `migrate deploy`.
 4. 1967 Rule / 775 QAPair не переносятся 1:1 — используются как checklist.
-5. `scopeStatus=UNCLASSIFIED` никогда не в автоответе клиенту.
-6. **(новый, из ревью)** Пустой массив в `ApplicabilityProfile` (`serviceCodes: []` и т.п.) означает «неизвестно», НЕ «любое значение». Wildcard — только явный `scopeStatus=GLOBAL` с подтверждённым `reviewedBy`.
+5. `reviewStatus=UNCLASSIFIED` никогда не в автоответе клиенту. *(Формулировка уточнена в PR A4: раньше здесь стояло `scopeStatus=UNCLASSIFIED` — одно поле для двух разных вопросов. Truth table §5 развела их: `reviewStatus` — статус ревью unit'а целиком, `scopeStatus[dimension]` — подтверждённая универсальность конкретной оси. Гейт клиентского автоответа проверяет именно `reviewStatus`.)*
+6. **(новый, из ревью)** Пустой массив в `ApplicabilityProfile` (`serviceCodes: []` и т.п.) означает «неизвестно», НЕ «любое значение». Wildcard — только явный `scopeStatus[dimension]=GLOBAL` при `reviewStatus=REVIEWED` — что по инварианту truth table §5.1 означает заполненные `reviewedBy` И `reviewedAt`. *(В PR A4 уточнено: раньше здесь требовался только `reviewedBy`.)*
 7. **(новый)** Ни один PR, трогающий `enhanced-answering-engine.ts`/`vector-search.ts`/`chat-provider.ts` (hot path v1), не мержится без прогона на EvalCase-корпусе (Задача 0.2) и без feature-флага, позволяющего откатить именно эту правку независимо от остальных.
 
 ---
