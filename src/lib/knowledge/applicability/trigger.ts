@@ -139,6 +139,23 @@ export function evaluateTrigger(
   const missingFacts: TriggerFactKey[] = [];
   const reasons: TriggerReasonCode[] = [];
 
+  // Пустая конъюнкция истинна вакуумно — и это ровно тот способ, которым
+  // сломанные данные молча активируют исключение ВСЕГДА. Схема такое условие
+  // отвергает, но функция экспортируется и типом пустой массив разрешён,
+  // поэтому проверка дублируется здесь: fail-closed в UNKNOWN (исключение не
+  // активируется, кандидат удерживается), а не ACTIVE.
+  if (triggerCondition.all.length === 0) {
+    return {
+      verdict: 'UNKNOWN',
+      clauseVerdicts: [],
+      satisfiedFacts: [],
+      violatedFacts: [],
+      missingFacts: [],
+      requiresClarification: false,
+      reasons: ['trigger_condition_empty'],
+    };
+  }
+
   for (const clause of triggerCondition.all) {
     const factState = query.triggerFacts[clause.fact];
 

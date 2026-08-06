@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { facetMapSchema, type FacetMap } from '../facets';
 import { applicabilityProfileSchema } from '../profile';
 import { queryFrameSchema } from '../query-frame';
-import { evaluateScope, type ScopeVerdict } from '../scope';
+import { ASKABLE_SCOPE_SITUATIONS, evaluateScope, type ScopeVerdict } from '../scope';
+import type { ScopeSituation } from '../reasons';
 import { buildProfile, buildQuery, global, known, scoped, unknown } from './helpers';
 
 /**
@@ -29,7 +30,7 @@ describe('§3.1 scenario — матрица (профиль × запрос)', (
     profileScenario: FacetMap['scenario'];
     queryScenario: ReturnType<typeof known<string>> | ReturnType<typeof unknown<string>>;
     expected: ScopeVerdict;
-    expectedReason: string;
+    expectedSituation: ScopeSituation;
   }> = [
     // Строка 1: профиль = S или предок S.
     {
@@ -38,7 +39,7 @@ describe('§3.1 scenario — матрица (профиль × запрос)', (
       profileScenario: scoped([S]),
       queryScenario: known([S]),
       expected: 'MATCH',
-      expectedReason: 'scenario_match_exact',
+      expectedSituation: 'match_exact',
     },
     {
       row: 'профиль = предок S',
@@ -46,7 +47,7 @@ describe('§3.1 scenario — матрица (профиль × запрос)', (
       profileScenario: scoped([S_ROOT]),
       queryScenario: known([S_LEAF]),
       expected: 'MATCH',
-      expectedReason: 'scenario_match_exact',
+      expectedSituation: 'match_exact',
     },
     {
       row: 'профиль = S',
@@ -54,7 +55,7 @@ describe('§3.1 scenario — матрица (профиль × запрос)', (
       profileScenario: scoped([S]),
       queryScenario: known([S_OTHER]),
       expected: 'CONFLICT',
-      expectedReason: 'scenario_conflict_value',
+      expectedSituation: 'conflict_value',
     },
     {
       row: 'профиль = S',
@@ -62,7 +63,7 @@ describe('§3.1 scenario — матрица (профиль × запрос)', (
       profileScenario: scoped([S]),
       queryScenario: unknown(),
       expected: 'UNKNOWN',
-      expectedReason: 'scenario_unknown_query_signal',
+      expectedSituation: 'unknown_query_signal',
     },
     // Строка 2: профиль — потомок S. Специфичность должна быть ПОДТВЕРЖДЕНА
     // запросом, а не предположена, поэтому UNKNOWN, а не MATCH.
@@ -72,7 +73,7 @@ describe('§3.1 scenario — матрица (профиль × запрос)', (
       profileScenario: scoped([S_LEAF]),
       queryScenario: known([S]),
       expected: 'UNKNOWN',
-      expectedReason: 'scenario_unknown_profile_more_specific',
+      expectedSituation: 'unknown_profile_more_specific',
     },
     {
       row: 'профиль = потомок S',
@@ -80,7 +81,7 @@ describe('§3.1 scenario — матрица (профиль × запрос)', (
       profileScenario: scoped([S_LEAF]),
       queryScenario: known([S_OTHER]),
       expected: 'CONFLICT',
-      expectedReason: 'scenario_conflict_value',
+      expectedSituation: 'conflict_value',
     },
     {
       row: 'профиль = потомок S',
@@ -88,7 +89,7 @@ describe('§3.1 scenario — матрица (профиль × запрос)', (
       profileScenario: scoped([S_LEAF]),
       queryScenario: unknown(),
       expected: 'UNKNOWN',
-      expectedReason: 'scenario_unknown_query_signal',
+      expectedSituation: 'unknown_query_signal',
     },
     // Строка 3: профиль — другая ветка.
     {
@@ -97,7 +98,7 @@ describe('§3.1 scenario — матрица (профиль × запрос)', (
       profileScenario: scoped([S_OTHER]),
       queryScenario: known([S_LEAF]),
       expected: 'CONFLICT',
-      expectedReason: 'scenario_conflict_value',
+      expectedSituation: 'conflict_value',
     },
     {
       row: 'профиль — другая ветка',
@@ -105,7 +106,7 @@ describe('§3.1 scenario — матрица (профиль × запрос)', (
       profileScenario: scoped(['apostille.zags.lo']),
       queryScenario: known([S_OTHER]),
       expected: 'CONFLICT',
-      expectedReason: 'scenario_conflict_value',
+      expectedSituation: 'conflict_value',
     },
     {
       row: 'профиль — другая ветка',
@@ -113,7 +114,7 @@ describe('§3.1 scenario — матрица (профиль × запрос)', (
       profileScenario: scoped([S_OTHER]),
       queryScenario: unknown(),
       expected: 'UNKNOWN',
-      expectedReason: 'scenario_unknown_query_signal',
+      expectedSituation: 'unknown_query_signal',
     },
     // Строка 4: профиль не заполнен — UNKNOWN во ВСЕХ колонках.
     {
@@ -122,7 +123,7 @@ describe('§3.1 scenario — матрица (профиль × запрос)', (
       profileScenario: { state: 'UNKNOWN' },
       queryScenario: known([S]),
       expected: 'UNKNOWN',
-      expectedReason: 'scenario_unknown_profile_scope',
+      expectedSituation: 'unknown_profile_scope',
     },
     {
       row: 'профиль не заполнен',
@@ -130,7 +131,7 @@ describe('§3.1 scenario — матрица (профиль × запрос)', (
       profileScenario: { state: 'UNKNOWN' },
       queryScenario: known([S_OTHER]),
       expected: 'UNKNOWN',
-      expectedReason: 'scenario_unknown_profile_scope',
+      expectedSituation: 'unknown_profile_scope',
     },
     {
       row: 'профиль не заполнен',
@@ -138,7 +139,7 @@ describe('§3.1 scenario — матрица (профиль × запрос)', (
       profileScenario: { state: 'UNKNOWN' },
       queryScenario: unknown(),
       expected: 'UNKNOWN',
-      expectedReason: 'scenario_unknown_profile_scope',
+      expectedSituation: 'unknown_profile_scope',
     },
     // Строка 5: GLOBAL — MATCH во всех колонках, включая нераспознанную.
     {
@@ -147,7 +148,7 @@ describe('§3.1 scenario — матрица (профиль × запрос)', (
       profileScenario: global(),
       queryScenario: known([S]),
       expected: 'MATCH',
-      expectedReason: 'scenario_match_global',
+      expectedSituation: 'match_global',
     },
     {
       row: 'scopeStatus(scenario)=GLOBAL',
@@ -155,7 +156,7 @@ describe('§3.1 scenario — матрица (профиль × запрос)', (
       profileScenario: global(),
       queryScenario: known([S_OTHER]),
       expected: 'MATCH',
-      expectedReason: 'scenario_match_global',
+      expectedSituation: 'match_global',
     },
     {
       row: 'scopeStatus(scenario)=GLOBAL',
@@ -163,19 +164,20 @@ describe('§3.1 scenario — матрица (профиль × запрос)', (
       profileScenario: global(),
       queryScenario: unknown(),
       expected: 'MATCH',
-      expectedReason: 'scenario_match_global',
+      expectedSituation: 'match_global',
     },
   ];
 
-  it.each(cases)('[$row] × [$column] → $expected', ({ profileScenario, queryScenario, expected, expectedReason }) => {
+  it.each(cases)('[$row] × [$column] → $expected', ({ profileScenario, queryScenario, expected, expectedSituation }) => {
     const profile = buildProfile('PROCEDURE_STEP', { scenario: profileScenario });
     const query = buildQuery({ facets: { scenario: queryScenario } });
 
     const decision = evaluateScope(profile, query);
+    const expectedReason = `scenario_${expectedSituation}`;
 
     expect(decision.verdict).toBe(expected);
     expect(decision.facetVerdicts).toEqual([
-      { facet: 'scenario', verdict: expected, reason: expectedReason },
+      { facet: 'scenario', verdict: expected, situation: expectedSituation, reason: expectedReason },
     ]);
     // Ни одно решение не является голым вердиктом.
     expect(decision.reasons).toContain(expectedReason);
@@ -228,6 +230,46 @@ describe('§3.1 scenario — матрица (профиль × запрос)', (
 
     expect(decision.verdict).toBe('CONFLICT');
     expect(decision.reasons).toContain('scenario_conflict_excluded_by_query');
+  });
+
+  it('исключение профиля ВНУТРИ запрошенной ветки → UNKNOWN, а не MATCH', () => {
+    // Находка кросс-ревью. «Весь апостиль, кроме СПб» при вопросе про всю ветку
+    // ЗАГС раньше давал уверенный MATCH: исключение не срабатывало, потому что
+    // запрос грубее исключённого узла. Правило применимо к части ветки и
+    // неприменимо к другой её части — специфичность обязан подтвердить запрос.
+    const decision = evaluateScope(
+      buildProfile('PROCEDURE_STEP', { scenario: scoped([S_ROOT], [S_LEAF]) }),
+      buildQuery({ facets: { scenario: known([S]) } })
+    );
+
+    expect(decision.verdict).toBe('UNKNOWN');
+    expect(decision.reasons).toContain('scenario_unknown_profile_more_specific');
+  });
+
+  it('вердикт не зависит от глубины профиля на противоречивом фрейме', () => {
+    // Находка кросс-ревью. Схема B1 ловит только ТОЧНОЕ пересечение
+    // include/exclude, иерархическое — нет, поэтому фрейм «вопрос про
+    // apostille.zags.spb, но не про apostille.zags» валиден. Раньше широкий
+    // профиль получал MATCH через отравленное значение, а узкий — CONFLICT.
+    const contradictory = buildQuery({ facets: { scenario: known([S_LEAF], [S]) } });
+    expect(queryFrameSchema.safeParse(contradictory).success).toBe(true);
+
+    const broad = evaluateScope(
+      buildProfile('PROCEDURE_STEP', { scenario: scoped([S_ROOT]) }),
+      contradictory
+    );
+    const leaf = evaluateScope(
+      buildProfile('PROCEDURE_STEP', { scenario: scoped([S_LEAF]) }),
+      contradictory
+    );
+
+    // Отравленное значение больше не подтверждает ничего.
+    expect(broad.verdict).toBe('UNKNOWN');
+    expect(broad.reasons).toContain('scenario_unknown_query_signal');
+    // Узкий профиль целиком лежит внутри отвергнутой ветки — это достоверный
+    // отказ, а не пробел, и разница здесь принципиальная, а не от глубины.
+    expect(leaf.verdict).toBe('CONFLICT');
+    expect(leaf.reasons).toContain('scenario_conflict_excluded_by_query');
   });
 
   it('известно только, чем вопрос НЕ является → UNKNOWN, а не MATCH', () => {
@@ -299,7 +341,7 @@ describe('§3.3 geography — deliveryCity у DELIVERY_RULE', () => {
     const decision = evaluateScope(deliveryProfile(profileCity), queryWithCity(queryCity));
 
     const cityVerdict = decision.facetVerdicts.find((entry) => entry.facet === 'deliveryCity');
-    expect(cityVerdict).toEqual({ facet: 'deliveryCity', verdict: expected, reason: expectedReason });
+    expect(cityVerdict).toMatchObject({ facet: 'deliveryCity', verdict: expected, reason: expectedReason });
     expect(decision.verdict).toBe(expected);
   });
 
@@ -361,7 +403,7 @@ describe('§3.4 service — у PRICE_RULE', () => {
   it.each(cases)('$condition → $expected', ({ profileService, queryService, expected, expectedReason }) => {
     const decision = evaluateScope(priceProfile(profileService), queryWithService(queryService));
 
-    expect(decision.facetVerdicts.find((entry) => entry.facet === 'service')).toEqual({
+    expect(decision.facetVerdicts.find((entry) => entry.facet === 'service')).toMatchObject({
       facet: 'service',
       verdict: expected,
       reason: expectedReason,
@@ -550,6 +592,21 @@ describe('решение объясняет себя', () => {
       expect(entry.reason.startsWith(`${entry.facet}_`)).toBe(true);
       expect(decision.reasons).toContain(entry.reason);
     }
+  });
+
+  it('вердикт несёт ситуацию отдельным полем — потребителю не надо парсить строку кода', () => {
+    const decision = evaluateScope(
+      buildProfile('DELIVERY_RULE', { scenario: scoped([S_ROOT]), deliveryCity: scoped(['spb']) }),
+      buildQuery({ facets: { scenario: known([S_ROOT]) } })
+    );
+
+    for (const entry of decision.facetVerdicts) {
+      expect(entry.reason).toBe(`${entry.facet}_${entry.situation}`);
+    }
+    // Askable и неaskable UNKNOWN различимы без разбора строки — на этом
+    // держится выбор между «спросить» и «отдать человеку» в resolveKnowledgeSet.
+    expect(ASKABLE_SCOPE_SITUATIONS).toContain('unknown_query_signal');
+    expect(ASKABLE_SCOPE_SITUATIONS).not.toContain('unknown_profile_scope');
   });
 
   it('reasons никогда не пуст там, где есть применимые оси', () => {

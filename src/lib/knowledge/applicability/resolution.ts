@@ -3,7 +3,7 @@ import type { FacetKey } from './facets';
 import type { KnowledgeUnitKind } from './kinds';
 import type { QueryFrame } from './query-frame';
 import type { ResolutionReasonCode } from './reasons';
-import type { ScopeDecision } from './scope';
+import { ASKABLE_SCOPE_SITUATIONS, type ScopeDecision } from './scope';
 import type { TriggerDecision } from './trigger';
 import type { TriggerFactKey } from './trigger-facts';
 
@@ -293,11 +293,47 @@ export function resolveKnowledgeSet(
   for (const held of undetermined) {
     const candidate = byId.get(held.unitId);
     if (candidate === undefined || !isDecisive(candidate)) continue;
+
+    let askedAboutSomething = false;
+
     if (held.reason === 'scope_unknown_held') {
-      clarificationFacets.push(...candidate.scope.missingFacets);
+      // Спрашиваем по ПРИЧИНЕ неизвестности, а не по `missingFacets`: последнее
+      // считается по состоянию `UNKNOWN` в запросе и не покрывает ни строку
+      // «профиль специфичнее вопроса», ни запрос, у которого есть только
+      // `exclude`. Обе эти неизвестности снимаются вопросом, и молча
+      // проглотить их значило бы ответить уверенно там, где спросить можно.
+      for (const facetVerdict of candidate.scope.facetVerdicts) {
+        if (facetVerdict.verdict !== 'UNKNOWN') continue;
+        if (ASKABLE_SCOPE_SITUATIONS.includes(facetVerdict.situation)) {
+          clarificationFacets.push(facetVerdict.facet);
+          askedAboutSomething = true;
+        }
+      }
     }
+
     if (held.reason === 'exception_trigger_unknown' && candidate.trigger !== null) {
       clarificationTriggerFacts.push(...candidate.trigger.missingFacts);
+      if (candidate.trigger.missingFacts.length > 0) askedAboutSomething = true;
+    }
+
+    if (!askedAboutSomething) {
+      // Неизвестность решающая, но снять её вопросом нельзя: знание не
+      // размечено, ключа нет вопреки реестру или условие исключения пусто.
+      // Ответить, сделав вид, что кандидата нет, — недопустимо.
+      requiresHumanReview = true;
+      addReason('knowledge_gap_requires_human_review');
+    }
+  }
+
+  // Исключение выбрано, а правило, которое оно переопределяет, осталось
+  // неопределённым: применить поправку к правилу неизвестной применимости
+  // нельзя, а ответить одной поправкой — тем более.
+  for (const unitId of selectedIds) {
+    const candidate = byId.get(unitId);
+    if (candidate?.kind !== 'EXCEPTION_RULE' || candidate.parentRuleRef === null) continue;
+    if (undeterminedIds.includes(candidate.parentRuleRef)) {
+      requiresHumanReview = true;
+      addReason('exception_parent_undetermined');
     }
   }
 

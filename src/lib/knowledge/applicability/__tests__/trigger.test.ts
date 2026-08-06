@@ -295,6 +295,21 @@ describe('контракт TriggerCondition', () => {
     expect(triggerConditionSchema.safeParse({ all: [] }).success).toBe(false);
   });
 
+  it('пустое условие не активируется даже в обход схемы — вакуумная истина закрыта явно', () => {
+    // Находка кросс-ревью: конъюнкция пустого списка истинна вакуумно, и
+    // evaluateTrigger возвращал ACTIVE. Схема — не единственная линия обороны:
+    // функция экспортируется, а тип `readonly TriggerClause[]` пустой массив
+    // разрешает. Fail-closed в UNKNOWN, чтобы исключение удерживалось.
+    const decision = evaluateTrigger({ all: [] }, buildQuery());
+
+    expect(decision.verdict).toBe('UNKNOWN');
+    expect(decision.verdict).not.toBe('ACTIVE');
+    expect(decision.reasons).toEqual(['trigger_condition_empty']);
+    // Спрашивать нечего: пробел в данных, а не в вопросе.
+    expect(decision.missingFacts).toEqual([]);
+    expect(decision.requiresClarification).toBe(false);
+  });
+
   it('дубль факта запрещён — это либо копия, либо противоречие', () => {
     expect(
       triggerConditionSchema.safeParse({

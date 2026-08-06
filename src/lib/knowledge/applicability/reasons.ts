@@ -78,7 +78,16 @@ export const SCOPE_REASON_CODES: readonly ScopeReasonCode[] = Object.freeze(
 export const TRIGGER_SITUATIONS = ['satisfied', 'violated', 'unknown'] as const;
 export type TriggerSituation = (typeof TRIGGER_SITUATIONS)[number];
 
-export type TriggerReasonCode = `${TriggerFactKey}_${TriggerSituation}`;
+/**
+ * Условие без единого пункта. Не привязано ни к какому факту, поэтому стоит
+ * рядом с пофактовыми кодами, а не выводится из реестра: пустая конъюнкция
+ * истинна вакуумно, и без явного кода исключение активировалось бы ВСЕГДА.
+ */
+export type TriggerStructuralReasonCode = 'trigger_condition_empty';
+
+export type TriggerReasonCode =
+  | `${TriggerFactKey}_${TriggerSituation}`
+  | TriggerStructuralReasonCode;
 
 export function triggerReason(
   fact: TriggerFactKey,
@@ -87,11 +96,12 @@ export function triggerReason(
   return `${fact}_${situation}`;
 }
 
-export const TRIGGER_REASON_CODES: readonly TriggerReasonCode[] = Object.freeze(
-  TRIGGER_FACT_KEYS.flatMap((fact) =>
+export const TRIGGER_REASON_CODES: readonly TriggerReasonCode[] = Object.freeze([
+  ...TRIGGER_FACT_KEYS.flatMap((fact) =>
     TRIGGER_SITUATIONS.map((situation) => triggerReason(fact, situation))
-  )
-);
+  ),
+  'trigger_condition_empty' as const,
+]);
 
 /**
  * Причины решения о годности unit'а. Список закрытый и перечислен руками:
@@ -169,6 +179,19 @@ export const RESOLUTION_REASON_CODES = [
   'clarification_required_missing_facet',
   /** Не хватает триггер-факта, и именно он решает между правилом и исключением. */
   'clarification_required_missing_trigger_fact',
+  /**
+   * Решающая неизвестность, которую НЕЛЬЗЯ снять вопросом к пользователю:
+   * знание не размечено, ключа нет вопреки реестру, условие исключения пусто.
+   * Уточнять нечего — правит человек в базе, поэтому HOLD, а не CLARIFY и
+   * тем более не уверенный ответ.
+   */
+  'knowledge_gap_requires_human_review',
+  /**
+   * Исключение выбрано, а правило, которое оно переопределяет, осталось
+   * неопределённым. Ответить одним исключением значило бы применить поправку
+   * к правилу, применимость которого неизвестна.
+   */
+  'exception_parent_undetermined',
   /** Построитель фрейма (PR D) уже пометил вопрос неоднозначным — не игнорировать. */
   'clarification_required_query_ambiguity',
   /** Выбранный кандидат сам по себе требует человека (см. `EligibilityDecision`). */

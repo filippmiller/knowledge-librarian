@@ -521,6 +521,90 @@ describe('жёсткая фильтрация не убивает recall', () =>
     expect(decision.excluded).toEqual([]);
   });
 
+  it('единственный кандидат-потомок → CLARIFY «какая именно процедура», а не немой HOLD', () => {
+    // Находка кросс-ревью. Раньше `missingFacets` был пуст (в запросе сценарий
+    // ЕСТЬ, просто он грубее профиля), поэтому уточнять было «нечем», и
+    // система молчала, хотя вопрос «какая именно?» очевиден.
+    const leaf = candidate({
+      unitId: 'leaf',
+      scope: evaluateScope(
+        buildProfile('PROCEDURE_STEP', { scenario: scoped(['apostille.zags.spb']) }),
+        buildQuery({ facets: { scenario: known(['apostille']) } })
+      ),
+    });
+
+    const decision = resolveKnowledgeSet([leaf], buildQuery({ facets: { scenario: known(['apostille']) } }));
+
+    expect(decision.disposition).toBe('CLARIFY');
+    expect(decision.clarificationNeeds.facets).toEqual(['scenario']);
+    expect(decision.undetermined).toHaveLength(1);
+  });
+
+  it('запрос только с отрицанием → CLARIFY, а не немой HOLD', () => {
+    const query = buildQuery({ facets: { scenario: known([], ['apostille.min_justice']) } });
+    const held = candidate({
+      unitId: 'x',
+      scope: evaluateScope(
+        buildProfile('PROCEDURE_STEP', { scenario: scoped(['apostille.zags']) }),
+        query
+      ),
+    });
+
+    const decision = resolveKnowledgeSet([held], query);
+
+    expect(decision.disposition).toBe('CLARIFY');
+    expect(decision.clarificationNeeds.facets).toEqual(['scenario']);
+  });
+
+  it('неизвестность, которую нельзя снять вопросом, уходит человеку, а не в уверенный ответ', () => {
+    // Профиль не размечен — спрашивать пользователя бессмысленно, правит
+    // человек в базе. HOLD с отдельным кодом, не CLARIFY и не ANSWER.
+    const unmarked = candidate({
+      unitId: 'unmarked',
+      scope: evaluateScope(buildProfile('PROCEDURE_STEP', { scenario: { state: 'UNKNOWN' } }), QUERY),
+    });
+
+    const decision = resolveKnowledgeSet([unmarked], QUERY);
+
+    expect(decision.disposition).toBe('HOLD');
+    expect(decision.requiresHumanReview).toBe(true);
+    expect(decision.reasons).toContain('knowledge_gap_requires_human_review');
+    expect(decision.clarificationNeeds.facets).toEqual([]);
+    expect(decision.undetermined).toHaveLength(1);
+  });
+
+  it('исключение не отвечает в одиночку, пока его родитель не определён', () => {
+    // Находка кросс-ревью (P0). Исключение прошло §3 и активировалось, а
+    // правило, которое оно ПЕРЕОПРЕДЕЛЯЕТ, осталось неопределённым — раньше
+    // это давало ANSWER одним исключением, то есть поправку без правила.
+    const decision = resolveKnowledgeSet(
+      [
+        candidate({
+          unitId: 'rule-1',
+          scope: evaluateScope(
+            buildProfile('PROCEDURE_STEP', { scenario: { state: 'UNKNOWN' } }),
+            QUERY
+          ),
+        }),
+        candidate({
+          unitId: 'rule-5',
+          kind: 'EXCEPTION_RULE',
+          scope: scopeOf('EXCEPTION_RULE'),
+          trigger: triggerIn('PUBLIC'),
+          parentRuleRef: 'rule-1',
+        }),
+      ],
+      QUERY
+    );
+
+    expect(decision.disposition).not.toBe('ANSWER');
+    expect(decision.disposition).toBe('HOLD');
+    expect(decision.requiresHumanReview).toBe(true);
+    expect(decision.reasons).toContain('exception_parent_undetermined');
+    // Родитель по-прежнему виден, а не выброшен.
+    expect(decision.undetermined).toEqual([{ unitId: 'rule-1', reason: 'scope_unknown_held' }]);
+  });
+
   it('пустой вход — HOLD с явной причиной, а не тихий «ответ ни на чём»', () => {
     const decision = resolveKnowledgeSet([], QUERY);
 

@@ -21,6 +21,15 @@ export type ScopeVerdict = 'MATCH' | 'CONFLICT' | 'UNKNOWN';
 export interface FacetScopeVerdict {
   readonly facet: FacetKey;
   readonly verdict: ScopeVerdict;
+  /**
+   * ПОЧЕМУ получился этот вердикт, отдельным полем, а не только внутри
+   * `reason`. Разные UNKNOWN лечатся по-разному: «вопрос не сказал» и «профиль
+   * специфичнее вопроса» можно СПРОСИТЬ у пользователя, а «знание не
+   * размечено» спрашивать бессмысленно — это правит человек в базе.
+   * `resolveKnowledgeSet` обязан их различать, и разбирать для этого строку
+   * кода причины значило бы завести парсер там, где достаточно поля.
+   */
+  readonly situation: ScopeSituation;
   readonly reason: ScopeReasonCode;
 }
 
@@ -108,6 +117,20 @@ function bestOutcome(outcomes: readonly PairOutcome[]): PairOutcome {
   );
 }
 
+/**
+ * Какие UNKNOWN можно СПРОСИТЬ у пользователя, а какие нет.
+ *
+ * «Вопрос не назвал город» и «профиль специфичнее вопроса» снимаются
+ * уточняющим вопросом. «Знание не размечено» и «ключа нет вопреки реестру» —
+ * дефекты базы: спрашивать про них пользователя бессмысленно, их правит
+ * человек. `resolveKnowledgeSet` разводит эти два пути, иначе решающая
+ * неизвестность второго рода молча превратилась бы в уверенный ответ.
+ */
+export const ASKABLE_SCOPE_SITUATIONS: readonly ScopeSituation[] = Object.freeze([
+  'unknown_query_signal',
+  'unknown_profile_more_specific',
+]);
+
 const SITUATION_VERDICT: Record<ScopeSituation, ScopeVerdict> = {
   match_exact: 'MATCH',
   match_global: 'MATCH',
@@ -155,7 +178,17 @@ function evaluateFacet(
     return 'conflict_excluded_by_query';
   }
 
-  if (queryState.include.length === 0) {
+  // Значение `include`, накрытое собственным `exclude` запроса, противоречит
+  // само себе: фрейм одновременно говорит «вопрос про apostille.zags.spb» и
+  // «вопрос не про ветку apostille.zags». Схема B1 ловит только ТОЧНОЕ
+  // пересечение множеств, иерархическое — нет. Довериться таким значением
+  // нельзя: широкий профиль получил бы MATCH, а узкий на том же фрейме —
+  // CONFLICT, то есть вердикт зависел бы от глубины профиля, а не от вопроса.
+  const usableInclude = queryState.include.filter(
+    (value) => !queryState.exclude.some((excluded) => facetCovers(facet, excluded, value))
+  );
+
+  if (usableInclude.length === 0) {
     // Известно только, чем вопрос НЕ является. Этого хватает, чтобы отвергнуть
     // (случай выше), но не хватает, чтобы подтвердить.
     return 'unknown_query_signal';
@@ -164,15 +197,32 @@ function evaluateFacet(
   const outcomes: PairOutcome[] = [];
   let excludedByProfile = false;
 
-  for (const queryValue of queryState.include) {
+  for (const queryValue of usableInclude) {
     if (profileExclude.some((excluded) => facetCovers(facet, excluded, queryValue))) {
       excludedByProfile = true;
       outcomes.push('conflict_value');
       continue;
     }
-    outcomes.push(
-      bestOutcome(profileInclude.map((profileValue) => comparePair(facet, profileValue, queryValue)))
+
+    const best = bestOutcome(
+      profileInclude.map((profileValue) => comparePair(facet, profileValue, queryValue))
     );
+
+    // Исключение профиля лежит ВНУТРИ запрошенной ветки: правило действует на
+    // части ветки и не действует на другой её части («весь апостиль, кроме
+    // СПб» при вопросе про всю ветку ЗАГС). Объявить MATCH значило бы
+    // распространить правило и на явно исключённый участок; специфичность
+    // обязан подтвердить запрос — та же логика, что в строке «профиль =
+    // потомок S» §3.1, и тот же askable UNKNOWN.
+    if (
+      best === 'match_exact' &&
+      profileExclude.some((excluded) => facetCovers(facet, queryValue, excluded))
+    ) {
+      outcomes.push('unknown_profile_more_specific');
+      continue;
+    }
+
+    outcomes.push(best);
   }
 
   const best = bestOutcome(outcomes);
@@ -210,7 +260,7 @@ export function evaluateScope(profile: ApplicabilityProfile, query: QueryFrame):
     const verdict = SITUATION_VERDICT[situation];
     const reason = scopeReason(facet, situation);
 
-    facetVerdicts.push({ facet, verdict, reason });
+    facetVerdicts.push({ facet, verdict, situation, reason });
     reasons.push(reason);
     if (verdict === 'CONFLICT') conflictingFacets.push(facet);
     if (verdict === 'UNKNOWN') unknownFacets.push(facet);
