@@ -19,6 +19,7 @@ import { expandAbbreviations, selectKeyTerms } from '@/lib/knowledge/glossary';
 import { polishCanonicalAnswer } from '@/lib/ai/canonical-answer-polisher';
 import { type QAPair } from '@prisma/client';
 import { verifyAnswer, type ConsistencyReport } from '@/lib/ai/consistency-gate';
+import { recordHallucinationLog, type TelemetryMode } from '@/lib/ai/answer-telemetry';
 import { checkClaimGrounding } from '@/lib/ai/claim-grounding';
 import {
   detectIssuingRegion,
@@ -836,6 +837,13 @@ export interface AnswerRequest {
   audience: Audience;
   sessionId?: string;
   includeDebug?: boolean;
+  /**
+   * 'disabled' глушит fire-and-forget телеметрию качества ответа
+   * (`HallucinationLog`). Только для прогонов золотого корпуса: они бьют по
+   * продовой базе и не должны подмешивать синтетику в статистику по реальным
+   * пользователям. Не задан = 'enabled' = сегодняшнее поведение.
+   */
+  telemetryMode?: TelemetryMode;
 }
 
 /**
@@ -844,7 +852,7 @@ export interface AnswerRequest {
 export async function answerQuestionEnhanced(
   req: AnswerRequest
 ): Promise<EnhancedAnswerResult> {
-  const { question, audience, sessionId, includeDebug = false } = req;
+  const { question, audience, sessionId, includeDebug = false, telemetryMode } = req;
   console.log(
     `[enhanced-answering] Starting for question (audience=${audience}):`,
     question.substring(0, 100)
@@ -1498,18 +1506,19 @@ ${fixList}
         }
 
         // Persist telemetry — fire-and-forget, never block the response.
-        prisma.hallucinationLog.create({
-          data: {
-            sessionId: sessionId ?? null,
-            question,
-            scenarioKey: scenarioKeyForAnswer ?? null,
-            initialAnswer: initialAnswerForLog,
-            regeneratedAnswer: regenerated ? answer : null,
-            unsupportedClaims: detectedUnsupported as unknown as object,
-            unsupportedCount: detectedUnsupported.length,
-            regenerated,
-          },
-        }).catch((e) => console.warn('[enhanced-answering] HallucinationLog write failed:', e));
+        // Молчит только при telemetryMode==='disabled' (прогон золотого
+        // корпуса); для реального пользователя режим не задаётся и запись идёт
+        // как прежде.
+        recordHallucinationLog(telemetryMode, {
+          sessionId: sessionId ?? null,
+          question,
+          scenarioKey: scenarioKeyForAnswer ?? null,
+          initialAnswer: initialAnswerForLog,
+          regeneratedAnswer: regenerated ? answer : null,
+          unsupportedClaims: detectedUnsupported as unknown as object,
+          unsupportedCount: detectedUnsupported.length,
+          regenerated,
+        });
       }
     } catch (e) {
       console.warn('[enhanced-answering] Consistency gate failed; requiring human review:', e);
