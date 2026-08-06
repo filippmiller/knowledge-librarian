@@ -147,18 +147,20 @@ export const applicabilityProfileSchema = applicabilityProfileBaseSchema.superRe
         });
       }
     } else {
+      // Статус подставляется, а не зашит строкой: если в реестре статусов
+      // когда-нибудь появится третий, сообщение не начнёт врать.
       if (profile.reviewedBy !== null) {
         ctx.addIssue({
           code: 'custom',
           path: ['reviewedBy'],
-          message: "reviewedBy при reviewStatus='UNCLASSIFIED' — след ревью без статуса ревью",
+          message: `reviewedBy при reviewStatus='${profile.reviewStatus}' — след ревью без статуса ревью`,
         });
       }
       if (profile.reviewedAt !== null) {
         ctx.addIssue({
           code: 'custom',
           path: ['reviewedAt'],
-          message: "reviewedAt при reviewStatus='UNCLASSIFIED' — время ревью без статуса ревью",
+          message: `reviewedAt при reviewStatus='${profile.reviewStatus}' — время ревью без статуса ревью`,
         });
       }
     }

@@ -112,9 +112,26 @@ describe('reviewStatus × reviewedBy × reviewedAt — truth table §5.1', () =>
     expect(reviewed(1786000000000)).toBe(false);
   });
 
-  it('пустой reviewedBy не считается подтверждением', () => {
-    expect(isValid(profile({ reviewStatus: 'REVIEWED', reviewedBy: '', reviewedAt: REVIEWED_AT })))
-      .toBe(false);
+  it.each(['', ' ', '\t', '   '])(
+    'reviewedBy=%j не считается подтверждением',
+    (reviewedBy) => {
+      expect(
+        isValid(profile({ reviewStatus: 'REVIEWED', reviewedBy, reviewedAt: REVIEWED_AT }))
+      ).toBe(false);
+    }
+  );
+
+  it('пробельный reviewedBy закрыт и на пофасетном GLOBAL — схема одна', () => {
+    expect(
+      isValid(
+        profile({
+          facets: { scenario: { state: 'GLOBAL', reviewedBy: '   ', reviewedAt: REVIEWED_AT } },
+          reviewStatus: 'REVIEWED',
+          reviewedBy: 'anna',
+          reviewedAt: REVIEWED_AT,
+        })
+      )
+    ).toBe(false);
   });
 });
 
