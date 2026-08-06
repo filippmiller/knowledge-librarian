@@ -109,6 +109,70 @@ function unique<T>(values: readonly T[]): T[] {
  * ТОЛЬКО через явные связи `parentRuleRef` и `supersedes`, а не через сравнение
  * глубины ключей.
  */
+/**
+ * Все узлы, лежащие на каком-либо цикле `supersedes` внутри выбранного набора.
+ *
+ * Ищется именно ЦИКЛ, а не пара: `A→B→C→A` состоит из трёх законных на вид дуг,
+ * и проверка «а сосед указывает на меня?» её не видит. Раньше такая тройка
+ * удаляла сама себя целиком и оставляла пустой набор кандидатов.
+ *
+ * Обход итеративный (стек), а не рекурсивный: длина цепочки замен приходит из
+ * данных, и переполнять ей стек не хочется.
+ */
+function findSupersedesCycleMembers(
+  scope: ReadonlySet<string>,
+  byId: ReadonlyMap<string, EvaluatedCandidate>
+): Set<string> {
+  const WHITE = 0;
+  const GREY = 1;
+  const BLACK = 2;
+  const colour = new Map<string, number>();
+  const members = new Set<string>();
+
+  const edgesFrom = (unitId: string): string[] =>
+    (byId.get(unitId)?.supersedes ?? []).filter(
+      (targetId) => targetId !== unitId && scope.has(targetId)
+    );
+
+  for (const root of scope) {
+    if ((colour.get(root) ?? WHITE) !== WHITE) continue;
+
+    const path: string[] = [];
+    const stack: { unitId: string; edgeIndex: number }[] = [{ unitId: root, edgeIndex: 0 }];
+    colour.set(root, GREY);
+    path.push(root);
+
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1];
+      const edges = edgesFrom(frame.unitId);
+
+      if (frame.edgeIndex >= edges.length) {
+        colour.set(frame.unitId, BLACK);
+        stack.pop();
+        path.pop();
+        continue;
+      }
+
+      const next = edges[frame.edgeIndex++];
+      const nextColour = colour.get(next) ?? WHITE;
+
+      if (nextColour === GREY) {
+        // Замкнулись: всё от вхождения `next` в текущий путь и до конца — цикл.
+        const start = path.indexOf(next);
+        if (start >= 0) for (const unitId of path.slice(start)) members.add(unitId);
+        continue;
+      }
+      if (nextColour === BLACK) continue;
+
+      colour.set(next, GREY);
+      path.push(next);
+      stack.push({ unitId: next, edgeIndex: 0 });
+    }
+  }
+
+  return members;
+}
+
 export function resolveKnowledgeSet(
   candidates: readonly EvaluatedCandidate[],
   query: QueryFrame
@@ -192,18 +256,30 @@ export function resolveKnowledgeSet(
   // удаление обоих схлопнуло бы набор кандидатов в пустой — недопустимый исход.
   // Такая пара остаётся на месте и уходит человеку.
   const initiallySelected = new Set(selectedIds);
+
+  // Цикл ищется ПО ВСЕМУ графу, а не только среди прямых пар A↔B. Проверка
+  // «сосед указывает на меня» ловила двойки, но тройку A→B→C→A пропускала:
+  // каждая дуга по отдельности выглядела законной, все три узла попадали в
+  // `supersededBy` и удалялись — набор кандидатов схлопывался в пустой. Узлы
+  // цикла остаются на месте и уходят человеку: упорядочить их нечем.
+  const inCycle = findSupersedesCycleMembers(initiallySelected, byId);
+  if (inCycle.size > 0) {
+    addReason('supersedes_cycle_unresolved');
+    requiresHumanReview = true;
+  }
+
   const supersededBy = new Map<string, string>();
   for (const unitId of initiallySelected) {
     const candidate = byId.get(unitId);
-    if (candidate === undefined) continue;
+    if (candidate === undefined || inCycle.has(unitId)) continue;
     for (const targetId of candidate.supersedes) {
       if (targetId === unitId || !initiallySelected.has(targetId)) continue;
-      if (byId.get(targetId)?.supersedes.includes(unitId) === true) {
-        addReason('supersedes_cycle_unresolved');
-        requiresHumanReview = true;
-        continue;
-      }
-      if (!supersededBy.has(targetId)) supersededBy.set(targetId, unitId);
+      if (inCycle.has(targetId)) continue;
+      // Победитель выбирается детерминированно (лексикографически меньший id),
+      // а не «кто первым попался»: порядок выдачи кандидатов не должен менять
+      // содержимое `excluded[].byUnitId`.
+      const current = supersededBy.get(targetId);
+      if (current === undefined || unitId < current) supersededBy.set(targetId, unitId);
     }
   }
   for (const [targetId, byUnitId] of supersededBy) {
@@ -235,6 +311,18 @@ export function resolveKnowledgeSet(
       selectedIds.splice(position, 1);
       overridden.push({ unitId: candidate.parentRuleRef, byUnitId: unitId });
       addReason('parent_overridden_by_exception');
+      continue;
+    }
+
+    // Родитель есть в ссылке, но его нет в выборке: он не пришёл кандидатом,
+    // выбыл по CONFLICT или был заменён через `supersedes`. Отдельная ветка
+    // ниже ловит только «родитель УДЕРЖАН», а эти случаи раньше просто
+    // проваливались молча — переопределять некого, и исключение оставалось
+    // единственным выбранным кандидатом, то есть отвечало в одиночку. Для
+    // ответа это то же самое, что оговорка без правила.
+    if (!byId.has(candidate.parentRuleRef) || !undeterminedIds.includes(candidate.parentRuleRef)) {
+      requiresHumanReview = true;
+      addReason('exception_parent_unavailable');
     }
   }
 
@@ -282,6 +370,15 @@ export function resolveKnowledgeSet(
   const isDecisive = (candidate: EvaluatedCandidate): boolean => {
     if (selectedIds.length === 0) return true;
     if (candidate.parentRuleRef !== null && viableIds.has(candidate.parentRuleRef)) return true;
+
+    // Неизвестный кандидат, который ЗАМЕНЯЕТ выбранного, — решающий. Шаг 2
+    // сознательно даёт заменять только выбранным, поэтому удержанный U тут
+    // ничего не удаляет; но если бы U разрешился в MATCH, он снял бы A. Ответить
+    // сейчас уверенно из A значило бы ответить устаревшим правилом, зная, что
+    // его судьба под вопросом. Обратное направление (выбранный заменяет
+    // неизвестного) решающим НЕ является: там неизвестность и так проиграла.
+    if (candidate.supersedes.some((targetId) => selectedIds.includes(targetId))) return true;
+
     for (const otherId of viableIds) {
       if (otherId === candidate.unitId) continue;
       const other = byId.get(otherId);

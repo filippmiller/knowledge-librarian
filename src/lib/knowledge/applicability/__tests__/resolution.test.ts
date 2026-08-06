@@ -629,6 +629,68 @@ describe('жёсткая фильтрация не убивает recall', () =>
     expect(decision.reasons).toContain('exception_without_parent');
   });
 
+  it('исключение не отвечает в одиночку, когда родителя вообще нет среди кандидатов', () => {
+    // Находка Codex. `null` и «родитель удержан» ловились, а «ссылка есть, но
+    // родителя в выборке нет» — нет: шаг переопределения просто ничего не делал,
+    // и исключение оставалось единственным выбранным, то есть отвечало.
+    const decision = resolveKnowledgeSet(
+      [
+        candidate({
+          unitId: 'rule-5',
+          kind: 'EXCEPTION_RULE',
+          scope: scopeOf('EXCEPTION_RULE'),
+          trigger: triggerIn('PUBLIC'),
+          parentRuleRef: 'rule-1-которого-нет',
+        }),
+      ],
+      QUERY
+    );
+
+    expect(decision.disposition).not.toBe('ANSWER');
+    expect(decision.requiresHumanReview).toBe(true);
+    expect(decision.reasons).toContain('exception_parent_unavailable');
+  });
+
+  it('неизвестный кандидат, ЗАМЕНЯЮЩИЙ выбранного, решающий — уверенного ответа нет', () => {
+    // Находка Codex: isDecisive не смотрел на supersedes вообще. Если бы U
+    // разрешился в MATCH, он снял бы A; ответить сейчас из A значило бы
+    // уверенно ответить правилом, про которое известно, что оно под заменой.
+    const decision = resolveKnowledgeSet(
+      [
+        candidate({ unitId: 'rule-A' }),
+        candidate({
+          unitId: 'rule-U',
+          scope: evaluateScope(
+            buildProfile('PROCEDURE_STEP', { scenario: { state: 'UNKNOWN' } }),
+            QUERY
+          ),
+          supersedes: ['rule-A'],
+        }),
+      ],
+      QUERY
+    );
+
+    expect(decision.disposition).not.toBe('ANSWER');
+  });
+
+  it('цикл замен из ТРЁХ узлов не опустошает набор кандидатов', () => {
+    // Находка Codex: проверка ловила только прямую пару A↔B. У тройки
+    // A→B→C→A каждая дуга выглядит законной, все три попадали в supersededBy
+    // и удалялись — выборка схлопывалась в пустую.
+    const decision = resolveKnowledgeSet(
+      [
+        candidate({ unitId: 'A', supersedes: ['B'] }),
+        candidate({ unitId: 'B', supersedes: ['C'] }),
+        candidate({ unitId: 'C', supersedes: ['A'] }),
+      ],
+      QUERY
+    );
+
+    expect(decision.selected).toHaveLength(3);
+    expect(decision.requiresHumanReview).toBe(true);
+    expect(decision.reasons).toContain('supersedes_cycle_unresolved');
+  });
+
   it('пустой вход — HOLD с явной причиной, а не тихий «ответ ни на чём»', () => {
     const decision = resolveKnowledgeSet([], QUERY);
 
