@@ -150,8 +150,9 @@ class ProviderRequestError extends Error {
   }
 }
 
-// Читаются лениво, а не на импорте модуля: значение env на момент вызова —
-// то же, что фактически поехало в API, и его можно менять между прогонами.
+// Читаются на СТАРТЕ вызова, а не на импорте модуля: значение env на момент
+// вызова — то же, что фактически поехало в API, и его можно менять между
+// прогонами. Читать их повторно внутри попытки нельзя — см. resolveDefaults().
 function defaultAnthropicModel(): string {
   return process.env.ANTHROPIC_MODEL || 'claude-3-opus-20240229';
 }
@@ -183,10 +184,37 @@ function defaultModelFor(provider: Provider): string {
   return provider === 'anthropic' ? defaultAnthropicModel() : defaultOpenAIModel();
 }
 
-function hasApiKey(provider: Provider): boolean {
+/**
+ * Env-зависимые значения, снятые ОДИН РАЗ на старте вызова и живущие ровно
+ * столько, сколько живёт вызов.
+ *
+ * Дефолты читаются во время вызова (а не при импорте) сознательно — это делает
+ * слой тестируемым и позволяет менять конфигурацию между прогонами. Но внутри
+ * ОДНОГО вызова env обязан быть заморожен: между первичной попыткой и резервом
+ * проходит реальное время, и мутация env в этом окне иначе увела бы резерв на
+ * другую модель, другой бюджет токенов и другую температуру, чем те, ради
+ * которых вызов был начат. Прогон должен быть описуем одной конфигурацией.
+ */
+interface ResolvedDefaults {
+  temperature: number;
+  anthropicMaxTokens: number;
+  anthropicApiKey?: string;
+  openaiApiKey?: string;
+}
+
+function resolveDefaults(options: ChatCompletionOptions): ResolvedDefaults {
+  return {
+    temperature: options.temperature ?? defaultTemperature(),
+    anthropicMaxTokens: options.maxTokens ?? defaultAnthropicMaxTokens(),
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+    openaiApiKey: process.env.OPENAI_API_KEY,
+  };
+}
+
+function hasApiKey(provider: Provider, defaults: ResolvedDefaults): boolean {
   return provider === 'anthropic'
-    ? !!process.env.ANTHROPIC_API_KEY
-    : !!process.env.OPENAI_API_KEY;
+    ? !!defaults.anthropicApiKey
+    : !!defaults.openaiApiKey;
 }
 
 /**
@@ -717,10 +745,10 @@ async function postAnthropicMessages(
 async function callAnthropic(
   options: ChatCompletionOptions,
   model: string,
-  temperature: number,
+  defaults: ResolvedDefaults,
   signal: AbortSignal | undefined
 ): Promise<string> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = defaults.anthropicApiKey;
   if (!apiKey) {
     throw new ProviderRequestError('ANTHROPIC_API_KEY is not set', {
       errorCode: 'MISSING_API_KEY',
@@ -728,7 +756,8 @@ async function callAnthropic(
   }
 
   const { system, messages } = buildAnthropicPayload(options);
-  const maxTokens = options.maxTokens ?? defaultAnthropicMaxTokens();
+  const maxTokens = defaults.anthropicMaxTokens;
+  const temperature = defaults.temperature;
 
   let response = await postAnthropicMessages(apiKey, model, system, messages, maxTokens, temperature, signal);
 
@@ -772,14 +801,14 @@ async function callAnthropic(
 async function callOpenAI(
   options: ChatCompletionOptions,
   model: string,
-  temperature: number,
+  defaults: ResolvedDefaults,
   signal: AbortSignal | undefined
 ): Promise<string> {
   const response = await openai.chat.completions.create(
     {
       model,
       messages: options.messages,
-      temperature,
+      temperature: defaults.temperature,
       ...(options.maxTokens && { max_tokens: options.maxTokens }),
       ...(options.responseFormat && {
         response_format: { type: options.responseFormat },
@@ -799,7 +828,7 @@ async function runCompletionAttempt(
   provider: Provider,
   model: string,
   options: ChatCompletionOptions,
-  temperature: number,
+  defaults: ResolvedDefaults,
   timeoutMs: number | undefined,
   timeoutCode: string
 ): Promise<AttemptResult> {
@@ -810,8 +839,8 @@ async function runCompletionAttempt(
   try {
     const raw =
       provider === 'anthropic'
-        ? await callAnthropic(options, model, temperature, gate.signal)
-        : await callOpenAI(options, model, temperature, gate.signal);
+        ? await callAnthropic(options, model, defaults, gate.signal)
+        : await callOpenAI(options, model, defaults, gate.signal);
 
     const text =
       options.responseFormat === 'json_object' ? normalizeJsonResponse(raw) : raw;
@@ -870,7 +899,8 @@ export async function createChatCompletionDetailed(
   const primaryProvider = options.provider ?? getProvider();
   const primaryModel = resolvePrimaryModel(primaryProvider, options);
   const plan = planFallback(options);
-  const temperature = options.temperature ?? defaultTemperature();
+  // Один снимок env на весь вызов: см. ResolvedDefaults.
+  const defaults = resolveDefaults(options);
 
   const remainingMs = (): number =>
     options.totalDeadlineMs === undefined
@@ -915,7 +945,7 @@ export async function createChatCompletionDetailed(
       provider,
       model,
       options,
-      temperature,
+      defaults,
       ms,
       code
     );
@@ -972,7 +1002,7 @@ export async function createChatCompletionDetailed(
     fallbackTarget &&
     !callerAborted &&
     !deadlineExceeded &&
-    hasApiKey(fallbackTarget.provider) &&
+    hasApiKey(fallbackTarget.provider, defaults) &&
     remainingMs() > 0
   ) {
     console.warn(
@@ -1022,12 +1052,13 @@ async function* streamProviderTokens(
   provider: Provider,
   model: string,
   options: ChatCompletionOptions,
+  defaults: ResolvedDefaults,
   signal: AbortSignal | undefined
 ): AsyncGenerator<string> {
-  const temperature = options.temperature ?? defaultTemperature();
+  const temperature = defaults.temperature;
 
   if (provider === 'anthropic') {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const apiKey = defaults.anthropicApiKey;
     if (!apiKey) {
       throw new ProviderRequestError('ANTHROPIC_API_KEY is not set', {
         errorCode: 'MISSING_API_KEY',
@@ -1035,7 +1066,7 @@ async function* streamProviderTokens(
     }
 
     const { system, messages } = buildAnthropicPayload(options);
-    const maxTokens = options.maxTokens ?? defaultAnthropicMaxTokens();
+    const maxTokens = defaults.anthropicMaxTokens;
     const buildBody = (withTemperature: boolean) =>
       JSON.stringify({
         model,
@@ -1146,7 +1177,8 @@ export async function* streamChatCompletionTokens(
 ): AsyncGenerator<string> {
   const provider = options.provider ?? getProvider();
   const model = resolvePrimaryModel(provider, options);
-  yield* streamProviderTokens(provider, model, options, options.signal);
+  const defaults = resolveDefaults(options);
+  yield* streamProviderTokens(provider, model, options, defaults, options.signal);
 }
 
 export interface ChatCompletionStreamOperation {
@@ -1177,6 +1209,7 @@ export function createChatCompletionStreamDetailed(
 ): ChatCompletionStreamOperation {
   const provider = options.provider ?? getProvider();
   const model = resolvePrimaryModel(provider, options);
+  const defaults = resolveDefaults(options);
   const attempts: CompletionAttempt[] = [];
 
   let resolveCompletion!: (result: ChatCompletionResult) => void;
@@ -1207,7 +1240,7 @@ export function createChatCompletionStreamDetailed(
     let settled = false;
 
     try {
-      for await (const token of streamProviderTokens(provider, model, options, gate.signal)) {
+      for await (const token of streamProviderTokens(provider, model, options, defaults, gate.signal)) {
         text += token;
         yield token;
       }

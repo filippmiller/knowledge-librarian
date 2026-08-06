@@ -408,6 +408,71 @@ describe('createChatCompletionDetailed — полный отказ', () => {
   });
 });
 
+describe('createChatCompletionDetailed — конфигурация заморожена на время вызова', () => {
+  it('мутация env между первичной попыткой и резервом не меняет модель резерва', async () => {
+    // Дефолты читаются во время вызова (это лучше для тестируемости), но внутри
+    // ОДНОГО вызова обязаны быть заморожены: иначе резерв поехал бы с моделью,
+    // которую вызывающий никогда не запрашивал.
+    fetchMock.mockImplementation(() => {
+      vi.stubEnv('OPENAI_CHAT_MODEL', 'gpt-mutated-mid-call');
+      vi.stubEnv('AI_TEMPERATURE', '0.99');
+      return Promise.resolve(anthropicFailure());
+    });
+    openaiCreate.mockResolvedValue(openaiOk('served by fallback'));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+    });
+
+    expect(result.servedByModel).toBe('gpt-env-default');
+    expect(openaiCreate.mock.calls[0][0].model).toBe('gpt-env-default');
+    expect(openaiCreate.mock.calls[0][0].temperature).toBe(0.3);
+  });
+
+  it('мутация env не меняет бюджет токенов и температуру уже начатого вызова', async () => {
+    vi.stubEnv('ANTHROPIC_MAX_TOKENS', '2048');
+    fetchMock.mockImplementation(() => {
+      vi.stubEnv('ANTHROPIC_MAX_TOKENS', '77');
+      vi.stubEnv('AI_TEMPERATURE', '0.99');
+      return Promise.resolve(anthropicFailure());
+    });
+
+    await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      model: 'claude-sonnet-5',
+      fallbackPolicy: 'SAME_PROVIDER_ONLY',
+      providerModels: { anthropic: 'claude-haiku-4' },
+    }).catch(() => undefined);
+
+    const bodies = anthropicRequestBodies();
+    expect(bodies).toHaveLength(2);
+    expect(bodies.map((b) => b.model)).toEqual(['claude-sonnet-5', 'claude-haiku-4']);
+    expect(bodies.map((b) => b.max_tokens)).toEqual([2048, 2048]);
+    expect(bodies.map((b) => b.temperature)).toEqual([0.3, 0.3]);
+  });
+
+  it('стриминг тоже фиксирует конфигурацию в момент создания операции', async () => {
+    fetchMock.mockResolvedValue(sseResponse(['ok']));
+
+    const operation = createChatCompletionStreamDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+    });
+    vi.stubEnv('ANTHROPIC_MODEL', 'claude-mutated-mid-stream');
+    vi.stubEnv('AI_TEMPERATURE', '0.99');
+
+    const tokens: string[] = [];
+    for await (const token of operation.tokens) tokens.push(token);
+    const metadata = await operation.completion;
+
+    expect(tokens).toEqual(['ok']);
+    expect(metadata.servedByModel).toBe('claude-env-default');
+    expect(anthropicRequestBodies()[0].temperature).toBe(0.3);
+  });
+});
+
 describe('createChatCompletionDetailed — что считается транзиентной ошибкой', () => {
   afterEach(() => {
     vi.useRealTimers();
