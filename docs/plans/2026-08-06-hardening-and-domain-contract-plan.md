@@ -61,6 +61,29 @@
 > ревизий сохранены как acceptance criteria своих PR и больше не расширяются —
 > они разбираются в implementation-PR, а не в очередной ревизии плана.
 > Изменения отмечены `[R4]`.
+>
+> **Revision 4a (amendment, 2026-08-06):** ревью приняло направление Revision 4
+> и запросило не новую ревизию, а компактную финальную правку — восемь пунктов,
+> делающих новые ворота ИСПОЛНИМЫМИ, а не только хорошо сформулированными.
+> Изменения отмечены `[R4a]`: (1) PR H расширен с «раннера» до
+> vertical-slice **движка** + раннера — grounded synthesis, evidence pack и
+> claim-verification получили явного владельца, потому что склеить старый
+> `enhanced-answering-engine` с новым JSONL-путём нельзя; (2) устранено
+> противоречие «one-command H» vs ручной review в F через committed review
+> manifest со сверкой по `reviewedContentHash` (человеческое `accept` не
+> автоматизируется LLM); (3) введён `sourceRuleId` как детерминированная связь
+> oracle с раздробленными units — без него `recall@5` невычислим; (4)
+> machine-readable oracle для 6 negative-кейсов
+> (`requiredCandidateRuleIds`/`requiredSelectedRuleIds`/`forbiddenSelectedRuleIds`/
+> `expectedReasonCodes`), иначе проверяется текст ответа, а не решение
+> applicability-движка; (5) исправлены три несогласованности DAG — `A3 → H`,
+> `A2 → C`, и прямое противоречие по массовому переизвлечению (§3 против §6);
+> (6) RRF выносится в чистую `reciprocalRankFusion()` с parity-тестом, так как
+> текущий `hybridSearch` DB-bound и из in-memory пути невызываем; (7) `MRR`/
+> `firstRelevantRank` как диагностические метрики рядом с обязательным
+> `recall@5`, плюс интерфейсы `EmbeddingProvider`/`RerankerProvider` вместо
+> вечного выбора поставщика; (8) stale-текст `Revision 3` → `Revision 4`,
+> `A1–F` → `A1–H`.
 
 ## Как это читать
 
@@ -174,6 +197,71 @@ Q05-M1  must_clarify    «что делать, если чешется» — н�
 Q09-N1  must_not_apply  ранее данное согласие не бессрочно
 Q10-N1  must_not_apply  послабление для не дотягивающихся не расширяется на обычный случай
 ```
+
+**[R4a] Детерминированная связь oracle с извлечёнными units — `sourceRuleId`.**
+Oracle говорит `expected_rule_ids: [4]`, но экстракция может разбить правило 4
+на несколько units (лимит 15 секунд; пауза 30 секунд; максимум три цикла), и у
+новых units будут хэшированные `unitId`, а не номера `1–10`. Без явной связи
+`recall@5` невозможно вычислить детерминированно. Поэтому каждый evaluation-unit
+несёт:
+
+```ts
+sourceRuleId: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10
+```
+
+Правила:
+
+- `sourceRuleId` определяется из нумерации/структуры исходного DOCX или из
+  source anchor — **не генерируется LLM**;
+- `expected_rule_ids: [4]` означает: в reranked top-5 должна присутствовать
+  ДОСТАТОЧНАЯ группа units с `sourceRuleId=4`;
+- для раздробленного правила проверяется покрытие всех необходимых частей —
+  для `Q04` выбранные evidence-units обязаны совместно покрывать все три
+  числа (15 сек, 30 сек, 3 цикла), а не один осколок;
+- `sourceRuleId` — часть evaluation provenance и **не попадает в
+  `retrievalText`**, иначе поиск сможет читерить по номеру правила вместо
+  поиска по смыслу.
+
+**[R4a] Machine-readable oracle для 6 negative-кейсов.** Сегодня у negative-
+кейсов есть только `expected_behavior` и текст ожидаемого ответа — по ним
+можно проверить красивый текст, но нельзя доказать, что applicability engine
+принял правильное решение (например, что для `Q05-N1` правило 5 действительно
+не было выбрано, а не что модель просто удачно написала «нет»). Добавляются
+evaluation-only поля:
+
+```ts
+interface NegativeCaseOracle {
+  expectedDisposition: 'DIRECT_ANSWER' | 'HOLD';
+
+  requiredCandidateRuleIds?: number[];   // должны попасть в pool
+  requiredSelectedRuleIds?: number[];    // должны быть выбраны
+  forbiddenSelectedRuleIds?: number[];   // НЕ должны быть выбраны
+
+  expectedMissingFacets?: string[];
+  expectedReasonCodes?: string[];
+
+  numericAssertions?: Array<{ value: number; unit: string }>;
+}
+```
+
+Пример для `Q05-N1` (исключение для автобуса не действует дома):
+
+```json
+{
+  "id": "Q05-N1",
+  "expectedDisposition": "DIRECT_ANSWER",
+  "requiredCandidateRuleIds": [1, 3, 5],
+  "requiredSelectedRuleIds": [1, 3],
+  "forbiddenSelectedRuleIds": [5],
+  "expectedReasonCodes": ["public_place_condition_not_satisfied"]
+}
+```
+
+Для `Q01-M1` это позволяет проверить главное: правила 1 и 5 БЫЛИ найдены как
+конкурирующие кандидаты, и именно недостающее условие места привело к
+clarification — а не то, что система ничего не нашла и потому промолчала. Поля
+необязательны там, где неприменимы. Эти поля доступны только runner/grader и
+никогда не передаются движку.
 
 **Правила изоляции oracle (нарушение = недействительный прогон):**
 
@@ -470,7 +558,7 @@ legacy-only prose — human review). Hold применяется к конкре
 Ревью раунда 3 подтвердило верность решения не смешивать это с PR №61: 81 alert
 нельзя чинить одним массовым апдейтом — нужно разделить runtime vs dev-only,
 direct vs transitive, severity, reachability, patch/minor vs major. Заведено
-отдельной задачей вне Beads-графа этого плана (не блокирует PR A1–F), если среди
+отдельной задачей вне Beads-графа этого плана (не блокирует PR A1–H), если среди
 алертов не найдётся подтверждённая critical reachable runtime-уязвимость —
 severity и reachability пока не проверены, поэтому не игнорируется и не паникуется.
 
@@ -504,7 +592,13 @@ B1 → B2 — Evaluator'ы (eligibility / scope / trigger / resolution)
 
 B2 → 2.2 — Concept/ConceptAlias (translation-5ii)
 
-A1 + B1 → C — Provider structured-output adapter
+A1 + A2 + B1 → C — Provider structured-output adapter
+   ([R4a] добавлена A2: structured() принимает ExtractionRunConfig, который
+    определяется именно в A2 — C не может зависеть от ещё не существующего
+    типа. Альтернатива, если захочется развязать: вынести общий
+    CompletionRunConfig в A1 и использовать его в A2/C/D/E — тогда C
+    зависит только от A1+B1. Выбор делает исполнитель A1, но противоречие
+    должно быть закрыто одним из двух способов, не оставлено как есть.)
 
 B1 + C + 2.2 → D — QueryFrame builder
 
@@ -513,16 +607,35 @@ A2 + B1 + C + 2.2 → E — Структурная экстракция + proven
 E → F — Human-review артефакт + JSONL persistence
 
 F → G — [R4] Evaluation-only semantic retrieval поверх reviewed JSONL
-         (embeddings + lexical + RRF + reranker, in-memory, БЕЗ pgvector)
+         (embeddings + lexical + чистый RRF + reranker, in-memory, БЕЗ pgvector)
 
-B2 + D + G → H — [R4] End-to-end fixture runner (DOCX → answer, Q01–Q10 +
-                  6 negative cases, полный retrieval trace)
+A3 + B2 + D + G → H — [R4] Evaluation-only vertical-slice engine + fixture
+                       runner ([R4a] добавлена A3: H использует
+                       ActualDisposition/HOLD/ERROR — тип определяется в A3)
 
 H PASS → 2.3 — Пилот на 3–5 РЕАЛЬНЫХ документах бюро
 
 2.3 PASS → 2.4 — Финальная Prisma-схема v2
 
-2.4 → pgvector (3.1/3.2) / shadow / canary → массовое переизвлечение корпуса
+2.4 → pgvector / production retrieval (3.1/3.2) → shadow → canary
+    → explicit owner approval
+    → controlled corporate corpus re-extraction (production/publish)
+```
+
+**[R4a] Исправлено противоречие по массовому переизвлечению.** Revision 4
+ставила его в двух местах одновременно: здесь — после `2.4 → pgvector →
+shadow/canary`, а в §6 — как `depends-on 2.3, не 2.4`. Это была прямая
+нестыковка, моя ошибка. Принят безопасный вариант (цепочка выше целиком,
+включая явное одобрение владельца).
+
+Если понадобится прогнать извлечение по корпусу РАНЬШЕ — это отдельная задача
+с другим названием и без публикации:
+
+```text
+offline staged corpus extraction
+  — извлечение в JSONL для анализа, БЕЗ записи в production-базу знаний
+  — БЕЗ publish, БЕЗ участия в клиентских ответах
+  — не путать с production re-extraction/publish выше
 ```
 
 **[R4] Ключевая перестановка.** До Revision 4 план вёл от пилота сразу к Prisma
@@ -1296,8 +1409,26 @@ cosine (`src/lib/ai/vector-search.ts:184`, а также `chunker.ts:17`).
 - **embeddings по units** (не по сырым чанкам документа — это принципиально:
   ищем по извлечённому знанию, а не по исходной прозе);
 - **lexical retrieval** — существующий `searchByKeywords`-подход;
-- **RRF** — переиспользовать существующий (`hybridSearch`,
-  `src/lib/ai/vector-search.ts:432`, k=60), не писать второй;
+- **RRF — [R4a] вынести как чистую функцию, а не вызывать текущий
+  `hybridSearch()`.** Проверено: сегодняшний `hybridSearch`
+  (`src/lib/ai/vector-search.ts:432`) содержит RRF-логику ВНУТРИ себя и
+  жёстко связан с Prisma — сам зовёт `searchSimilarChunks()`/
+  `searchByKeywords()` поверх `DocChunk`. Вызвать его из in-memory JSONL-пути
+  невозможно. Поэтому:
+
+  ```ts
+  // чистая функция, без БД и без знания об источнике списков
+  function reciprocalRankFusion(
+    rankedLists: RankedList[],
+    options: { k: number; weights?: number[] }
+  ): FusedResult[];
+  ```
+
+  Старый `DocChunk`-путь (`hybridSearch`) и новый JSONL-путь вызывают ОДНУ
+  эту функцию. Это не второй RRF, а корректное переиспользование
+  существующего. Обязателен **parity-тест**: `hybridSearch` после
+  рефакторинга выдаёт то же ранжирование, что и до него (k=60, те же веса) —
+  иначе рефакторинг молча изменит поведение живого v1-пути.
 - **semantic reranker** — **[R4] проверено: в репозитории отсутствует**
   (`grep -rln "rerank" src/lib` пусто), это НОВЫЙ компонент, а не
   переиспользование существующего. Применяется к небольшому candidate pool
@@ -1305,9 +1436,36 @@ cosine (`src/lib/ai/vector-search.ts:184`, а также `chunker.ts:17`).
   дёшев;
 - **полный retrieval trace** на каждый запрос (см. артефакт в PR H).
 
+**[R4a] Провайдеры — интерфейс сейчас, выбор поставщика позже.** Выбор
+между конкретными embedding/reranker-моделями НЕ является блокером плана и
+не поводом для новой ревизии — это implementation decision, который решает
+сам тестовый пакет. PR G фиксирует только интерфейсы:
+
+```ts
+interface EmbeddingProvider {
+  embed(texts: string[]): Promise<number[][]>;
+  modelInfo(): ModelInfo;
+}
+
+interface RerankerProvider {
+  rerank(query: string, candidates: Candidate[]): Promise<RankedCandidate[]>;
+  modelInfo(): ModelInfo;
+}
+```
+
+Первый прогон G может сравнить две embedding-конфигурации и один-два
+reranker'а; победителя определяют ворота, не спор в плане. Артефакт обязан
+хранить: embedding provider/model/version/dimensions, reranker
+provider/model/version, hash `retrievalText`, RRF `k`, лимиты кандидатов —
+иначе результат невоспроизводим и не сравним между прогонами.
+
 **Acceptance criteria:**
 - `recall@5` после reranking = 10/10 на `Q01`–`Q10` (ожидаемая группа правил
-  в reranked top-5);
+  в reranked top-5) — **обязательные ворота**;
+- **[R4a]** дополнительно пишутся `MRR` и `firstRelevantRank` как
+  диагностические (НЕ блокирующие) показатели: на маленьком top-5 сам по себе
+  `recall@5` не показывает качество ПОРЯДКА, а деградация порядка — ранний
+  сигнал, что retrieval поплыл, до того как он уронит recall;
 - измеряется и отдельно фиксируется `recall@K` ДО reranking (candidate
   generation) — чтобы было видно, что чинить, если ворота не прошли:
   генерацию кандидатов или ранжирование;
@@ -1320,21 +1478,92 @@ cosine (`src/lib/ai/vector-search.ts:184`, а также `chunker.ts:17`).
 - ничего не пишется в production-таблицы (evaluation-only, как
   `telemetryMode: 'disabled'` в A3).
 
-### PR H — End-to-end fixture runner **[R4]** [P0, depends-on B2, D, G]
+### PR H — Evaluation-only vertical-slice engine + fixture runner **[R4; R4a — расширен со «раннера» до «движок + раннер»]** [P0, depends-on A3, B2, D, G]
 
-Полный путь `DOCX → answer` одной командой, единственное место, где ворота
-§0.4 проверяются вместе, а не по отдельности.
+**[R4a] Переименован и расширен.** Revision 4 описывала H как раннер, но
+между `applicability` и `answer` стояла строка «evidence-backed synthesis» без
+владельца реализации. Склеить здесь старый `enhanced-answering-engine.ts` (он
+работает поверх `hybridSearch`/`DocChunk`/старой логики ответа) с новым
+JSONL/Knowledge-Unit путём из G невозможно — это две несовместимые системы.
+Поэтому синтез реализуется В ЭТОМ PR, а не подразумевается:
+
+```ts
+buildEvidencePack(selectedUnits): EvidencePack;
+synthesizeFromSelectedUnits(evidencePack, queryFrame): DraftAnswer;
+verifyAnswerClaims(draftAnswer, evidencePack): VerificationResult;
+```
+
+Правила synthesis-пути (обязательные, не рекомендации):
+
+- генератор получает ТОЛЬКО selected reviewed units — не сырые чанки, не
+  результаты поиска до applicability-фильтрации;
+- `general_ai` fallback в H **отключён**, не «не приветствуется»;
+- каждое число в ответе сверяется с `numericConstraint` соответствующего
+  unit'а;
+- citations строятся из source anchors (PR F), не из порядкового номера
+  кандидата;
+- unsupported claim (утверждение, не выводимое из evidence pack) → кейс FAIL;
+- `answerSource: 'knowledge_base'` выставляется НОВЫМ orchestration-путём
+  осознанно, а не наследуется случайно от старого движка — иначе ворота
+  «не `general_ai`» проверяют не то, что мы думаем.
+
+Полный путь:
 
 ```text
 uchebnaya_instrukciya_...docx
   → PR E structured extraction
-  → PR F reviewed JSONL units
+  → [R4a] сверка с committed review manifest (см. ниже)
+  → reviewed JSONL units
   → PR D QueryFrame (вопрос другими словами)
   → PR G retrieval (embeddings + lexical + RRF + reranker)
   → PR B2 evaluateUnitEligibility / evaluateScope / evaluateTrigger /
            resolveKnowledgeSet
-  → evidence-backed synthesis
+  → buildEvidencePack → synthesizeFromSelectedUnits → verifyAnswerClaims
   → сверка с oracle (Q01–Q10 + 6 negative cases)
+```
+
+**[R4a] Разрешение противоречия «one-command H» vs «ручной review в F».**
+PR F требует человеческих решений `accept`/`reject`/`edit` — они физически не
+могут произойти внутри автоматического прогона. Без явного механизма H либо
+использовал бы заранее заготовленный JSONL (и тогда не проверял бы свежую
+экстракцию), либо ждал человека, либо автоматически одобрял результат
+(что уничтожило бы смысл human review). Решение — **committed review manifest**
+для учебного fixture:
+
+```json
+{
+  "sourceRuleId": 4,
+  "unitId": "...",
+  "sourceAnchor": "...",
+  "reviewDecision": "ACCEPT",
+  "reviewedContentHash": "...",
+  "reviewedBy": "fixture-reviewer",
+  "reviewedAt": "..."
+}
+```
+
+Порядок в `--mode=e2e`:
+
+1. DOCX извлекается ЗАНОВО (свежая экстракция, не заготовка);
+2. полученные units сопоставляются с manifest по стабильным source anchors
+   (PR F);
+3. решение человека переприменяется ТОЛЬКО при совпадении
+   `reviewedContentHash`;
+4. новый, изменившийся или пропавший unit → `EXTRACTION_GATE_FAIL`, прогон
+   останавливается;
+5. дальше в retrieval идут только подтверждённые units.
+
+Так проверяется именно новая экстракция, но автоматика не притворяется
+человеком. Человеческое `accept` **не автоматизируется через LLM** ни в каком
+виде.
+
+Диагностические режимы:
+
+```text
+--stage=extraction        # только ворота извлечения
+--stage=retrieval-answer  # поверх уже подтверждённого manifest
+--mode=e2e                # полный путь, продолжается только после успешной
+                          # сверки с manifest
 ```
 
 **Артефакт прогона обязан содержать по каждому case ID:**
@@ -1460,12 +1689,12 @@ Zod `.superRefine()` в PR B1 (см. там), с тестами на все ко
   детерминированная функция `evaluateScope` от `KNOWLEDGE_KIND_REGISTRY`.
 - **[R3]** Не строить `unitId` из хэша LLM-сгенерированного текста — только из
   pre-LLM source anchor (см. PR F).
-- **[R3]** Не мержить эту Revision 3, пока не закрыты все 9 comments CodeRabbit
-  на диффе Revision 2 (закрыты этой редакцией — см. пометки `[R3]` выше) И не
-  получено новое содержательное ревью именно на диффе Revision 3 — тот же
-  двухступенчатый gate, который применяется к каждому PR A1–F ниже.
+- **[R4a]** Не мержить эту Revision 4, пока не закрыты все 9 comments CodeRabbit
+  на диффе Revision 2 (закрыты в Revision 3 — см. пометки `[R3]` выше) И не
+  получено новое содержательное ревью именно на диффе Revision 4 — тот же
+  двухступенчатый gate, который применяется к каждому PR A1–H ниже.
 
-**Порядок ревью для каждого PR A1–F:** не мержить сразу по зелёному CI —
+**Порядок ревью для каждого PR A1–H:** не мержить сразу по зелёному CI —
 дождаться хотя бы одного содержательного ревью (Grok/Codex/CodeRabbit) на
 диффе. Предыдущий PR (#59) уже показал: содержательные находки пришли через 2
 минуты ПОСЛЕ merge.
@@ -1499,16 +1728,24 @@ Zod `.superRefine()` в PR B1 (см. там), с тестами на все ко
 - **[R4] P0** PR G — Evaluation-only semantic retrieval поверх reviewed JSONL
   (retrievalText, embeddings по units, lexical, существующий RRF, НОВЫЙ
   reranker, in-memory без pgvector). `depends-on` F.
-- **[R4] P0** PR H — End-to-end fixture runner (DOCX → answer, Q01–Q10 + 6
-  negative cases, полный retrieval trace, изоляция oracle). `depends-on`
-  B2, D, G.
+- **[R4] P0** PR H — Evaluation-only vertical-slice engine + fixture runner
+  (DOCX → answer, committed review manifest, grounded synthesis + claim
+  verification, Q01–Q10 + 6 negative cases, полный retrieval trace, изоляция
+  oracle). `depends-on` **A3**, B2, D, G (**[R4a]**: A3 добавлена — H
+  использует `ActualDisposition` из неё).
 - Пилот 2.3: `depends-on` H (**[R4]**: в Revision 3 было B2+D+F — теперь путь
   идёт через G и H, которые уже включают B2 и D транзитивно; пилот не
   начинается, пока учебный пакет не зелёный).
 - 2.4 (финальная Prisma-схема): `depends-on` 2.3.
-- **[R4]** Массовое переизвлечение корпоративных документов: `depends-on` 2.3
-  (не 2.4) — заводится явной задачей, чтобы этот запрет был отслеживаемым, а
-  не только текстом в §5.
+- **[R4a] Production** corporate corpus re-extraction (с записью в базу и
+  публикацией): `depends-on` 2.4 → production retrieval/pgvector → shadow →
+  canary → explicit owner approval. **Исправлено**: Revision 4 писала
+  `depends-on 2.3 (не 2.4)`, что противоречило §3 — см. §3, безопасный вариант
+  принят.
+- **[R4a]** *(опционально, если понадобится раньше)* `offline staged corpus
+  extraction` — отдельная задача, извлечение в JSONL для анализа, `depends-on`
+  2.3, **явно без publish и без записи в production-базу знаний**. Не
+  переименовывать и не сливать с предыдущим пунктом.
 - **P2** numeric-evidence shadow-эксперимент (`unverified_numeric_evidence`,
   §2.2). `depends-on` A4.
 - **[R3] Новая P2 задача**: временная политика `fallbackPolicy` по умолчанию
@@ -1519,4 +1756,4 @@ Zod `.superRefine()` в PR B1 (см. там), с тестами на все ко
 
 Не трогаю очередь `bd ready` в этой сессии за пределами вышеперечисленного —
 создание перечисленных задач происходит ПОСЛЕ утверждения этой редакции плана
-(включая свежее содержательное ревью на диффе Revision 3), не раньше.
+(включая свежее содержательное ревью на диффе Revision 4), не раньше.
