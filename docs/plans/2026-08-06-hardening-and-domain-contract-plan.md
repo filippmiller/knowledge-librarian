@@ -84,6 +84,23 @@
 > `recall@5`, плюс интерфейсы `EmbeddingProvider`/`RerankerProvider` вместо
 > вечного выбора поставщика; (8) stale-текст `Revision 3` → `Revision 4`,
 > `A1–F` → `A1–H`.
+>
+> **Revision 4b (corrective, 2026-08-06):** ревью приняло amendment 4a и нашло
+> два настоящих end-to-end блокера плюс две локальные несогласованности.
+> Изменения отмечены `[R4b]`: (1) в `QueryFrame` добавлены typed
+> `triggerFacts` (`TRIGGER_FACT_REGISTRY`: privacyContext / consentStatus /
+> reachability / helperPresent) — без них `evaluateTrigger()` не имел входных
+> данных, и ворота `Q05`/`Q05-N1`/`Q09-N1`/`Q10-N1` были физически
+> недостижимы, потому что «в автобусе» это trigger signal, а не geography
+> facet; (2) разведены `sourceBlockAnchor` (действительно pre-LLM) и `unitId`
+> (post-extraction, устойчив к перефразировке) — прежняя формулировка
+> обещала pre-LLM identity через post-LLM свойства (`kind` + per-unit
+> discriminator), а committed review manifest сделал это блокером; (3) убраны
+> два stale-места с `PR C depends-on A1, B1` — документ давал исполнителю два
+> разных графа; (4) committed review manifest объявлен oracle-blind, иначе
+> утечка oracle шла бы через человека-ревьюера; (5) исправлено моё
+> фактическое утверждение о CodeRabbit — его зелёный статус на amendment был
+> `Review skipped`, а не содержательное ревью.
 
 ## Как это читать
 
@@ -276,6 +293,18 @@ clarification — а не то, что система ничего не нашл
    (`src/lib/ai/enhanced-answering-engine.ts:134`:
    `'knowledge_base' | 'general_ai' | 'deterministic_guardrail'`), поэтому
    ворота измеримы напрямую, без новой телеметрии.
+5. **[R4b] Committed review manifest (PR H) создаётся oracle-blind.** Правила
+   1–4 запрещали передавать oracle движку, но НЕ запрещали человеку-ревьюеру
+   читать контрольные вопросы при подготовке manifest — а это тот же класс
+   утечки, только через человека: ревьюер видит `Q03`/`Q04`/`Q09` → правит
+   `statement`/retrieval-контекст под эти формулировки → semantic gate
+   проходит не за счёт обобщения, а за счёт подгонки. Поэтому: ревьюер
+   fixture видит ТОЛЬКО DOCX, извлечённые units и их source evidence; файлы
+   `test_cases_semantic_rules.jsonl` и `kontrolnye_voprosy_i_klyuch.md` ему
+   недоступны. Любой `edit` обязан быть полностью подтверждён source spans
+   (правка, не выводимая из источника, — не `edit`, а сочинение). Пилот 2.3
+   на реальных документах дополнительно проверяет, что система не
+   переобучена на учебный пакет.
 
 ### 0.4 Ворота (gates)
 
@@ -1098,12 +1127,59 @@ type QuestionAspect =
 export interface QueryFrame {
   concepts: string[];              // канонические Concept ID (после 2.2)
   facets: { [K in FacetKey]?: QueryFacetState<FacetValueOf<K>> };
+  triggerFacts: {                  // [R4b] см. ниже — без этого поля
+    [K in TriggerFactKey]?: QueryFactState<TriggerFactValueOf<K>>
+  };
   questionAspects: QuestionAspect[]; // композитный вопрос ("сколько стоит X и
                                       // нужен ли оригинал?") несёт несколько
   ambiguities: string[];             // включая конфликт текущего сообщения с
                                       // историей — см. PR D
 }
 ```
+
+**[R4b] `triggerFacts` — недостающий провод между вопросом и логикой
+исключений.** Без этого поля `evaluateTrigger(triggerCondition, query)` не
+имеет откуда взять свои входные данные: `facets` описывают, к какому классу
+знания относится вопрос, а активация исключения зависит от СИТУАЦИОННЫХ
+фактов. Truth table прямо разводит эти два класса сигналов — «в автобусе» это
+не geography-facet, а trigger signal. Если реализовать интерфейс без
+`triggerFacts` буквально, ворота §0.4 недостижимы: `Q05` не активирует
+исключение общественного места, `Q05-N1` не деактивирует его дома, `Q09-N1`
+не определит отсутствие текущего согласия, `Q10-N1` не отличит ограниченную
+подвижность от обычной ситуации. Отдельный typed registry, НЕ расширение
+`FACET_REGISTRY`:
+
+```ts
+// src/lib/knowledge/applicability/trigger-facts.ts
+const TRIGGER_FACT_REGISTRY = {
+  privacyContext: privacyContextFact,  // PRIVATE | PUBLIC | UNKNOWN
+  consentStatus: consentFact,          // EXPLICIT | ABSENT | UNKNOWN
+  reachability: reachabilityFact,      // LIMITED | NORMAL | UNKNOWN
+  helperPresent: booleanFact,
+} as const;
+
+type TriggerFactKey = keyof typeof TRIGGER_FACT_REGISTRY;
+
+type QueryFactState<T> =
+  | { state: 'UNKNOWN' }
+  | { state: 'KNOWN'; value: T; evidence: readonly FacetEvidence[] };
+```
+
+Обвязка (закрепляется здесь, реализуется в соответствующих PR):
+
+- **PR D** извлекает `triggerFacts` из текущего сообщения и истории — по тем
+  же правилам приоритета и evidence, что и `facets`;
+- **`TriggerCondition`** (PR B1/E) ссылается на ТОТ ЖЕ registry — условие
+  исключения выражается в терминах `TriggerFactKey`, не свободным текстом;
+- **PR B2** `evaluateTrigger()` сравнивает condition именно с
+  `query.triggerFacts`, а не угадывает из `facets`;
+- **PR H** trace выводит `triggerFacts` и их evidence по каждому кейсу;
+- **oracle** получает необязательное `expectedMissingTriggerFacts?` —
+  отсутствие места/согласия это НЕ `missingFacet`, и смешивать их в одном поле
+  значило бы снова слить два разных понятия в одно (см. §0.3).
+
+Минимальный каталог для учебного fixture — четыре ключа выше. Расширение
+каталога решает пилот (как и для `FACET_REGISTRY`, см. §4.1).
 
 Приоритет источников значения факета (реализуется в PR D, тип здесь только
 даёт место для evidence): явное значение в текущем сообщении сильнее истории;
@@ -1205,7 +1281,7 @@ truth table §3.4 (multi-unit conflict resolution) → resolveKnowledgeSet suite
 - `scenario` не хардкожен как единственная обязательная ось ни в одной из
   четырёх функций (расширяемость под §4.1 сохранена).
 
-### PR C — Provider structured-output adapter [P1, depends-on A1, B1]
+### PR C — Provider structured-output adapter [P1, depends-on A1, A2, B1] **[R4b: добавлена A2]**
 
 **[R3] Контракт приведён в соответствие с A1/A2 — Revision 2 не принимала
 `ExtractionRunConfig`/fallback-политику и не возвращала `attempts[]`, из-за
@@ -1356,20 +1432,47 @@ acceptance criterion). НЕ production Prisma v2 (это всё ещё 2.4, по
 малейшей перефразировке моделью того же самого правила между прогонами.
 Порядок построения:
 
-```text
-1. Source anchor строится ДО и НЕЗАВИСИМО от LLM:
-   sourceRevisionHash + sectionPath + startOffset + endOffset + kind +
-   stable local discriminator (например, порядковый номер unit'а внутри
-   секции по результатам детерминированного chunking, не LLM-нумерации)
+**[R4b] Исправлено внутреннее противоречие.** Revision 3/4 называли anchor
+«pre-LLM», но включали в него `kind` и per-unit discriminator — а и `kind`, и
+само КОЛИЧЕСТВО units появляются только ПОСЛЕ экстракции (правило 4
+превращается в три unit'а). Обещать pre-LLM identity через post-LLM свойства
+нельзя, и с появлением committed review manifest (PR H) это стало настоящим
+блокером: manifest обязан сопоставлять свежую экстракцию со старыми решениями
+человека по стабильным anchors. Два РАЗНЫХ идентификатора вместо одного:
 
-2. unitId = hash(sourceRevisionHash + sourceAnchor + kind + discriminator)
-   — стабилен между прогонами экстракции по неизменному документу, даже если
-   LLM перефразировал statement
+```ts
+// 1. Действительно pre-LLM: описывает МЕСТО В ИСТОЧНИКЕ, не unit
+sourceBlockAnchor =
+  hash(sourceRevisionHash + sectionPath + blockStart + blockEnd);
 
-3. contentHash = отдельный fingerprint от statement/facets/triggerCondition —
-   меняется при реальном дрейфе содержания, используется, чтобы ЗАМЕТИТЬ
-   изменение, не чтобы идентифицировать unit
+// 2. Post-extraction, но устойчив к перефразировке
+unitId =
+  hash(
+    sourceBlockAnchor +
+    resolvedEvidenceStart +
+    resolvedEvidenceEnd +
+    kind
+  );
+
+// 3. Отдельный fingerprint содержания
+contentHash = hash(statement + facets + triggerCondition + numericConstraint);
 ```
+
+Правила:
+
+- evidence quote детерминированно разрешается ОБРАТНО в точные offsets
+  исходного текста (`resolvedEvidenceStart`/`End`) — если не разрешается,
+  это ошибка экстракции, а не повод для эвристики;
+- перефразировка `statement` НЕ меняет `unitId`, пока evidence span и `kind`
+  прежние — это и есть свойство, ради которого всё разделение;
+- `contentHash` меняется при дрейфе содержания и служит, чтобы ЗАМЕТИТЬ
+  изменение, не чтобы идентифицировать unit;
+- два unit'а с одинаковыми `kind` + evidence span — **ambiguous duplicate**,
+  требует review; им НЕ назначается случайный LLM-ordinal, чтобы «развести»
+  их;
+- изменение split/span/kind — это изменение экстракции, и оно КОРРЕКТНО даёт
+  `EXTRACTION_GATE_FAIL` в `--mode=e2e` (PR H), а не тихо переиспользует
+  старое человеческое решение.
 
 `parentRuleRef` (PR E) ссылается на `unitId`, построенный этим способом, или
 на сырой source anchor, если родительский unit ещё не прошёл экстракцию.
@@ -1694,6 +1797,16 @@ Zod `.superRefine()` в PR B1 (см. там), с тестами на все ко
   получено новое содержательное ревью именно на диффе Revision 4 — тот же
   двухступенчатый gate, который применяется к каждому PR A1–H ниже.
 
+**[R4b] Зелёный статус CodeRabbit ≠ содержательное ревью.** На этом PR это
+случилось дважды подряд: один раз статус был зелёным при `Review rate limited`,
+второй — при `Review skipped as selected files did not have any reviewable
+changes`. В обоих случаях бот не читал дифф по существу, хотя check показывал
+`success`. Единственное фактическое review-submission CodeRabbit на этом PR —
+от 2026-08-06 07:48 на диффе Revision 2 (9 comments, закрыты в Revision 3).
+Правило: считать ревью состоявшимся только при наличии review submission с
+содержательными замечаниями ИЛИ явного «замечаний нет» по конкретному диффу —
+не по зелёному check-статусу.
+
 **Порядок ревью для каждого PR A1–H:** не мержить сразу по зелёному CI —
 дождаться хотя бы одного содержательного ревью (Grok/Codex/CodeRabbit) на
 диффе. Предыдущий PR (#59) уже показал: содержательные находки пришли через 2
@@ -1721,7 +1834,12 @@ Zod `.superRefine()` в PR B1 (см. там), с тестами на все ко
   ApplicabilityProfile, QueryFrame). `depends-on` A4.
 - **P1** PR B2 — Evaluator'ы. `depends-on` B1.
 - `translation-5ii` (2.2 Concept/ConceptAlias): `depends-on` B2.
-- **P1** PR C — Provider structured-output adapter. `depends-on` A1, B1.
+- **P1** PR C — Provider structured-output adapter. `depends-on` A1, **A2**, B1
+  (**[R4b]**: A2 добавлена — `structured()` принимает `ExtractionRunConfig`,
+  который определяется в A2. Документ больше не даёт исполнителю два разных
+  графа; альтернатива с выносом `CompletionRunConfig` в A1 описана в §3 и,
+  если её выберут, эта строка меняется на `depends-on A1, B1` ОДНОВРЕМЕННО
+  с §3, не по отдельности).
 - **P1** PR D — QueryFrame builder. `depends-on` B1, C, 2.2.
 - **P1** PR E — Структурная экстракция + provenance. `depends-on` A2, B1, C, 2.2.
 - **P1** PR F — Human-review артефакт + JSONL persistence. `depends-on` E.
