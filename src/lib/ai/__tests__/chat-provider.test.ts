@@ -130,14 +130,49 @@ describe('resolveFallbackPolicy', () => {
     ).toBe('CROSS_PROVIDER');
   });
 
-  it('явно заданная политика важнее дефолта', () => {
+  it('явно заданная политика важнее дефолта, когда резерв достижим', () => {
     expect(
       resolveFallbackPolicy({
         messages: MESSAGES,
+        provider: 'anthropic',
+        model: 'claude-sonnet-5',
+        fallbackPolicy: 'SAME_PROVIDER_ONLY',
+        providerModels: { anthropic: 'claude-haiku-4' },
+      })
+    ).toBe('SAME_PROVIDER_ONLY');
+  });
+
+  it('возвращает ФАКТИЧЕСКУЮ политику: явный CROSS_PROVIDER при пиннинге без карты моделей — это NONE', () => {
+    // Иначе артефакт прогона (A2) писал бы «CROSS_PROVIDER» там, где фоллбэк
+    // на самом деле заблокирован — телеметрия врала бы про поведение.
+    expect(
+      resolveFallbackPolicy({
+        messages: MESSAGES,
+        provider: 'anthropic',
+        model: 'claude-sonnet-5',
+        fallbackPolicy: 'CROSS_PROVIDER',
+      })
+    ).toBe('NONE');
+  });
+
+  it('SAME_PROVIDER_ONLY без достижимой альтернативной модели — это NONE', () => {
+    expect(
+      resolveFallbackPolicy({
+        messages: MESSAGES,
+        provider: 'anthropic',
         model: 'claude-sonnet-5',
         fallbackPolicy: 'SAME_PROVIDER_ONLY',
       })
-    ).toBe('SAME_PROVIDER_ONLY');
+    ).toBe('NONE');
+    expect(
+      resolveFallbackPolicy({
+        messages: MESSAGES,
+        provider: 'anthropic',
+        model: 'claude-sonnet-5',
+        fallbackPolicy: 'SAME_PROVIDER_ONLY',
+        providerModels: { anthropic: 'claude-sonnet-5' },
+      })
+    ).toBe('NONE');
   });
 });
 
@@ -428,6 +463,25 @@ describe('createChatCompletionDetailed — таймауты и отмена', ()
       statusCode: 429,
     });
     expect(result.attempts[1].provider).toBe('openai');
+  });
+
+  it('requestTimeoutMs: 0 означает «времени нет», а не «времени сколько угодно»', async () => {
+    fetchMock.mockImplementation((_url: string, init?: RequestInit) =>
+      hangUntilAbort(init)
+    );
+    openaiCreate.mockResolvedValue(openaiOk('rescued'));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      requestTimeoutMs: 0,
+    });
+
+    expect(result.attempts[0]).toMatchObject({
+      outcome: 'ABORTED',
+      errorCode: 'ATTEMPT_TIMEOUT',
+    });
+    expect(result.fallbackUsed).toBe(true);
   });
 
   it('внешняя отмена → ABORTED_BY_CALLER и никакого резерва', async () => {

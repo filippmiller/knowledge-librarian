@@ -205,7 +205,7 @@ function resolveFallbackModel(
 }
 
 /**
- * Дефолт фоллбэк-политики. Три случая, и все три важны:
+ * Дефолт фоллбэк-политики (что ЗАПРОШЕНО). Три случая, и все три важны:
  *
  * - модель закреплена + для резервного провайдера нет model ID → `NONE`
  *   (fail-closed: явное закрепление важнее отказоустойчивости);
@@ -214,13 +214,77 @@ function resolveFallbackModel(
  * - модель НЕ закреплена (сегодняшний типичный call site) → `CROSS_PROVIDER` с
  *   дефолтной моделью целевого провайдера, то есть ровно сегодняшнее поведение.
  */
-export function resolveFallbackPolicy(
-  options: ChatCompletionOptions
-): FallbackPolicy {
+function requestedFallbackPolicy(options: ChatCompletionOptions): FallbackPolicy {
   if (options.fallbackPolicy) return options.fallbackPolicy;
   if (!options.model) return 'CROSS_PROVIDER';
   const fallbackProvider = otherProvider(options.provider ?? getProvider());
   return options.providerModels?.[fallbackProvider] ? 'CROSS_PROVIDER' : 'NONE';
+}
+
+interface FallbackPlan {
+  /** Политика как её попросили (или как вывел дефолт). */
+  requested: FallbackPolicy;
+  /** Политика, которая ФАКТИЧЕСКИ будет исполнена. */
+  effective: FallbackPolicy;
+  target?: { provider: Provider; model: string };
+}
+
+/**
+ * Единственное место, где решается судьба резерва. `effective` может быть
+ * строже `requested` — и это должно быть видно снаружи, а не только в runtime:
+ * артефакт прогона (A2) записывает `effective`, иначе он утверждал бы
+ * «CROSS_PROVIDER» там, где фоллбэк был заблокирован.
+ */
+function planFallback(options: ChatCompletionOptions): FallbackPlan {
+  const requested = requestedFallbackPolicy(options);
+  const primaryProvider = options.provider ?? getProvider();
+  const primaryModel = resolvePrimaryModel(primaryProvider, options);
+
+  if (requested === 'CROSS_PROVIDER') {
+    const fallbackProvider = otherProvider(primaryProvider);
+    const fallbackProviderModel = options.providerModels?.[fallbackProvider];
+    // Закреплённая модель уходит другому провайдеру ТОЛЬКО через providerModels
+    // — даже если CROSS_PROVIDER запрошен явно. Молчаливая подмена модели хуже,
+    // чем честный отказ: у второго провайдера этой модели просто нет.
+    if (options.model && !fallbackProviderModel) {
+      return { requested, effective: 'NONE' };
+    }
+    return {
+      requested,
+      effective: 'CROSS_PROVIDER',
+      target: {
+        provider: fallbackProvider,
+        model: resolveFallbackModel(fallbackProvider, options),
+      },
+    };
+  }
+
+  if (requested === 'SAME_PROVIDER_ONLY') {
+    // Единственный доступный в A1 резерв того же провайдера — альтернативная
+    // модель из providerModels. Нет её (или совпадает с первичной) — резерва
+    // физически нет, и политика обязана честно называться NONE.
+    const alternate = options.providerModels?.[primaryProvider];
+    if (!alternate || alternate === primaryModel) {
+      return { requested, effective: 'NONE' };
+    }
+    return {
+      requested,
+      effective: 'SAME_PROVIDER_ONLY',
+      target: { provider: primaryProvider, model: alternate },
+    };
+  }
+
+  return { requested, effective: 'NONE' };
+}
+
+/**
+ * ФАКТИЧЕСКАЯ фоллбэк-политика вызова — то, что будет исполнено, а не то, что
+ * попросили. Downstream-артефакты записывают именно её.
+ */
+export function resolveFallbackPolicy(
+  options: ChatCompletionOptions
+): FallbackPolicy {
+  return planFallback(options).effective;
 }
 
 /**
@@ -479,8 +543,21 @@ function isRetryableError(error: unknown): boolean {
   return false;
 }
 
-async function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+/**
+ * Backoff, прерываемый внешней отменой: без этого abort во время паузы всё
+ * равно ждал бы полный интервал, прежде чем вызов заметит отмену.
+ */
+async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return;
+  return new Promise<void>((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    signal?.addEventListener('abort', finish, { once: true });
+  });
 }
 
 interface AttemptGate {
@@ -509,18 +586,20 @@ function createAttemptGate(
     else externalSignal.addEventListener('abort', onExternalAbort, { once: true });
   }
 
-  if (
-    timeoutMs !== undefined &&
-    Number.isFinite(timeoutMs) &&
-    timeoutMs > 0 &&
-    !controller.signal.aborted
-  ) {
-    timer = setTimeout(() => {
+  if (timeoutMs !== undefined && Number.isFinite(timeoutMs) && !controller.signal.aborted) {
+    if (timeoutMs <= 0) {
+      // Неположительный бюджет — это «времени нет», а не «времени сколько
+      // угодно»: попытка прерывается сразу, но всё равно попадает в attempts[].
       timedOut = true;
       controller.abort();
-    }, timeoutMs);
-    // Не держим event loop живым ради висящего таймера попытки.
-    (timer as unknown as { unref?: () => void }).unref?.();
+    } else {
+      timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutMs);
+      // Не держим event loop живым ради висящего таймера попытки.
+      (timer as unknown as { unref?: () => void }).unref?.();
+    }
   }
 
   return {
@@ -723,7 +802,7 @@ export async function createChatCompletionDetailed(
 
   const primaryProvider = options.provider ?? getProvider();
   const primaryModel = resolvePrimaryModel(primaryProvider, options);
-  const policy = resolveFallbackPolicy(options);
+  const plan = planFallback(options);
   const temperature = options.temperature ?? defaultTemperature();
 
   const remainingMs = (): number =>
@@ -741,7 +820,10 @@ export async function createChatCompletionDetailed(
     if (request !== undefined && request <= remaining) {
       return { ms: request, code: 'ATTEMPT_TIMEOUT' };
     }
-    return { ms: Math.max(remaining, 1), code: 'TOTAL_DEADLINE_EXCEEDED' };
+    // Не подтягиваем до 1мс: если бюджет уже исчерпан, попытка обязана
+    // прерваться сразу и попасть в attempts[] как TOTAL_DEADLINE_EXCEEDED,
+    // а не изображать гонку в одну миллисекунду.
+    return { ms: remaining, code: 'TOTAL_DEADLINE_EXCEEDED' };
   };
 
   // Диагностика первичного провайдера — то, что сегодня улетает наружу через
@@ -801,39 +883,15 @@ export async function createChatCompletionDetailed(
     console.warn(
       `[chat-provider] ${primaryProvider} attempt ${attempt + 1} failed (retryable), waiting ${delay}ms...`
     );
-    await sleep(delay);
+    await sleep(delay, options.signal);
   }
 
   // --- Резерв ---
-  const fallbackProvider = otherProvider(primaryProvider);
-  const modelIsPinned = !!options.model;
-  const fallbackProviderModel = options.providerModels?.[fallbackProvider];
+  const fallbackTarget = plan.target;
 
-  // Закреплённая модель уходит другому провайдеру ТОЛЬКО через providerModels.
-  // Без него — fail-closed: молчаливая подмена модели хуже, чем честный отказ.
-  const crossProviderAllowed =
-    policy === 'CROSS_PROVIDER' && (!modelIsPinned || !!fallbackProviderModel);
-
-  const sameProviderAlternate =
-    policy === 'SAME_PROVIDER_ONLY' &&
-    options.providerModels?.[primaryProvider] &&
-    options.providerModels[primaryProvider] !== primaryModel
-      ? options.providerModels[primaryProvider]
-      : undefined;
-
-  const fallbackTarget: { provider: Provider; model: string } | undefined =
-    crossProviderAllowed
-      ? {
-          provider: fallbackProvider,
-          model: resolveFallbackModel(fallbackProvider, options),
-        }
-      : sameProviderAlternate
-        ? { provider: primaryProvider, model: sameProviderAlternate }
-        : undefined;
-
-  if (policy === 'CROSS_PROVIDER' && modelIsPinned && !fallbackProviderModel) {
+  if (plan.requested !== plan.effective) {
     console.warn(
-      `[chat-provider] cross-provider fallback blocked: model "${options.model}" is pinned and providerModels.${fallbackProvider} is not set`
+      `[chat-provider] fallback downgraded ${plan.requested} → ${plan.effective}: model "${options.model}" is pinned and no providerModels entry gives the fallback target a valid model ID`
     );
   }
 
@@ -1021,15 +1079,18 @@ export async function* streamChatCompletionTokens(
 
 export interface ChatCompletionStreamOperation {
   /**
-   * Токены по мере поступления. Итерировать обязательно (или вызвать
-   * `.return()`): `completion` разрешается из финализации этого генератора.
+   * Токены по мере поступления. Генератор ЛЕНИВЫЙ: запрос к провайдеру
+   * начинается с первой итерации. `completion` разрешается из финализации
+   * именно этого генератора, поэтому `tokens` обязан быть проитерирован
+   * (или явно закрыт `.return()`) — ждать одну лишь `completion`, не тронув
+   * `tokens`, значит ждать вечно.
    */
   tokens: AsyncIterable<string>;
   /**
    * Метаданные прогона. `text` — накопленное на момент завершения (при раннем
    * разрыве — префикс). Разрешается и при нормальном конце, и при раннем
    * разрыве потребителем; отклоняется `ChatCompletionError` при ошибке
-   * провайдера. Не подвисает.
+   * провайдера. Начатое потребление стрима не подвисает ни на одном из путей.
    */
   completion: Promise<ChatCompletionResult>;
 }
@@ -1056,13 +1117,15 @@ export function createChatCompletionStreamDetailed(
   // unhandled rejection и уронило бы процесс.
   completion.catch(() => {});
 
-  const timeoutMs =
-    options.requestTimeoutMs !== undefined || options.totalDeadlineMs !== undefined
-      ? Math.min(
-          options.requestTimeoutMs ?? Number.POSITIVE_INFINITY,
-          options.totalDeadlineMs ?? Number.POSITIVE_INFINITY
-        )
-      : undefined;
+  // Стрим — одна попытка, поэтому оба бюджета сводятся к одному таймеру. Код
+  // ошибки должен называть тот бюджет, который реально сработал.
+  const requestBudget = options.requestTimeoutMs ?? Number.POSITIVE_INFINITY;
+  const deadlineBudget = options.totalDeadlineMs ?? Number.POSITIVE_INFINITY;
+  const timeoutMs = Number.isFinite(Math.min(requestBudget, deadlineBudget))
+    ? Math.min(requestBudget, deadlineBudget)
+    : undefined;
+  const timeoutCode =
+    requestBudget <= deadlineBudget ? 'ATTEMPT_TIMEOUT' : 'TOTAL_DEADLINE_EXCEEDED';
 
   async function* run(): AsyncGenerator<string> {
     const startedAt = new Date().toISOString();
@@ -1096,7 +1159,7 @@ export function createChatCompletionStreamDetailed(
       const aborted = isAbortError(error) || gate.signal.aborted;
       const errorCode = aborted
         ? gate.timedOut
-          ? 'ATTEMPT_TIMEOUT'
+          ? timeoutCode
           : 'ABORTED_BY_CALLER'
         : extractErrorCode(error);
       const statusCode = extractStatusCode(error);
