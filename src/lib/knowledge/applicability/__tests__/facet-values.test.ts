@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { SCENARIOS } from '@/lib/knowledge/scenarios';
+import {
+  CITY_CONCEPTS,
+  COUNTRY_CONCEPTS,
+  DOCUMENT_TYPE_CONCEPTS,
+  LANGUAGE_CONCEPTS,
+  SERVICE_CONCEPTS,
+} from '../concept-registry';
 import { FACET_KEYS, facetMapSchema, type FacetKey } from '../facets';
 import { applicabilityProfileSchema } from '../profile';
 
@@ -62,6 +69,64 @@ describe('scenario — значение сверяется с реестром S
       reviewedAt: null,
     });
     expect(result.success).toBe(false);
+  });
+});
+
+describe('service — значение сверяется с SERVICE_CONCEPTS (Задача 2.2), а не только с формой', () => {
+  it.each(Object.keys(SERVICE_CONCEPTS))('существующая услуга %s принимается', (id) => {
+    expect(facetValueAccepted('service', id)).toBe(true);
+  });
+
+  it('выдуманная услуга отвергается, хотя её формат корректен', () => {
+    expect(facetValueAccepted('service', 'legalization_of_everything')).toBe(false);
+  });
+});
+
+describe('documentType — сверяется с DOCUMENT_TYPE_CONCEPTS', () => {
+  it.each(Object.keys(DOCUMENT_TYPE_CONCEPTS))('существующий тип %s принимается', (id) => {
+    expect(facetValueAccepted('documentType', id)).toBe(true);
+  });
+
+  it('выдуманный тип документа отвергается', () => {
+    expect(facetValueAccepted('documentType', 'birth_certificate_deluxe')).toBe(false);
+  });
+});
+
+describe('issuingCountry / destinationCountry — сверяется с COUNTRY_CONCEPTS', () => {
+  it.each(Object.keys(COUNTRY_CONCEPTS))('%s принимается на обеих осях', (code) => {
+    expect(facetValueAccepted('issuingCountry', code)).toBe(true);
+    expect(facetValueAccepted('destinationCountry', code)).toBe(true);
+  });
+
+  it('формально верный, но не зарегистрированный код страны отвергается', () => {
+    expect(facetValueAccepted('issuingCountry', 'US')).toBe(false);
+  });
+});
+
+describe('languageFrom / languageTo — сверяется с LANGUAGE_CONCEPTS', () => {
+  it.each(Object.keys(LANGUAGE_CONCEPTS))('%s принимается на обеих осях', (code) => {
+    expect(facetValueAccepted('languageFrom', code)).toBe(true);
+    expect(facetValueAccepted('languageTo', code)).toBe(true);
+  });
+
+  it('формально верный, но не зарегистрированный код языка отвергается', () => {
+    expect(facetValueAccepted('languageFrom', 'xx')).toBe(false);
+  });
+});
+
+describe('deliveryCity — сверяется с CITY_CONCEPTS', () => {
+  it.each(Object.keys(CITY_CONCEPTS))('%s принимается', (id) => {
+    expect(facetValueAccepted('deliveryCity', id)).toBe(true);
+  });
+
+  it('город вне подтверждённого списка отвергается', () => {
+    expect(facetValueAccepted('deliveryCity', 'moscow')).toBe(false);
+  });
+});
+
+describe('partner — словарь пуст, поэтому отвергается ЛЮБОЕ значение', () => {
+  it('формально верный slug партнёра всё равно отвергается — партнёров ещё не подтверждено', () => {
+    expect(facetValueAccepted('partner', 'some_partner')).toBe(false);
   });
 });
 

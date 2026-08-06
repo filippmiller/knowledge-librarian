@@ -59,8 +59,8 @@ describe('QueryFrame — форма контракта', () => {
             ...UNKNOWN_QUERY_FACETS,
             service: {
               state: 'KNOWN',
-              include: ['legalization'],
-              exclude: ['apostille'],
+              include: ['translation'],
+              exclude: ['apostille_spb'],
               evidence: EVIDENCE,
             },
           },

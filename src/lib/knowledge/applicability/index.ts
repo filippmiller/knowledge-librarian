@@ -8,6 +8,8 @@
  */
 export * from './text';
 export * from './review';
+export * from './concepts';
+export * from './concept-registry';
 export * from './facets';
 export * from './kinds';
 export * from './trigger-facts';
