@@ -22,6 +22,8 @@ export * from './trigger-facts';
 export * from './profile';
 export * from './query-frame';
 export * from './query-frame-builder';
+export * from './extraction';
+export * from './extraction-parent-refs';
 export * from './reasons';
 export * from './eligibility';
 export * from './scope';
