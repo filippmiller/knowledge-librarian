@@ -1,13 +1,6 @@
 import { z } from 'zod';
-import {
-  CITY_CONCEPTS,
-  COUNTRY_CONCEPTS,
-  DOCUMENT_TYPE_CONCEPTS,
-  LANGUAGE_CONCEPTS,
-  PARTNER_CONCEPTS,
-  SERVICE_CONCEPTS,
-} from './concept-registry';
-import { resolveConceptAlias, type ConceptVocabulary } from './concepts';
+import { CONCEPT_VOCABULARY_BY_FACET } from './concept-registry';
+import { resolveConceptAlias } from './concepts';
 import { conceptIdSchema, FACET_KEYS, FACET_REGISTRY, type FacetKey } from './facets';
 import { nonBlankString } from './text';
 import { TRIGGER_FACT_KEYS, TRIGGER_FACT_REGISTRY, type TriggerFactKey } from './trigger-facts';
@@ -88,21 +81,6 @@ export const rawQueryExtractionSchema = z.strictObject({
   triggerFactMentions: z.array(rawTriggerFactMentionSchema).readonly(),
   questionAspects: z.array(z.enum(QUESTION_ASPECTS)).readonly(),
 });
-
-/** Фасеты, чьи значения живут в `ConceptVocabulary` (Задача 2.2) — резолвятся
- *  через `resolveConceptAlias`, а не точным совпадением формы. `scenario`
- *  (дерево `SCENARIOS`) и `documentForm` (закрытый enum без алиасов)
- *  обрабатываются отдельно ниже. */
-const CONCEPT_VOCABULARY_BY_FACET: Partial<Record<FacetKey, ConceptVocabulary>> = {
-  service: SERVICE_CONCEPTS,
-  documentType: DOCUMENT_TYPE_CONCEPTS,
-  issuingCountry: COUNTRY_CONCEPTS,
-  destinationCountry: COUNTRY_CONCEPTS,
-  languageFrom: LANGUAGE_CONCEPTS,
-  languageTo: LANGUAGE_CONCEPTS,
-  deliveryCity: CITY_CONCEPTS,
-  partner: PARTNER_CONCEPTS,
-};
 
 const DOCUMENT_FORM_VALUES = ['ORIGINAL', 'SCAN', 'COPY'] as const;
 

@@ -1,4 +1,5 @@
 import { assertVocabularyConsistency, type ConceptVocabulary } from './concepts';
+import type { FacetKey } from './facets';
 
 /**
  * Конкретные словари (Задача 2.2). Каждый смотрит на РЕАЛЬНЫЙ источник, а не
@@ -160,6 +161,26 @@ export const CITY_CONCEPTS: ConceptVocabulary = {
 // пилот не внесёт первое реальное — это правильное поведение, не недоделка.
 // ────────────────────────────────────────────────────────────────────────────
 export const PARTNER_CONCEPTS: ConceptVocabulary = {};
+
+/**
+ * Фасеты, чьи значения живут в `ConceptVocabulary` — резолвятся через
+ * `resolveConceptAlias`, а не точным совпадением формы. `scenario` (дерево
+ * `SCENARIOS`) и `documentForm` (закрытый enum без алиасов) сюда не входят —
+ * у них нет словаря синонимов, обрабатываются отдельно на месте
+ * использования. Единственное место этой карты — использовалась бы третий
+ * раз (query-frame-builder.ts, теперь и retrieval-text.ts), значит место ей
+ * здесь, рядом с самими словарями, а не копией в каждом потребителе.
+ */
+export const CONCEPT_VOCABULARY_BY_FACET: Partial<Record<FacetKey, ConceptVocabulary>> = {
+  service: SERVICE_CONCEPTS,
+  documentType: DOCUMENT_TYPE_CONCEPTS,
+  issuingCountry: COUNTRY_CONCEPTS,
+  destinationCountry: COUNTRY_CONCEPTS,
+  languageFrom: LANGUAGE_CONCEPTS,
+  languageTo: LANGUAGE_CONCEPTS,
+  deliveryCity: CITY_CONCEPTS,
+  partner: PARTNER_CONCEPTS,
+};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Проверка на ИМПОРТЕ модуля, а не только в тестах: битый словарь (дрейф
