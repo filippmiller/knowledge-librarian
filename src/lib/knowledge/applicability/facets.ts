@@ -3,6 +3,15 @@ import { z } from 'zod';
 // ним, а не заводит вторую копию списка. Модуль чисто декларативный (в нём
 // только type-only импорт Prisma), никакого обращения к БД он не приносит.
 import { getScenario } from '@/lib/knowledge/scenarios';
+import {
+  CITY_CONCEPTS,
+  COUNTRY_CONCEPTS,
+  DOCUMENT_TYPE_CONCEPTS,
+  LANGUAGE_CONCEPTS,
+  PARTNER_CONCEPTS,
+  SERVICE_CONCEPTS,
+} from './concept-registry';
+import { isKnownConcept } from './concepts';
 import { isoTimestampSchema, reviewerIdSchema } from './review';
 
 /**
@@ -44,13 +53,16 @@ const scenarioKeySchema = z
   });
 
 /**
- * Идентификатор концепта (Задача 2.2). В отличие от `scenario`, сверять пока
- * не с чем: контролируемого словаря концептов в репозитории ещё нет, поэтому
- * проверка ФОРМАТНАЯ, и это известный, а не забытый пробел — он закрывается
- * Задачей 2.2 тем же способом, что закрыт `scenario`. То же относится к кодам
- * стран, языков, городов и партнёров ниже.
+ * Идентификатор концепта — форма, общая для `service` и `documentType`.
+ * Значение сверяется с конкретным словарём (`SERVICE_CONCEPTS` /
+ * `DOCUMENT_TYPE_CONCEPTS`, Задача 2.2, `concept-registry.ts`) НИЖЕ, отдельной
+ * схемой на каждую ось — эта форма сама по себе намеренно не проверяет
+ * членство: `service` и `documentType` живут в РАЗНЫХ словарях, и общая
+ * форматная схема не должна незаметно принять код одного там, где нужен код
+ * другого.
  * Синтаксическое совпадение кодов — НЕ то же, что совпадение концептов
- * (truth table §3.4); сопоставление синонимов появится вместе с `ConceptAlias`.
+ * (truth table §3.4); сопоставление синонимов — `resolveConceptAlias`
+ * (`concepts.ts`), используется на пути извлечения (PR E), а не здесь.
  */
 export const conceptIdSchema = z
   .string()
@@ -59,25 +71,52 @@ export const conceptIdSchema = z
     'идентификатор концепта — slug в нижнем регистре, напр. "apostille.zags"'
   );
 
-/** Страна — ISO-3166-1 alpha-2, верхний регистр. */
+const serviceIdSchema = conceptIdSchema.refine((id) => isKnownConcept(SERVICE_CONCEPTS, id), {
+  message: 'такой услуги нет в SERVICE_CONCEPTS (concept-registry.ts)',
+});
+
+const documentTypeIdSchema = conceptIdSchema.refine(
+  (id) => isKnownConcept(DOCUMENT_TYPE_CONCEPTS, id),
+  { message: 'такого типа документа нет в DOCUMENT_TYPE_CONCEPTS (concept-registry.ts)' }
+);
+
+/** Страна — ISO-3166-1 alpha-2, верхний регистр; сверяется с COUNTRY_CONCEPTS
+ *  (Задача 2.2) — намеренно минимальным, растёт пилотом по факту документов. */
 const countryCodeSchema = z
   .string()
-  .regex(/^[A-Z]{2}$/, 'код страны — ISO-3166-1 alpha-2, напр. "RU"');
+  .regex(/^[A-Z]{2}$/, 'код страны — ISO-3166-1 alpha-2, напр. "RU"')
+  .refine((code) => isKnownConcept(COUNTRY_CONCEPTS, code), {
+    message: 'такой страны нет в COUNTRY_CONCEPTS (concept-registry.ts)',
+  });
 
-/** Язык — ISO-639, нижний регистр. */
+/** Язык — ISO-639 (плюс несколько кодов вне 639-1 для языков без стабильного
+ *  двухбуквенного — см. комментарий в concept-registry.ts), нижний регистр;
+ *  сверяется с LANGUAGE_CONCEPTS. */
 const languageCodeSchema = z
   .string()
-  .regex(/^[a-z]{2,3}$/, 'код языка — ISO-639, напр. "ru"');
+  .regex(/^[a-z]{2,3}$/, 'код языка — ISO-639, напр. "ru"')
+  .refine((code) => isKnownConcept(LANGUAGE_CONCEPTS, code), {
+    message: 'такого языка нет в LANGUAGE_CONCEPTS (concept-registry.ts)',
+  });
 
-/** Город доставки — slug в нижнем регистре: `spb`, `nizhny_novgorod`. */
+/** Город доставки — slug в нижнем регистре: `spb`, `lo`; сверяется с
+ *  CITY_CONCEPTS. */
 const cityCodeSchema = z
   .string()
-  .regex(/^[a-z0-9]+(?:_[a-z0-9]+)*$/, 'код города — slug в нижнем регистре, напр. "spb"');
+  .regex(/^[a-z0-9]+(?:_[a-z0-9]+)*$/, 'код города — slug в нижнем регистре, напр. "spb"')
+  .refine((code) => isKnownConcept(CITY_CONCEPTS, code), {
+    message: 'такого города нет в CITY_CONCEPTS (concept-registry.ts)',
+  });
 
-/** Партнёр — slug в нижнем регистре. */
+/** Партнёр — slug в нижнем регистре; PARTNER_CONCEPTS пуст сегодня, поэтому
+ *  эта схема отвергает любое значение, пока пилот не внесёт первого
+ *  подтверждённого партнёра — это ожидаемое поведение, не недоделка. */
 const partnerIdSchema = z
   .string()
-  .regex(/^[a-z0-9]+(?:[_-][a-z0-9]+)*$/, 'идентификатор партнёра — slug в нижнем регистре');
+  .regex(/^[a-z0-9]+(?:[_-][a-z0-9]+)*$/, 'идентификатор партнёра — slug в нижнем регистре')
+  .refine((id) => isKnownConcept(PARTNER_CONCEPTS, id), {
+    message: 'такого партнёра нет в PARTNER_CONCEPTS (concept-registry.ts) — пока не подтверждён',
+  });
 
 /**
  * Форма документа. Закрытый список: план (§4.1) называет ровно
@@ -99,11 +138,11 @@ export const FACET_REGISTRY = {
     description: 'к какой процедуре относится знание (truth table §3.1)',
   },
   service: {
-    valueSchema: conceptIdSchema,
+    valueSchema: serviceIdSchema,
     description: 'к какой услуге относится знание (truth table §3.4)',
   },
   documentType: {
-    valueSchema: conceptIdSchema,
+    valueSchema: documentTypeIdSchema,
     description: 'тип документа: свидетельство, диплом, доверенность',
   },
   issuingCountry: {
