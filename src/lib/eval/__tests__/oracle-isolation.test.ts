@@ -38,6 +38,7 @@ const EVAL_DIR_PREFIX = 'src/lib/eval/';
 const ORACLE_FILENAMES = [
   'test_cases_semantic_rules.jsonl',
   'kontrolnye_voprosy_i_klyuch.md',
+  'negative_case_applicability_oracle.jsonl',
 ] as const;
 
 const FORBIDDEN_LITERAL_FRAGMENTS = [
@@ -67,6 +68,21 @@ const PRODUCT_FILES = collectSourceFiles(SRC_ROOT).filter(
   (file) => !toRepoRelative(file).startsWith(EVAL_DIR_PREFIX)
 );
 
+/**
+ * Разбор ОДИН раз на весь набор утверждений.
+ *
+ * Раньше каждый тест сканировал все файлы заново — четырёхкратный разбор всего
+ * `src/` через AST. Под нагрузкой полного прогона это упиралось в дефолтный
+ * таймаут vitest (5 с) и давало ЛОЖНОЕ падение ворот: тест «нашёл нарушение»
+ * выглядел бы одинаково с тестом «не успел», а мигающие ворота безопасности
+ * первыми идут под `.skip`.
+ */
+const SCANNED = PRODUCT_FILES.map((file) => ({
+  file,
+  relative: toRepoRelative(file),
+  ...scanSourceReferences(file),
+}));
+
 describe('изоляция oracle от продуктового кода', () => {
   it('под воротами оказывается реальный объём кода, а не пустое множество', () => {
     expect(PRODUCT_FILES.length).toBeGreaterThan(50);
@@ -82,8 +98,7 @@ describe('изоляция oracle от продуктового кода', () =>
   it('продуктовый код не импортирует ничего из lib/eval — ни статически, ни динамически', () => {
     const violations: string[] = [];
 
-    for (const file of PRODUCT_FILES) {
-      const { moduleSpecifiers } = scanSourceReferences(file);
+    for (const { file, relative, moduleSpecifiers } of SCANNED) {
       for (const specifier of moduleSpecifiers) {
         const normalized = specifier.replace(/\\/g, '/');
         const reachesEval =
@@ -93,7 +108,7 @@ describe('изоляция oracle от продуктового кода', () =>
               .resolve(path.dirname(file), normalized)
               .replace(/\\/g, '/')
               .includes('/src/lib/eval/'));
-        if (reachesEval) violations.push(`${toRepoRelative(file)} → ${specifier}`);
+        if (reachesEval) violations.push(`${relative} → ${specifier}`);
       }
     }
 
@@ -103,12 +118,11 @@ describe('изоляция oracle от продуктового кода', () =>
   it('продуктовый код не упоминает файлы oracle строковым литералом', () => {
     const violations: string[] = [];
 
-    for (const file of PRODUCT_FILES) {
-      const { stringLiterals } = scanSourceReferences(file);
+    for (const { relative, stringLiterals } of SCANNED) {
       for (const literal of stringLiterals) {
         for (const fragment of FORBIDDEN_LITERAL_FRAGMENTS) {
           if (literal.includes(fragment)) {
-            violations.push(`${toRepoRelative(file)} → ${fragment}`);
+            violations.push(`${relative} → ${fragment}`);
           }
         }
       }
@@ -120,10 +134,9 @@ describe('изоляция oracle от продуктового кода', () =>
   it('продуктовый код не зашивает путь к учебному DOCX — источник передаёт раннер', () => {
     const violations: string[] = [];
 
-    for (const file of PRODUCT_FILES) {
-      const { stringLiterals } = scanSourceReferences(file);
+    for (const { relative, stringLiterals } of SCANNED) {
       if (stringLiterals.some((literal) => literal.includes(SOURCE_DOCX_FILENAME))) {
-        violations.push(toRepoRelative(file));
+        violations.push(relative);
       }
     }
 
