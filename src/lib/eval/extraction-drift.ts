@@ -22,11 +22,21 @@ import type { PersistedKnowledgeUnit } from '@/lib/knowledge/applicability/ident
 import type { ExtractionUncertainty } from '@/lib/knowledge/applicability/extraction';
 import type { TriggerClause, TriggerCondition } from '@/lib/knowledge/applicability/trigger';
 
-export type UnitDriftStatus =
-  | 'STABLE'
-  | 'CONTENT_CHANGE'
-  | 'CONTENT_OMISSION'
-  | 'CONTENT_ADDITION'
+/**
+ * Присутствие unitId по обе стороны сравнения — ортогонально тому, ЧТО
+ * именно изменилось в содержании (pre-retrieval hardening, Step 1). Раньше
+ * один `UnitDriftStatus` смешивал "unit присутствует в обеих сторонах" И
+ * "contentHash не изменился" в одно значение `STABLE`, из-за чего
+ * `status='STABLE'` мог сосуществовать с `parentDrift=true` или
+ * `uncertaintyDrift=true` — `stableCount` завышался. Присутствие и дрейф
+ * содержания теперь раздельные измерения: `identityStatus` отвечает только
+ * на "есть ли unit по обе стороны", `UnitDriftDetail`/`fullyStable` — на
+ * "изменилось ли что-то в его содержании".
+ */
+export type IdentityStatus =
+  | 'PRESENT_BOTH'
+  | 'OMITTED'
+  | 'ADDED'
   /** unitId встретился больше одного раза на ОДНОЙ стороне сравнения — не
    *  должно происходить для units, прошедших `assignIdentity` (тот уже
    *  выделяет такие коллизии в `ambiguousDuplicates` и не пускает их дальше),
@@ -34,20 +44,24 @@ export type UnitDriftStatus =
    *  #76: "ambiguous cases should report UNKNOWN/REVIEW_REQUIRED rather than
    *  guessing" — тот же класс защиты, что P0 translation-rbj,
    *  `safeUnitIdByExtractionRef`). */
-  | 'AMBIGUOUS_DUPLICATE_UNIT_ID';
+  | 'AMBIGUOUS';
 
 export interface UnitDriftDetail {
-  readonly contentHashChanged: boolean;
-  readonly parentDrift: boolean;
-  readonly triggerDrift: boolean;
-  readonly uncertaintyDrift: boolean;
+  readonly contentChanged: boolean;
+  readonly parentChanged: boolean;
+  readonly triggerChanged: boolean;
+  readonly uncertaintyChanged: boolean;
 }
 
 export interface UnitDriftEntry {
   readonly unitId: string;
-  readonly status: UnitDriftStatus;
+  readonly identityStatus: IdentityStatus;
+  /** `true` iff `identityStatus === 'PRESENT_BOTH'` И ни один из четырёх
+   *  `UnitDriftDetail`-флагов не взведён — "стабильно" значит стабильно по
+   *  ВСЕМ измерениям сразу, не только по contentHash. */
+  readonly fullyStable: boolean;
   readonly sourceBlockAnchor: string | null;
-  /** `null` для CONTENT_OMISSION/CONTENT_ADDITION — нечего сравнивать. */
+  /** `null`, если identityStatus !== 'PRESENT_BOTH' — нечего сравнивать. */
   readonly detail: UnitDriftDetail | null;
 }
 
@@ -62,11 +76,14 @@ export interface FragmentationChangeGroup {
 }
 
 export interface ExtractionDriftReport {
-  readonly stableCount: number;
+  readonly fullyStableCount: number;
   readonly contentChangedCount: number;
+  readonly parentChangedCount: number;
+  readonly triggerChangedCount: number;
+  readonly uncertaintyChangedCount: number;
   readonly omittedCount: number;
   readonly addedCount: number;
-  readonly ambiguousDuplicateCount: number;
+  readonly ambiguousCount: number;
   readonly entries: readonly UnitDriftEntry[];
   readonly fragmentationChanges: readonly FragmentationChangeGroup[];
 }
@@ -108,14 +125,18 @@ function computeDrift(
   candidate: PersistedKnowledgeUnit
 ): UnitDriftDetail {
   return {
-    contentHashChanged: baseline.contentHash !== candidate.contentHash,
+    contentChanged: baseline.contentHash !== candidate.contentHash,
     // parentRuleRef — уже настоящий unitId (или null); unitId стабилен между
     // прогонами того же источника (f(sourceRevisionHash, offsets, kind)),
     // поэтому прямое сравнение строк осмысленно без дополнительного резолва.
-    parentDrift: baseline.parentRuleRef !== candidate.parentRuleRef,
-    triggerDrift: !triggerConditionsEqual(baseline.triggerCondition, candidate.triggerCondition),
-    uncertaintyDrift: !uncertaintiesEqual(baseline.uncertainties, candidate.uncertainties),
+    parentChanged: baseline.parentRuleRef !== candidate.parentRuleRef,
+    triggerChanged: !triggerConditionsEqual(baseline.triggerCondition, candidate.triggerCondition),
+    uncertaintyChanged: !uncertaintiesEqual(baseline.uncertainties, candidate.uncertainties),
   };
+}
+
+function isFullyStable(detail: UnitDriftDetail): boolean {
+  return !detail.contentChanged && !detail.parentChanged && !detail.triggerChanged && !detail.uncertaintyChanged;
 }
 
 function computeFragmentationChanges(
@@ -126,11 +147,11 @@ function computeFragmentationChanges(
 
   for (const e of entries) {
     if (e.sourceBlockAnchor === null) continue;
-    if (e.status === 'CONTENT_OMISSION') {
+    if (e.identityStatus === 'OMITTED') {
       const list = omittedByAnchor.get(e.sourceBlockAnchor);
       if (list) list.push(e.unitId);
       else omittedByAnchor.set(e.sourceBlockAnchor, [e.unitId]);
-    } else if (e.status === 'CONTENT_ADDITION') {
+    } else if (e.identityStatus === 'ADDED') {
       const list = addedByAnchor.get(e.sourceBlockAnchor);
       if (list) list.push(e.unitId);
       else addedByAnchor.set(e.sourceBlockAnchor, [e.unitId]);
@@ -201,7 +222,7 @@ export function compareExtractionRuns(
     // ВЫШЕ по пайплайну (assignIdentity/ambiguousDuplicates), не просто
     // молчаливого исключения отсюда.
     if (baselineDuplicated.has(id) || candidateDuplicated.has(id)) {
-      entries.push({ unitId: id, status: 'AMBIGUOUS_DUPLICATE_UNIT_ID', sourceBlockAnchor: null, detail: null });
+      entries.push({ unitId: id, identityStatus: 'AMBIGUOUS', fullyStable: false, sourceBlockAnchor: null, detail: null });
       continue;
     }
 
@@ -211,14 +232,16 @@ export function compareExtractionRuns(
     if (b !== undefined && c === undefined) {
       entries.push({
         unitId: id,
-        status: 'CONTENT_OMISSION',
+        identityStatus: 'OMITTED',
+        fullyStable: false,
         sourceBlockAnchor: b.sourceBlockAnchor,
         detail: null,
       });
     } else if (b === undefined && c !== undefined) {
       entries.push({
         unitId: id,
-        status: 'CONTENT_ADDITION',
+        identityStatus: 'ADDED',
+        fullyStable: false,
         sourceBlockAnchor: c.sourceBlockAnchor,
         detail: null,
       });
@@ -226,7 +249,8 @@ export function compareExtractionRuns(
       const detail = computeDrift(b, c);
       entries.push({
         unitId: id,
-        status: detail.contentHashChanged ? 'CONTENT_CHANGE' : 'STABLE',
+        identityStatus: 'PRESENT_BOTH',
+        fullyStable: isFullyStable(detail),
         sourceBlockAnchor: c.sourceBlockAnchor,
         detail,
       });
@@ -236,11 +260,14 @@ export function compareExtractionRuns(
   entries.sort((a, b) => compareByCodeUnits(a.unitId, b.unitId));
 
   return {
-    stableCount: entries.filter((e) => e.status === 'STABLE').length,
-    contentChangedCount: entries.filter((e) => e.status === 'CONTENT_CHANGE').length,
-    omittedCount: entries.filter((e) => e.status === 'CONTENT_OMISSION').length,
-    addedCount: entries.filter((e) => e.status === 'CONTENT_ADDITION').length,
-    ambiguousDuplicateCount: entries.filter((e) => e.status === 'AMBIGUOUS_DUPLICATE_UNIT_ID').length,
+    fullyStableCount: entries.filter((e) => e.fullyStable).length,
+    contentChangedCount: entries.filter((e) => e.detail?.contentChanged === true).length,
+    parentChangedCount: entries.filter((e) => e.detail?.parentChanged === true).length,
+    triggerChangedCount: entries.filter((e) => e.detail?.triggerChanged === true).length,
+    uncertaintyChangedCount: entries.filter((e) => e.detail?.uncertaintyChanged === true).length,
+    omittedCount: entries.filter((e) => e.identityStatus === 'OMITTED').length,
+    addedCount: entries.filter((e) => e.identityStatus === 'ADDED').length,
+    ambiguousCount: entries.filter((e) => e.identityStatus === 'AMBIGUOUS').length,
     entries,
     fragmentationChanges: computeFragmentationChanges(entries),
   };
