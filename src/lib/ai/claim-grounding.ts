@@ -157,6 +157,25 @@ const NUMERAL_ALTERNATION = [...NUMERAL_WORDS.keys()]
   .join('|');
 
 /**
+ * Составные числительные («двадцать пять», «тридцать два») — десяток и
+ * единица, идущие подряд. Выводятся из `NUMERAL_WORDS`, а не заведены отдельной
+ * таблицей: диапазон значений (кратно 10 от 20 — «единица», 1–9) вычисляется
+ * один раз, и добавление нового десятка в основную таблицу автоматически
+ * включает его в составную сборку.
+ */
+const DECADE_ALTERNATION = [...NUMERAL_WORDS.entries()]
+  .filter(([, value]) => Number(value) % 10 === 0 && Number(value) >= 20)
+  .map(([word]) => word)
+  .sort((a, b) => b.length - a.length)
+  .join('|');
+
+const UNIT_DIGIT_ALTERNATION = [...NUMERAL_WORDS.entries()]
+  .filter(([, value]) => Number(value) >= 1 && Number(value) <= 9)
+  .map(([word]) => word)
+  .sort((a, b) => b.length - a.length)
+  .join('|');
+
+/**
  * Одно необязательное слово между числом и единицей: «не более трёх ТАКИХ
  * циклов», «15 ПОЛНЫХ секунд». Ровно одно, а не любое количество: больший зазор
  * начинает склеивать соседние утверждения («15 минут до конца рабочего дня»).
@@ -170,6 +189,15 @@ const NUMERAL_ALTERNATION = [...NUMERAL_WORDS.keys()]
  * границу предложения невозможна.
  */
 const GAP = String.raw`(?:\s+[а-яё]+)?\s*`;
+
+/**
+ * Тот же зазор, но заполнитель НЕ имеет права сам быть числительным словом.
+ * Только для `wordPattern`: без этого ограничения «двадцати [пяти] секунд»
+ * матчился бы как «двадцать» (20) с «пяти» проглоченным как будто это
+ * прилагательное — та же дыра, которую решает `compoundWordPattern`, только
+ * с другой стороны (голова составного числа вместо хвоста).
+ */
+const WORD_GAP = String.raw`(?:\s+(?!(?:${NUMERAL_ALTERNATION})(?![а-яёА-ЯЁ]))[а-яё]+)?\s*`;
 
 function singlePattern(spec: UnitSpec): RegExp {
   return new RegExp(String.raw`(${NUM})${MAGNITUDE}${GAP}${spec.pattern}`, 'giu');
@@ -186,13 +214,40 @@ function rangePattern(spec: UnitSpec): RegExp {
 }
 
 /**
+ * Составное числительное («двадцать» + «пять» = 25), примыкающее к единице
+ * НАПРЯМУЮ (без `GAP` между частями — по-русски десяток и единица не
+ * разделяются посторонним словом).
+ *
+ * НАЙДЕНО АДВЕРСАРИАЛЬНЫМ РЕВЬЮ: без этого правила `GAP` в одиночном
+ * `wordPattern` молча съедал вторую часть составного числительного как будто
+ * это было прилагательное-заполнитель («15 ПОЛНЫХ секунд») — «двадцать пять»
+ * разбиралось как «двадцать» (20) с потерянным «пять». Хуже того: если первое
+ * слово составного числительного случайно совпадало с реальным числом
+ * источника («тридцать два» против источника «30»), выдуманное число проходило
+ * заземление как «подтверждённое».
+ */
+function compoundWordPattern(spec: UnitSpec): RegExp {
+  return new RegExp(
+    String.raw`(?<![а-яёА-ЯЁ])(${DECADE_ALTERNATION})\s+(${UNIT_DIGIT_ALTERNATION})(?![а-яёА-ЯЁ])${GAP}${spec.pattern}`,
+    'giu'
+  );
+}
+
+/**
  * Числительное словом, примыкающее к единице. Границы — просмотры по кириллице,
  * а не `\b`: `\b` в JS считает границей стык любой не-ASCII буквы с буквой, и
  * «трёх» находилось бы внутри «острёхватка».
+ *
+ * Отрицательный просмотр назад после первой границы запрещает захватывать
+ * ВТОРОЕ слово составного числительного как отдельное одиночное — иначе
+ * `compoundWordPattern` корректно собрал бы «двадцать пять» в 25, а этот же
+ * проход СВЕРХУ добавил бы «пять» (5) как отдельное, никогда не произнесённое
+ * утверждение: оба regex сканируют текст независимо, и без запрета оба находят
+ * совпадение на пересекающихся позициях.
  */
 function wordPattern(spec: UnitSpec): RegExp {
   return new RegExp(
-    String.raw`(?<![а-яёА-ЯЁ])(${NUMERAL_ALTERNATION})(?![а-яёА-ЯЁ])${GAP}${spec.pattern}`,
+    String.raw`(?<![а-яёА-ЯЁ])(?<!(?:${DECADE_ALTERNATION})\s)(${NUMERAL_ALTERNATION})(?![а-яёА-ЯЁ])${WORD_GAP}${spec.pattern}`,
     'giu'
   );
 }
@@ -241,6 +296,21 @@ export function extractRiskyClaims(text: string): RiskyClaim[] {
     const single = singlePattern(spec);
     while ((m = single.exec(text)) !== null) {
       add(found, spec, m[1], text, m.index, m[0].length, m[2]);
+    }
+
+    // Составные — ПЕРЕД одиночными числительными словами: «двадцать пять»
+    // обязано собраться в 25 раньше, чем что-либо решит, что делать с
+    // отдельным «пять». wordPattern сам исключает вторую часть составного
+    // через отрицательный просмотр назад, так что порядок здесь для ясности
+    // чтения, а корректность уже обеспечена регулярками.
+    const compound = compoundWordPattern(spec);
+    while ((m = compound.exec(text)) !== null) {
+      const decadeValue = NUMERAL_WORDS.get(m[1].toLowerCase());
+      const unitValue = NUMERAL_WORDS.get(m[2].toLowerCase());
+      if (decadeValue !== undefined && unitValue !== undefined) {
+        const composed = String(Number(decadeValue) + Number(unitValue));
+        add(found, spec, composed, text, m.index, m[0].length);
+      }
     }
 
     // Числительные словами — последними: цифровые формы уже занесены, а ключ

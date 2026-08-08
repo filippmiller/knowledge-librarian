@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { gradeCase, type GradeContext, type ObservedCase } from '../case-grader';
+import type { EvidencePack } from '@/lib/knowledge/synthesis/evidence-pack';
 
 /**
  * Найдено независимым ревью Grok на срезе 5a. Каждый тест здесь — сценарий, в
@@ -23,23 +24,49 @@ const context = (overrides: Partial<GradeContext> = {}): GradeContext => ({
   ...overrides,
 });
 
+const evidencePack = (unitIds: readonly string[]): EvidencePack => ({
+  items: unitIds.map((unitId) => ({
+    unitId,
+    kind: 'PROCEDURE_STEP',
+    statement: 'Не дольше 15 секунд подряд, пауза 30 секунд, максимум 3 цикла.',
+    citation: { anchor: `a-${unitId}`, quote: 'не дольше 15 секунд' },
+    numericConstraint: null,
+  })),
+  numericFacts: [],
+});
+
 const observed = (overrides: Partial<ObservedCase> = {}): ObservedCase => ({
   caseId: 'Q04',
-  candidateUnitIds: ['u4a', 'u4b', 'u4c', 'u1'],
+  candidateUnitIds: ['u4a', 'u4b', 'u4c', 'u1', 'u5'],
   rerankedUnitIds: ['u4a', 'u4b', 'u4c', 'u1', 'u5'],
   selectedUnitIds: ['u4a', 'u4b', 'u4c'],
   disposition: 'DIRECT_ANSWER',
-  answerSource: 'knowledge_base',
-  verification: { verified: true, violations: [] },
   reasonCodes: [],
+  answer: {
+    draft: {
+      text: 'Не дольше 15 секунд, пауза 30 секунд, максимум 3 цикла.',
+      citedUnitIds: ['u4a', 'u4b', 'u4c'],
+      answerSource: 'knowledge_base',
+    },
+    evidencePack: evidencePack(['u4a', 'u4b', 'u4c']),
+  },
   ...overrides,
 });
 
-describe('P7: verified=false с пустым списком нарушений', () => {
-  it('НЕ даёт бесплатный PASS — провал проверки сам по себе причина', () => {
+describe('P7: verifyAnswerClaims не подтвердил ответ', () => {
+  it('НЕ даёт бесплатный PASS — грейдер вызывает проверку сам, а не доверяет чужому вердикту', () => {
     const verdict = gradeCase(
       { caseId: 'Q04', expectedRuleIds: [4], expectedDisposition: 'DIRECT_ANSWER' },
-      observed({ verification: { verified: false, violations: [] } }),
+      observed({
+        answer: {
+          draft: {
+            text: 'Не дольше 15 секунд, пауза 30 секунд, максимум 3 цикла.',
+            citedUnitIds: [], // без цитат — verifyAnswerClaims обязан провалить
+            answerSource: 'knowledge_base',
+          },
+          evidencePack: evidencePack(['u4a', 'u4b', 'u4c']),
+        },
+      }),
       context()
     );
 
@@ -69,9 +96,18 @@ describe('P1: выбор правил на позитивных кейсах', (
         forbiddenSelectedRuleIds: [5],
       },
       observed({
+        caseId: 'Q05-N1',
         candidateUnitIds: ['u1', 'u5'],
         rerankedUnitIds: ['u1', 'u5'],
         selectedUnitIds: ['u1'],
+        answer: {
+          draft: {
+            text: 'Не дольше 15 секунд.',
+            citedUnitIds: ['u1'],
+            answerSource: 'knowledge_base',
+          },
+          evidencePack: evidencePack(['u1']),
+        },
       }),
       context({
         sourceRuleByUnitId: new Map([
@@ -89,7 +125,19 @@ describe('F1: unitId вне карты провенанса', () => {
   it('сообщает о неотображённых units ОТДЕЛЬНО, а не как «правило не найдено»', () => {
     const verdict = gradeCase(
       { caseId: 'Q04', expectedRuleIds: [4], expectedDisposition: 'DIRECT_ANSWER' },
-      observed({ rerankedUnitIds: ['ghost1', 'ghost2'], selectedUnitIds: ['ghost1'] }),
+      observed({
+        candidateUnitIds: ['ghost1', 'ghost2'],
+        rerankedUnitIds: ['ghost1', 'ghost2'],
+        selectedUnitIds: ['ghost1'],
+        answer: {
+          draft: {
+            text: 'Ответ.',
+            citedUnitIds: ['ghost1'],
+            answerSource: 'knowledge_base',
+          },
+          evidencePack: evidencePack(['ghost1']),
+        },
+      }),
       context()
     );
 
@@ -115,7 +163,21 @@ describe('P8: покрытие чисел считается по ВЫБРАНН
   });
 
   it('FAIL на одном выбранном фрагменте — покрытие не берётся из воздуха', () => {
-    const verdict = gradeCase(q04, observed({ selectedUnitIds: ['u4a'] }), context());
+    const verdict = gradeCase(
+      q04,
+      observed({
+        selectedUnitIds: ['u4a'],
+        answer: {
+          draft: {
+            text: 'Не дольше 15 секунд.',
+            citedUnitIds: ['u4a'],
+            answerSource: 'knowledge_base',
+          },
+          evidencePack: evidencePack(['u4a']),
+        },
+      }),
+      context()
+    );
 
     expect(verdict.result).toBe('FAIL');
     expect(verdict.reasons.join(' ')).toContain('30');
@@ -131,7 +193,17 @@ describe('F3: единицы сравниваются нормализованн
         expectedDisposition: 'DIRECT_ANSWER',
         requiredNumerics: [{ value: 15, unit: 'seconds' }],
       },
-      observed({ selectedUnitIds: ['u4a'] }),
+      observed({
+        selectedUnitIds: ['u4a'],
+        answer: {
+          draft: {
+            text: 'Не дольше 15 секунд.',
+            citedUnitIds: ['u4a'],
+            answerSource: 'knowledge_base',
+          },
+          evidencePack: evidencePack(['u4a']),
+        },
+      }),
       context({ numericsByUnitId: new Map([['u4a', [{ value: 15, unit: 'Second' }]]]) })
     );
 
@@ -146,7 +218,17 @@ describe('F3: единицы сравниваются нормализованн
         expectedDisposition: 'DIRECT_ANSWER',
         requiredNumerics: [{ value: 3, unit: 'cycles' }],
       },
-      observed({ selectedUnitIds: ['u4a'] }),
+      observed({
+        selectedUnitIds: ['u4a'],
+        answer: {
+          draft: {
+            text: 'Не дольше 15 секунд.',
+            citedUnitIds: ['u4a'],
+            answerSource: 'knowledge_base',
+          },
+          evidencePack: evidencePack(['u4a']),
+        },
+      }),
       context({ numericsByUnitId: new Map([['u4a', [{ value: 3, unit: 'seconds' }]]]) })
     );
 
@@ -173,6 +255,7 @@ describe('P5/(d): must_clarify не имеет права выбрать одн�
     rerankedUnitIds: ['b1', 'b5'],
     selectedUnitIds: [],
     disposition: 'HOLD',
+    answer: undefined,
   });
 
   it('PASS: оба конкурента найдены, ничего не выбрано, система переспросила', () => {
@@ -203,6 +286,7 @@ describe('P6: недостающие trigger-факты проверяются, 
         selectedUnitIds: [],
         disposition: 'HOLD',
         missingTriggerFacts: [],
+        answer: undefined,
       }),
       context()
     );
@@ -226,6 +310,7 @@ describe('P6: недостающие trigger-факты проверяются, 
         selectedUnitIds: [],
         disposition: 'HOLD',
         missingTriggerFacts: ['location_public_or_private'],
+        answer: undefined,
       }),
       context()
     );
@@ -234,26 +319,13 @@ describe('P6: недостающие trigger-факты проверяются, 
   });
 });
 
-describe('(b): general_ai запрещён и на пути HOLD', () => {
-  it('FAIL: уточняющий вопрос, сочинённый общей моделью, — не работа базы знаний', () => {
-    const verdict = gradeCase(
-      {
-        caseId: 'Q01-M1',
-        expectedRuleIds: [1, 5],
-        expectedDisposition: 'HOLD',
-      },
-      observed({
-        caseId: 'Q01-M1',
-        candidateUnitIds: ['u1', 'u5'],
-        rerankedUnitIds: ['u1', 'u5'],
-        selectedUnitIds: [],
-        disposition: 'HOLD',
-        answerSource: 'general_ai',
-      }),
-      context()
-    );
-
-    expect(verdict.result).toBe('FAIL');
-    expect(verdict.reasons.join(' ')).toMatch(/general_ai/);
-  });
-});
+/**
+ * Найдено вторым ревью (ChatGPT): исходный тест здесь проверял
+ * `answerSource: 'general_ai'` на HOLD-кейсе. Убран сознательно, а не забыт —
+ * `buildEvidencePack` отказывается работать при disposition, отличном от
+ * `ANSWER` (см. evidence-pack.ts), поэтому в этой архитектуре у HOLD нет
+ * DraftAnswer вообще: клarification-текст ещё не синтезируется через тот же
+ * путь. Проверять «источник ответа» там, где ответа не существует по
+ * контракту, — проверка несуществующей поверхности. Когда H обзаведётся
+ * синтезом clarification-текста, эта проверка вернётся вместе с ним.
+ */

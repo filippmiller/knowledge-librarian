@@ -1,14 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { gradeCase, type GradeContext, type ObservedCase } from '../case-grader';
+import type { EvidencePack } from '@/lib/knowledge/synthesis/evidence-pack';
 
 /**
  * Ворота плана §0.4, сведённые в один вердикт по кейсу.
  *
- * Порядок проверок — не оформление, а суть. Retrieval gate идёт ПЕРВЫМ, потому
- * что «успех не может быть засчитан по красивому финальному ответу»: если
- * ожидаемая группа правил не попала в reranked top-5, кейс провален независимо
- * от текста. Точно так же `answerSource === 'general_ai'` — автоматический
- * провал, даже если текст совпал с ожидаемым (§0.3 №4).
+ * Порядок проверок — не оформление, а суть. Целостность trace проверяется
+ * первой, retrieval gate — следующим: «успех не может быть засчитан по
+ * красивому финальному ответу», если ожидаемая группа правил не попала в
+ * reranked top-5, кейс провален независимо от текста. Точно так же
+ * `answerSource === 'general_ai'` — автоматический провал, даже если текст
+ * совпал с ожидаемым (§0.3 №4).
  */
 
 const context = (overrides: Partial<GradeContext> = {}): GradeContext => ({
@@ -28,15 +30,34 @@ const context = (overrides: Partial<GradeContext> = {}): GradeContext => ({
   ...overrides,
 });
 
+const evidencePack = (unitIds: readonly string[]): EvidencePack => ({
+  items: unitIds.map((unitId) => ({
+    unitId,
+    kind: 'PROCEDURE_STEP',
+    statement: 'Не дольше 15 секунд подряд, пауза 30 секунд, максимум 3 цикла.',
+    citation: { anchor: `a-${unitId}`, quote: 'не дольше 15 секунд' },
+    numericConstraint: null,
+  })),
+  numericFacts: [],
+});
+
+const answerFrom = (unitIds: readonly string[]): NonNullable<ObservedCase['answer']> => ({
+  draft: {
+    text: 'Не дольше 15 секунд, пауза 30 секунд, максимум 3 цикла.',
+    citedUnitIds: [...unitIds],
+    answerSource: 'knowledge_base',
+  },
+  evidencePack: evidencePack(unitIds),
+});
+
 const observed = (overrides: Partial<ObservedCase> = {}): ObservedCase => ({
   caseId: 'Q04',
-  candidateUnitIds: ['u4a', 'u4b', 'u4c', 'u1'],
+  candidateUnitIds: ['u4a', 'u4b', 'u4c', 'u1', 'u5'],
   rerankedUnitIds: ['u4a', 'u4b', 'u4c', 'u1', 'u5'],
   selectedUnitIds: ['u4a', 'u4b', 'u4c'],
   disposition: 'DIRECT_ANSWER',
-  answerSource: 'knowledge_base',
-  verification: { verified: true, violations: [] },
   reasonCodes: [],
+  answer: answerFrom(['u4a', 'u4b', 'u4c']),
   ...overrides,
 });
 
@@ -54,7 +75,12 @@ describe('gradeCase — retrieval gate идёт первым', () => {
   it('FAIL, если ожидаемое правило вне top-K — текст ответа не спасает', () => {
     const verdict = gradeCase(
       expectation,
-      observed({ rerankedUnitIds: ['u1', 'u5', 'u1', 'u5', 'u1', 'u4a'] }),
+      observed({
+        candidateUnitIds: ['u1', 'u5', 'u4a'],
+        rerankedUnitIds: ['u1', 'u5'],
+        selectedUnitIds: [],
+        answer: undefined,
+      }),
       context()
     );
 
@@ -63,7 +89,16 @@ describe('gradeCase — retrieval gate идёт первым', () => {
   });
 
   it('провал retrieval сообщается, даже если ответ безупречен', () => {
-    const verdict = gradeCase(expectation, observed({ rerankedUnitIds: ['u1', 'u5'] }), context());
+    const verdict = gradeCase(
+      expectation,
+      observed({
+        candidateUnitIds: ['u1', 'u5'],
+        rerankedUnitIds: ['u1', 'u5'],
+        selectedUnitIds: [],
+        answer: undefined,
+      }),
+      context()
+    );
 
     expect(verdict.result).toBe('FAIL');
   });
@@ -71,7 +106,16 @@ describe('gradeCase — retrieval gate идёт первым', () => {
 
 describe('gradeCase — источник ответа', () => {
   it('general_ai — автоматический FAIL при верном тексте и найденном правиле', () => {
-    const verdict = gradeCase(expectation, observed({ answerSource: 'general_ai' }), context());
+    const verdict = gradeCase(
+      expectation,
+      observed({
+        answer: {
+          ...answerFrom(['u4a', 'u4b', 'u4c']),
+          draft: { ...answerFrom(['u4a', 'u4b', 'u4c']).draft, answerSource: 'general_ai' },
+        },
+      }),
+      context()
+    );
 
     expect(verdict.result).toBe('FAIL');
     expect(verdict.reasons.join(' ')).toMatch(/general_ai/);
@@ -80,7 +124,15 @@ describe('gradeCase — источник ответа', () => {
   it('deterministic_guardrail не считается ответом из базы знаний', () => {
     const verdict = gradeCase(
       expectation,
-      observed({ answerSource: 'deterministic_guardrail' }),
+      observed({
+        answer: {
+          ...answerFrom(['u4a', 'u4b', 'u4c']),
+          draft: {
+            ...answerFrom(['u4a', 'u4b', 'u4c']).draft,
+            answerSource: 'deterministic_guardrail',
+          },
+        },
+      }),
       context()
     );
 
@@ -93,9 +145,13 @@ describe('gradeCase — непроверенные утверждения', () =
     const verdict = gradeCase(
       expectation,
       observed({
-        verification: {
-          verified: false,
-          violations: [{ code: 'unsupported_number', detail: 'число 7 не подтверждено' }],
+        answer: {
+          draft: {
+            text: 'Не дольше 7 циклов.',
+            citedUnitIds: ['u4a', 'u4b', 'u4c'],
+            answerSource: 'knowledge_base',
+          },
+          evidencePack: evidencePack(['u4a', 'u4b', 'u4c']),
         },
       }),
       context()
@@ -121,7 +177,11 @@ describe('gradeCase — совместное покрытие чисел (Q04)',
   });
 
   it('FAIL на одном осколке — покрыто 15, но не 30 и не 3 цикла', () => {
-    const verdict = gradeCase(withNumerics, observed({ selectedUnitIds: ['u4a'] }), context());
+    const verdict = gradeCase(
+      withNumerics,
+      observed({ selectedUnitIds: ['u4a'], answer: answerFrom(['u4a']) }),
+      context()
+    );
 
     expect(verdict.result).toBe('FAIL');
     expect(verdict.reasons.join(' ')).toContain('30');
@@ -169,6 +229,7 @@ describe('gradeCase — negative-кейсы', () => {
     candidateUnitIds: ['a1', 'a3', 'a5'],
     rerankedUnitIds: ['a1', 'a3', 'a5'],
     selectedUnitIds: ['a1', 'a3'],
+    answer: answerFrom(['a1', 'a3']),
   });
 
   it('PASS: узкое исключение найдено кандидатом, но НЕ выбрано', () => {
@@ -176,7 +237,11 @@ describe('gradeCase — negative-кейсы', () => {
   });
 
   it('FAIL: запрещённое правило попало в выбранные', () => {
-    const verdict = gradeCase(q05n1, { ...base, selectedUnitIds: ['a1', 'a3', 'a5'] }, ctx);
+    const verdict = gradeCase(
+      q05n1,
+      { ...base, selectedUnitIds: ['a1', 'a3', 'a5'], answer: answerFrom(['a1', 'a3', 'a5']) },
+      ctx
+    );
 
     expect(verdict.result).toBe('FAIL');
     expect(verdict.reasons.join(' ')).toMatch(/5/);
@@ -193,7 +258,11 @@ describe('gradeCase — negative-кейсы', () => {
   });
 
   it('FAIL: обязательное правило не выбрано', () => {
-    const verdict = gradeCase(q05n1, { ...base, selectedUnitIds: ['a1'] }, ctx);
+    const verdict = gradeCase(
+      q05n1,
+      { ...base, selectedUnitIds: ['a1'], answer: answerFrom(['a1']) },
+      ctx
+    );
 
     expect(verdict.result).toBe('FAIL');
   });
@@ -226,6 +295,7 @@ describe('gradeCase — must_clarify', () => {
     rerankedUnitIds: ['b1', 'b5'],
     selectedUnitIds: [],
     disposition: 'HOLD',
+    answer: undefined,
   });
 
   it('PASS: оба конкурирующих правила найдены, система переспросила', () => {
@@ -235,25 +305,20 @@ describe('gradeCase — must_clarify', () => {
   it('FAIL: выбрано одно из двух наугад вместо уточнения', () => {
     const verdict = gradeCase(
       q01m1,
-      { ...base, disposition: 'DIRECT_ANSWER', selectedUnitIds: ['b1'] },
+      {
+        ...base,
+        disposition: 'DIRECT_ANSWER',
+        selectedUnitIds: ['b1'],
+        answer: answerFrom(['b1']),
+      },
       ctx
     );
 
     expect(verdict.result).toBe('FAIL');
   });
 
-  it('HOLD не требует ни цитат, ни подтверждения чисел — отвечать нечем', () => {
-    const verdict = gradeCase(
-      q01m1,
-      {
-        ...base,
-        verification: {
-          verified: false,
-          violations: [{ code: 'uncited_answer', detail: 'нет цитат' }],
-        },
-      },
-      ctx
-    );
+  it('HOLD не требует синтезированного ответа — отвечать нечем', () => {
+    const verdict = gradeCase(q01m1, { ...base, answer: undefined }, ctx);
 
     expect(verdict.result).toBe('PASS');
   });
