@@ -72,10 +72,21 @@ interface ObservedCaseCommon {
  * сконструировать типобезопасно, а не просто «не проверяется». Раньше `answer`
  * было опциональным полем на любой disposition, и runner мог по ошибке
  * приложить черновик к HOLD-кейсу — грейдер это молча игнорировал.
+ *
+ * `draft?: never` в HOLD/ERROR-ветви — не декорация. Без него объектный
+ * литерал с лишним `draft`, присвоенный переменной с более широким типом (или
+ * пришедший из `as`-приведения), иногда проходит структурную совместимость —
+ * TypeScript проверяет типы на этапе компиляции, а JSON во время исполнения
+ * не проверяет их вообще. Явный `never` заставляет литерал с `draft` провалить
+ * присваивание именно в HOLD/ERROR-ветви, а не полагаться на то, что поле
+ * просто отсутствует в объявленном типе.
  */
 export type ObservedCase =
   | (ObservedCaseCommon & { readonly disposition: 'DIRECT_ANSWER'; readonly draft: DraftAnswer })
-  | (ObservedCaseCommon & { readonly disposition: Exclude<ActualDisposition, 'DIRECT_ANSWER'> });
+  | (ObservedCaseCommon & {
+      readonly disposition: Exclude<ActualDisposition, 'DIRECT_ANSWER'>;
+      readonly draft?: never;
+    });
 
 /** Чего ожидает oracle. Поля-опции — только там, где неприменимы. */
 export interface CaseExpectation {
@@ -105,10 +116,21 @@ export interface UnitProvenance {
 }
 
 export interface GradeContext {
-  /** Ворота retrieval: план фиксирует top-5. Обязано быть положительным целым. */
-  readonly topK: number;
   readonly units: ReadonlyMap<string, UnitProvenance>;
 }
+
+/**
+ * Ворота retrieval — план фиксирует top-5, это не настраиваемый параметр
+ * acceptance-прогона (найдено третьим ревью: `topK` раньше был полем
+ * `GradeContext`, и `topK=50` был валиден — правило на позиции 37 проходило
+ * бы retrieval gate, хотя обязательный критерий recall@5 нарушен).
+ *
+ * Диагностический recall@10/@20 — не задача этой функции: для него уже есть
+ * отдельный, параметризованный `evaluateRecall(cases, k)` в
+ * `retrieval-metrics.ts`. Здесь `topK` не нужен как ручка вообще — вынесение
+ * его наружу давало ложную гибкость там, где план требует ровно одно число.
+ */
+const ACCEPTANCE_TOP_K = 5;
 
 function rulesOf(unitIds: readonly string[], units: ReadonlyMap<string, UnitProvenance>): Set<number> {
   const rules = new Set<number>();
@@ -143,12 +165,7 @@ export function gradeCase(
   context: GradeContext
 ): CaseVerdict {
   const reasons: string[] = [];
-  const { units, topK } = context;
-
-  if (!Number.isInteger(topK) || topK <= 0) {
-    reasons.push(`topK обязан быть положительным целым, получено: ${topK}`);
-    return { caseId: expectation.caseId, result: 'FAIL', reasons };
-  }
+  const { units } = context;
 
   if (observed.caseId !== expectation.caseId) {
     reasons.push(
@@ -205,11 +222,11 @@ export function gradeCase(
   }
 
   // Retrieval gate.
-  const inTopK = rulesOf(observed.rerankedUnitIds.slice(0, topK), units);
+  const inTopK = rulesOf(observed.rerankedUnitIds.slice(0, ACCEPTANCE_TOP_K), units);
   const missing = expectation.expectedRuleIds.filter((ruleId) => !inTopK.has(ruleId));
   if (missing.length > 0) {
     reasons.push(
-      `retrieval gate: правил ${missing.join(', ')} нет в reranked top-${topK} — ` +
+      `retrieval gate: правил ${missing.join(', ')} нет в reranked top-${ACCEPTANCE_TOP_K} — ` +
         'кейс провален независимо от текста ответа'
     );
   }
@@ -269,14 +286,25 @@ export function gradeCase(
       reasons.push(
         'ожидался прямой ответ, но синтезированного ответа нет — нечего верифицировать'
       );
-    } else if (unmapped.length === 0) {
+    } else if (
+      unmapped.length === 0 &&
+      observed.selectedUnitIds.length > 0 &&
+      !hasDuplicates(observed.selectedUnitIds)
+    ) {
       // Evidence pack строится ГРЕЙДЕРОМ из trusted units по selectedUnitIds —
       // тем же `buildEvidencePack`, которым пользуется сам движок (единый
       // источник политики). Runner не может подложить чужой pack: он передаёт
       // только текст ответа (`draft`), а не то, против чего этот текст
-      // проверяется. Пропускается, только если unmapped уже нашёл нерешаемую
-      // проблему с провенансом selected — buildEvidencePack иначе просто
-      // упадёт исключением на том же самом отсутствующем unit'е.
+      // проверяется.
+      //
+      // Пропускается на пустом или дублирующемся selectedUnitIds (найдено
+      // четвёртым ревью) — `buildEvidencePack` сам бросает исключение на
+      // обоих входах, и без этой охраны один повреждённый кейс обрывал бы
+      // ИСКЛЮЧЕНИЕМ весь прогон acceptance-пакета вместо детерминированного
+      // FAIL по этому кейсу. Причина уже записана: пустой набор проваливает
+      // проверку «обязательные правила не выбраны» выше, дубль — проверку
+      // целостности trace; пропуск построения pack не оставляет кейс без
+      // объяснения, просто не дублирует его исключением.
       const selectedUnits = observed.selectedUnitIds
         .map((id) => units.get(id)?.unit)
         .filter((u): u is PersistedKnowledgeUnit => u !== undefined);

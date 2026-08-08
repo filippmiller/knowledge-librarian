@@ -41,10 +41,8 @@ function unit(id: string, overrides: Partial<PersistedKnowledgeUnit> = {}): Pers
 }
 
 const context = (
-  entries: ReadonlyArray<{ id: string; sourceRuleId: number; unit?: Partial<PersistedKnowledgeUnit> }>,
-  topK = 5
+  entries: ReadonlyArray<{ id: string; sourceRuleId: number; unit?: Partial<PersistedKnowledgeUnit> }>
 ): GradeContext => ({
-  topK,
   units: new Map(
     entries.map(({ id, sourceRuleId, unit: overrides }) => [
       id,
@@ -141,30 +139,32 @@ describe('evidence pack строится ГРЕЙДЕРОМ из trusted units, 
   });
 });
 
-describe('topK валидируется', () => {
-  const expectation = { caseId: 'Q04', expectedRuleIds: [4], expectedDisposition: 'HOLD' as const };
-  const observed: ObservedCase = {
-    caseId: 'Q04',
-    candidateUnitIds: [],
-    rerankedUnitIds: [],
-    selectedUnitIds: [],
-    disposition: 'HOLD',
-    reasonCodes: [],
-  };
+/**
+ * Найдено четвёртым ревью (ChatGPT): `topK` был полем `GradeContext`, и
+ * `topK=50` был валиден — правило на позиции 37 проходило бы retrieval gate
+ * top-5. Вместо валидации внешнего значения ворота top-5 зашиты константой
+ * `ACCEPTANCE_TOP_K` внутри модуля — `topK` больше не часть доверенной
+ * поверхности вообще, и передать «неправильное» значение просто нельзя.
+ */
+describe('acceptance top-5 не настраивается снаружи', () => {
+  it('шестое по рангу правило не спасает retrieval gate — жёстко зашитый top-5', () => {
+    const others = Array.from({ length: 5 }, (_, i) => ({ id: `noise${i}`, sourceRuleId: 100 + i }));
+    const ctx = context([...others, { id: 'u4', sourceRuleId: 4 }]);
 
-  it('FAIL при topK = 0', () => {
-    expect(gradeCase(expectation, observed, context([], 0)).result).toBe('FAIL');
-  });
+    const verdict = gradeCase(
+      { caseId: 'Q04', expectedRuleIds: [4], expectedDisposition: 'HOLD' },
+      {
+        caseId: 'Q04',
+        candidateUnitIds: [...others.map((o) => o.id), 'u4'],
+        rerankedUnitIds: [...others.map((o) => o.id), 'u4'], // правило 4 — на позиции 6
+        selectedUnitIds: [],
+        disposition: 'HOLD',
+        reasonCodes: [],
+      },
+      ctx
+    );
 
-  it('FAIL при отрицательном topK', () => {
-    expect(gradeCase(expectation, observed, context([], -1)).result).toBe('FAIL');
-  });
-
-  it('FAIL при дробном topK', () => {
-    expect(gradeCase(expectation, observed, context([], 2.5)).result).toBe('FAIL');
-  });
-
-  it('FAIL при NaN topK', () => {
-    expect(gradeCase(expectation, observed, context([], Number.NaN)).result).toBe('FAIL');
+    expect(verdict.result).toBe('FAIL');
+    expect(verdict.reasons.join(' ')).toMatch(/retrieval/i);
   });
 });

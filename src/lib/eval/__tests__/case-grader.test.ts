@@ -37,7 +37,6 @@ function unit(id: string, overrides: Partial<PersistedKnowledgeUnit> = {}): Pers
 const UNIT_RULES: Record<string, number> = { u4a: 4, u4b: 4, u4c: 4, u1: 1, u5: 5 };
 
 const context = (overrides: Partial<GradeContext> = {}): GradeContext => ({
-  topK: 5,
   units: new Map(
     Object.entries(UNIT_RULES).map(([id, sourceRuleId]): [string, UnitProvenance] => [
       id,
@@ -213,8 +212,7 @@ describe('gradeCase — negative-кейсы', () => {
   };
 
   const ctx: GradeContext = {
-    topK: 5,
-    units: new Map<string, UnitProvenance>([
+      units: new Map<string, UnitProvenance>([
       ['a1', { unit: unit('a1'), sourceRuleId: 1 }],
       ['a3', { unit: unit('a3'), sourceRuleId: 3 }],
       ['a5', { unit: unit('a5'), sourceRuleId: 5 }],
@@ -284,8 +282,7 @@ describe('gradeCase — must_clarify', () => {
     requiredCandidateRuleIds: [1, 5],
   };
   const ctx: GradeContext = {
-    topK: 5,
-    units: new Map<string, UnitProvenance>([
+      units: new Map<string, UnitProvenance>([
       ['b1', { unit: unit('b1'), sourceRuleId: 1 }],
       ['b5', { unit: unit('b5'), sourceRuleId: 5 }],
     ]),

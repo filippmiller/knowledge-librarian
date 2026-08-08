@@ -44,7 +44,6 @@ const DEFAULT_UNITS: ReadonlyArray<[string, number, Partial<PersistedKnowledgeUn
 ];
 
 const context = (overrides: Partial<GradeContext> = {}): GradeContext => ({
-  topK: 5,
   units: new Map<string, UnitProvenance>(
     DEFAULT_UNITS.map(([id, sourceRuleId, unitOverrides]) => [
       id,
@@ -102,8 +101,7 @@ describe('clarify-проверка через пересечение, а не р
     expectedDisposition: 'HOLD' as const,
   };
   const ctx: GradeContext = {
-    topK: 5,
-    units: new Map<string, UnitProvenance>([
+      units: new Map<string, UnitProvenance>([
       ['b1', { unit: unit('b1'), sourceRuleId: 1 }],
       ['b5', { unit: unit('b5'), sourceRuleId: 5 }],
       ['b8', { unit: unit('b8'), sourceRuleId: 8 }],

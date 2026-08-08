@@ -43,7 +43,6 @@ const DEFAULT_UNITS: ReadonlyArray<[string, number, Partial<PersistedKnowledgeUn
 ];
 
 const context = (overrides: Partial<GradeContext> = {}): GradeContext => ({
-  topK: 5,
   units: new Map<string, UnitProvenance>(
     DEFAULT_UNITS.map(([id, sourceRuleId, unitOverrides]) => [
       id,
@@ -97,8 +96,7 @@ describe('P1: выбор правил на позитивных кейсах', (
 
   it('явно заданный requiredSelectedRuleIds имеет приоритет над умолчанием', () => {
     const ctx: GradeContext = {
-      topK: 5,
-      units: new Map<string, UnitProvenance>([
+          units: new Map<string, UnitProvenance>([
         ['u1', { unit: unit('u1'), sourceRuleId: 1 }],
         ['u5', { unit: unit('u5'), sourceRuleId: 5 }],
       ]),
@@ -235,8 +233,7 @@ describe('P5/(d): must_clarify не имеет права выбрать одн�
     requiredCandidateRuleIds: [1, 5],
   };
   const ctx: GradeContext = {
-    topK: 5,
-    units: new Map<string, UnitProvenance>([
+      units: new Map<string, UnitProvenance>([
       ['b1', { unit: unit('b1'), sourceRuleId: 1 }],
       ['b5', { unit: unit('b5'), sourceRuleId: 5 }],
     ]),
@@ -265,8 +262,7 @@ describe('P5/(d): must_clarify не имеет права выбрать одн�
 describe('P6: недостающие trigger-факты проверяются, а не игнорируются', () => {
   it('FAIL, если система удержала ответ, но не назвала недостающее условие', () => {
     const ctx: GradeContext = {
-      topK: 5,
-      units: new Map<string, UnitProvenance>([
+          units: new Map<string, UnitProvenance>([
         ['u1', { unit: unit('u1'), sourceRuleId: 1 }],
         ['u5', { unit: unit('u5'), sourceRuleId: 5 }],
       ]),
@@ -297,8 +293,7 @@ describe('P6: недостающие trigger-факты проверяются, 
 
   it('PASS, когда недостающее условие названо', () => {
     const ctx: GradeContext = {
-      topK: 5,
-      units: new Map<string, UnitProvenance>([
+          units: new Map<string, UnitProvenance>([
         ['u1', { unit: unit('u1'), sourceRuleId: 1 }],
         ['u5', { unit: unit('u5'), sourceRuleId: 5 }],
       ]),
