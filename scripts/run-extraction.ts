@@ -314,6 +314,7 @@ function buildReviewPacket(
         numericConstraint: unit.numericConstraint,
         parentRuleRef: unit.parentRuleRef,
         sectionPath: block?.sectionPath ?? null,
+        structuralPath: block?.structuralPath ?? null,
         evidenceQuote: unit.sourceSpan.quote,
         blockText: block?.text ?? null,
         uncertainties: unit.uncertainties,

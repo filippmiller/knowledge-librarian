@@ -600,15 +600,19 @@ export async function extractCanonicalDocument(buffer: Buffer): Promise<Canonica
  * Проекция `CanonicalBlock` -> `SourceBlockLocation` (`applicability/
  * identity-assignment.ts`) для скармливания `assignIdentity`.
  * `sectionPath` (массив) склеивается в строку с прежним sentinel `'(root)'`
- * для пустого breadcrumb — `identity.ts` использует `sectionPath` только как
- * непрозрачную строку внутри hash, форма склейки не обязана совпадать с
- * человекочитаемым представлением, важна только детерминированность.
+ * для пустого breadcrumb — `identity.ts` использует её только как
+ * человекочитаемые метаданные, не для hash (Step 3, независимое ревью PR
+ * #76: структурный дискриминатор `sourceBlockAnchor` — `structuralPath`,
+ * который эта проекция теперь переносит БЕЗ изменений, как непрозрачную
+ * строку внутри hash — форма не обязана совпадать с человекочитаемым
+ * представлением, важна только детерминированность).
  */
 export function toSourceBlockLocation(block: CanonicalBlock): SourceBlockLocation {
   return {
     anchor: block.anchor,
     text: block.text,
     sectionPath: block.sectionPath.length > 0 ? block.sectionPath.join(' / ') : '(root)',
+    structuralPath: block.structuralPath,
     blockStart: block.blockStart,
     blockEnd: block.blockEnd,
   };

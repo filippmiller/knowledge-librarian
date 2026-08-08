@@ -13,6 +13,7 @@ const BLOCK_A: SourceBlockLocation = {
   anchor: 'block-A',
   text: 'Раздражение кожи снимают в уединённом месте. Не более 3 дней подряд.',
   sectionPath: 'section.1',
+  structuralPath: 'body/p[0]',
   blockStart: 1000,
   blockEnd: 1070,
 };
@@ -48,10 +49,53 @@ describe('assignIdentity — unitId стабилен между прогонам
     expect(run2.units[0].contentHash).not.toBe(run1.units[0].contentHash);
   });
 
-  it('sourceBlockAnchor приходит из sectionPath/blockStart/blockEnd блока, не из caller-метки unit.sourceSpan.anchor', () => {
+  it('sourceBlockAnchor приходит из structuralPath/blockStart/blockEnd блока (Step 3, независимое ревью PR #76 — не из sectionPath), не из caller-метки unit.sourceSpan.anchor', () => {
     const result = assignIdentity([unit()], new Map([['block-A', BLOCK_A]]), 'rev-1');
     expect(result.units[0].sourceBlockAnchor).not.toBe('block-A');
     expect(result.units[0].sourceBlockAnchor).toHaveLength(16);
+  });
+
+  it('Step 3 (независимое ревью PR #76): два блока с ОДИНАКОВЫМ sectionPath/blockStart/blockEnd, но РАЗНЫМ structuralPath — РАЗНЫЙ sourceBlockAnchor (иначе структурная перестройка документа — абзац в ячейку таблицы и т.п. — молча схлопнула бы два разных места в одно)', () => {
+    const AS_PARAGRAPH: SourceBlockLocation = {
+      anchor: 'block-para',
+      text: 'Текст.',
+      sectionPath: '(root)',
+      structuralPath: 'body/p[0]',
+      blockStart: 0,
+      blockEnd: 6,
+    };
+    const AS_TABLE_CELL: SourceBlockLocation = {
+      anchor: 'block-cell',
+      text: 'Текст.',
+      sectionPath: '(root)',
+      structuralPath: 'body/tbl[0]/tr[0]/tc[0]/p[0]',
+      blockStart: 0,
+      blockEnd: 6,
+    };
+    const asParagraph = unit({
+      sourceSpan: { anchor: 'block-para', quote: 'Текст' },
+      evidenceByField: { statement: { anchor: 'block-para', quote: 'Текст' } },
+    });
+    const asTableCell = unit({
+      sourceSpan: { anchor: 'block-cell', quote: 'Текст' },
+      evidenceByField: { statement: { anchor: 'block-cell', quote: 'Текст' } },
+    });
+
+    const resultParagraph = assignIdentity(
+      [asParagraph],
+      new Map([['block-para', AS_PARAGRAPH]]),
+      'rev-1'
+    );
+    const resultTableCell = assignIdentity(
+      [asTableCell],
+      new Map([['block-cell', AS_TABLE_CELL]]),
+      'rev-1'
+    );
+
+    expect(resultParagraph.units[0].sourceBlockAnchor).not.toBe(
+      resultTableCell.units[0].sourceBlockAnchor
+    );
+    expect(resultParagraph.units[0].unitId).not.toBe(resultTableCell.units[0].unitId);
   });
 });
 
@@ -104,6 +148,7 @@ describe('assignIdentity — parentExtractionRef резолвится в unitId 
       anchor: 'block-rule-4',
       text: 'Давление должно оставаться слабым. Не дольше 15 секунд. Пауза не менее 30 секунд. Не более трёх циклов.',
       sectionPath: 'rule.4',
+      structuralPath: 'body/p[0]',
       blockStart: 0,
       blockEnd: 105,
     };
@@ -185,6 +230,7 @@ describe('assignIdentity — защита от невалидных parentExtrac
       anchor: 'block-x',
       text: 'Кандидат 1. Кандидат 2. Потомок.',
       sectionPath: 'x',
+      structuralPath: 'body/p[0]',
       blockStart: 0,
       blockEnd: 32,
     };

@@ -15,7 +15,13 @@ import type { ExtractedKnowledgeUnit } from './extraction';
 export interface SourceBlockLocation {
   readonly anchor: string;
   readonly text: string;
+  /** Breadcrumb заголовков — семантические метаданные (человекочитаемый
+   *  контекст, review packet), НЕ участвует в `sourceBlockAnchor` (Step 3,
+   *  независимое ревью PR #76: см. `computeSourceBlockAnchor`). */
   readonly sectionPath: string;
+  /** Позиционный путь в дереве документа — структурный дискриминатор
+   *  `sourceBlockAnchor`, а не `sectionPath`. */
+  readonly structuralPath: string;
   readonly blockStart: number;
   readonly blockEnd: number;
 }
@@ -97,7 +103,7 @@ export function assignIdentity(
 
     const sourceBlockAnchor = computeSourceBlockAnchor(
       sourceRevisionHash,
-      block.sectionPath,
+      block.structuralPath,
       block.blockStart,
       block.blockEnd
     );

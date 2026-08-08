@@ -7,6 +7,7 @@ import {
   toSourceBlockLocation,
 } from '../docx-canonical-blocks';
 import { buildDocxBuffer, standaloneParagraphXml } from './docx-fixture-helpers';
+import { computeSourceBlockAnchor } from '../applicability/identity';
 
 /**
  * Canonical DOCX v2 (продолжение сессии Aurora v2, Beads translation-yz9).
@@ -510,5 +511,81 @@ describe('toSourceBlockLocation — проекция CanonicalBlock -> SourceBlo
     const buffer = await buildDocxBuffer('<w:p><w:r><w:t>Без заголовков.</w:t></w:r></w:p>');
     const doc = await extractCanonicalDocument(buffer);
     expect(toSourceBlockLocation(doc.blocks[0]).sectionPath).toBe('(root)');
+  });
+
+  it('переносит structuralPath из CanonicalBlock — независимое ревью PR #76, Step 3: без этого поля sourceBlockAnchor не может различать структурную перестройку документа', async () => {
+    const buffer = await buildDocxBuffer('<w:p><w:r><w:t>Текст.</w:t></w:r></w:p>');
+    const doc = await extractCanonicalDocument(buffer);
+    const location = toSourceBlockLocation(doc.blocks[0]);
+    expect(location.structuralPath).toBe(doc.blocks[0].structuralPath);
+    expect(location.structuralPath).toBe('body/p[0]');
+  });
+});
+
+describe('structuralPath — независимое ревью PR #76, Step 3: коллизия sourceBlockAnchor при перестройке документа', () => {
+  it('тот же видимый текст, тот же (пустой) sectionPath, те же offsets в canonicalText, но РАЗНАЯ структурная позиция (голый параграф vs ячейка таблицы) — CanonicalBlock обязан различаться structuralPath, иначе sourceBlockAnchor, посчитанный без него, схлопнёт две РАЗНЫЕ перестройки документа в одно и то же место', async () => {
+    const bareParagraph = await buildDocxBuffer('<w:p><w:r><w:t>Текст.</w:t></w:r></w:p>');
+    const insideTableCell = await buildDocxBuffer(
+      '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Текст.</w:t></w:r></w:p></w:tc></w:tr></w:tbl>'
+    );
+
+    const docA = await extractCanonicalDocument(bareParagraph);
+    const docB = await extractCanonicalDocument(insideTableCell);
+
+    // Одинаковый видимый текст -> одинаковый canonicalText -> одинаковый
+    // sourceRevisionHash (по дизайну — hash НЕ зависит от сырых ZIP-байт или
+    // структуры, только от canonicalText, см. docx-canonical-blocks.ts).
+    expect(docA.sourceRevisionHash).toBe(docB.sourceRevisionHash);
+    // Одинаковый sectionPath (нет заголовков ни там, ни там) и одинаковые
+    // offsets (единственный блок в обоих документах, тот же текст).
+    expect(docA.blocks[0].sectionPath).toEqual(docB.blocks[0].sectionPath);
+    expect(docA.blocks[0].blockStart).toBe(docB.blocks[0].blockStart);
+    expect(docA.blocks[0].blockEnd).toBe(docB.blocks[0].blockEnd);
+    // Но структурная позиция — РАЗНАЯ: голый параграф тела документа vs
+    // параграф внутри ячейки таблицы. Раньше sourceBlockAnchor не видел эту
+    // разницу вообще (computeSourceBlockAnchor не принимал structuralPath).
+    expect(docA.blocks[0].structuralPath).not.toBe(docB.blocks[0].structuralPath);
+    expect(docA.blocks[0].kind).toBe('PARAGRAPH');
+    expect(docB.blocks[0].kind).toBe('TABLE_CELL');
+
+    const locationA = toSourceBlockLocation(docA.blocks[0]);
+    const locationB = toSourceBlockLocation(docB.blocks[0]);
+    const anchorA = computeSourceBlockAnchor(
+      docA.sourceRevisionHash,
+      locationA.structuralPath,
+      locationA.blockStart,
+      locationA.blockEnd
+    );
+    const anchorB = computeSourceBlockAnchor(
+      docB.sourceRevisionHash,
+      locationB.structuralPath,
+      locationB.blockStart,
+      locationB.blockEnd
+    );
+    expect(anchorA).not.toBe(anchorB);
+  });
+
+  it('тот же DOCX, повторно распарсенный, — тот же structuralPath и тот же sourceBlockAnchor (не регрессия детерминизма)', async () => {
+    const buffer = await buildDocxBuffer('<w:p><w:r><w:t>Текст.</w:t></w:r></w:p>');
+    const doc1 = await extractCanonicalDocument(buffer);
+    const doc2 = await extractCanonicalDocument(buffer);
+
+    expect(doc1.blocks[0].structuralPath).toBe(doc2.blocks[0].structuralPath);
+
+    const loc1 = toSourceBlockLocation(doc1.blocks[0]);
+    const loc2 = toSourceBlockLocation(doc2.blocks[0]);
+    const anchor1 = computeSourceBlockAnchor(
+      doc1.sourceRevisionHash,
+      loc1.structuralPath,
+      loc1.blockStart,
+      loc1.blockEnd
+    );
+    const anchor2 = computeSourceBlockAnchor(
+      doc2.sourceRevisionHash,
+      loc2.structuralPath,
+      loc2.blockStart,
+      loc2.blockEnd
+    );
+    expect(anchor1).toBe(anchor2);
   });
 });

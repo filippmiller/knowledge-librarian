@@ -30,14 +30,27 @@ function sha256Hex16(text: string): string {
  *  ("ab", "c") и ("a", "bc") хэшировались бы одинаково. */
 const SEP = '\u0000';
 
+/**
+ * `structuralPath` (позиционный путь в дереве документа, `docx-canonical-
+ * blocks.ts`), а НЕ `sectionPath` (breadcrumb заголовков) — независимое
+ * ревью PR #76, Step 3: `sectionPath` не различает структурную перестройку
+ * документа (например, тот же абзац, перенесённый в ячейку таблицы), если
+ * видимый текст и breadcrumb заголовков при этом не изменились — такая
+ * перестройка не меняет ни `sourceRevisionHash` (зависит только от
+ * `canonicalText`), ни `sectionPath`, ни `blockStart`/`blockEnd` (тот же
+ * текст на том же месте линейной строки), но МЕНЯЕТ реальное место unit'а в
+ * документе. `sectionPath` остаётся семантическими метаданными
+ * (`SourceBlockLocation.sectionPath`) для человекочитаемого контекста, но
+ * не участвует в structural identity.
+ */
 export function computeSourceBlockAnchor(
   sourceRevisionHash: string,
-  sectionPath: string,
+  structuralPath: string,
   blockStart: number,
   blockEnd: number
 ): string {
   return sha256Hex16(
-    [sourceRevisionHash, sectionPath, String(blockStart), String(blockEnd)].join(SEP)
+    [sourceRevisionHash, structuralPath, String(blockStart), String(blockEnd)].join(SEP)
   );
 }
 
