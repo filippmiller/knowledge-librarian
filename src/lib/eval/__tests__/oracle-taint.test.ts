@@ -99,6 +99,98 @@ describe('buildOracleTaintDetector', () => {
 });
 
 /**
+ * pre-retrieval hardening, Step 9. Раньше `taintedShingleCount` был ЕДИНЫМ
+ * пулом шинглов от ВСЕХ секретов сразу — секрет короче `shingleSize` слов
+ * даёт ПУСТОЕ множество шинглов (`shingles()`, `i + size <= words.length`
+ * никогда не выполняется), и такой секрет НИЧЕГО не добавляет в общий пул,
+ * а значит `assertClean` его не ловит вообще, даже если он утечёт дословно —
+ * при этом `taintedShingleCount > 0` (за счёт ДРУГИХ секретов) создаёт
+ * ложное ощущение, что защита работает для всех.
+ */
+describe('buildOracleTaintDetector — per-secret coverage (pre-retrieval hardening, Step 9)', () => {
+  const LONG_SOURCE = 'документ не содержит вообще никаких похожих слов на эту тему совсем ни разу нигде';
+
+  it('короткий secret (< shingleSize слов) — не даёт нулевую защиту: guard=EXACT_SUBSTRING (safe shorter-secret mechanism), не UNGUARDED', () => {
+    const oracle: OracleCase[] = [
+      {
+        id: 'q-short',
+        question: 'вопрос',
+        expectedRuleIds: [1],
+        expectedAnswer: 'зелёныйуникальныйключ',
+        matchReason: 'причина',
+        negativeCases: [],
+      },
+    ];
+    const d = buildOracleTaintDetector({ oracle, sourceText: LONG_SOURCE });
+    const entries = d.secretCoverage.filter((e) => e.caseId === 'q-short');
+    expect(entries.length).toBeGreaterThan(0);
+    expect(entries.every((e) => e.guard !== 'UNGUARDED')).toBe(true);
+  });
+
+  it('короткий secret, защищённый через EXACT_SUBSTRING, всё равно ловит дословную утечку в payload (не просто отчёт, а реальная защита)', () => {
+    const oracle: OracleCase[] = [
+      {
+        id: 'q-short',
+        question: 'вопрос',
+        expectedRuleIds: [1],
+        expectedAnswer: 'зелёныйуникальныйключ',
+        matchReason: 'причина короче восьми слов тут',
+        negativeCases: [],
+      },
+    ];
+    const d = buildOracleTaintDetector({ oracle, sourceText: LONG_SOURCE });
+    expect(() => d.assertClean({ answer: 'ответ содержит зелёныйуникальныйключ внутри текста' }, 'test')).toThrow(
+      /oracle/i
+    );
+  });
+
+  it('secret, чьё точное написание дословно есть в источнике, — честно репортится UNGUARDED (не подделываем защиту, которой нет)', () => {
+    const oracle: OracleCase[] = [
+      {
+        id: 'q-sourced',
+        question: 'вопрос',
+        expectedRuleIds: [1],
+        expectedAnswer: 'общееслово',
+        matchReason: 'ещё одна причина',
+        negativeCases: [],
+      },
+    ];
+    const d = buildOracleTaintDetector({
+      oracle,
+      sourceText: 'в тексте документа буквально есть слово общееслово прямо здесь',
+    });
+    const entry = d.secretCoverage.find((e) => e.caseId === 'q-sourced' && e.field === 'expectedAnswer')!;
+    expect(entry.guard).toBe('UNGUARDED');
+    expect(d.unguardedSecretCount).toBeGreaterThan(0);
+  });
+
+  it('secretCoverage покрывает negativeCases по caseId/negativeIndex, не только верхнеуровневые поля', () => {
+    const oracle: OracleCase[] = [
+      {
+        id: 'q1',
+        question: 'вопрос',
+        expectedRuleIds: [1],
+        expectedAnswer: 'основной ответ достаточно длинный чтобы иметь восемь слов точно',
+        matchReason: 'основная причина тоже достаточно длинная чтобы иметь восемь слов',
+        negativeCases: [
+          {
+            id: 'neg1',
+            question: 'негативный вопрос',
+            expectedBehavior: 'must_clarify',
+            expectedAnswer: 'негативныйсекрет',
+            matchReason: 'причина негатива короче восьми слов тут',
+          },
+        ],
+      },
+    ];
+    const d = buildOracleTaintDetector({ oracle, sourceText: LONG_SOURCE });
+    const negEntry = d.secretCoverage.find((e) => e.caseId === 'q1' && e.negativeIndex === 0 && e.field === 'expectedAnswer');
+    expect(negEntry).toBeDefined();
+    expect(negEntry?.guard).not.toBe('UNGUARDED');
+  });
+});
+
+/**
  * Детектор с пустым словарём прошёл бы все юнит-тесты выше и не ловил бы
  * ничего. Проверяем на настоящем oracle и настоящем DOCX: словарь непустой,
  * и при этом законный текст правил его не задевает.
@@ -159,6 +251,29 @@ describe('buildOracleTaintDetector на реальном пакете', () => {
         () => detector.assertClean({ leaked: testCase.expectedAnswer }, testCase.id),
         `${testCase.id}: ожидаемый ответ прошёл мимо детектора`
       ).toThrow(/oracle/i);
+    }
+  });
+
+  it('per-secret coverage посчитан для каждого expectedAnswer/matchReason реального пакета, включая negativeCases — не пропущен молча', () => {
+    // Ровно два поля на кейс (expectedAnswer, matchReason) + два поля на
+    // каждый negativeCase — secretCoverage обязан покрывать ВСЕ, не только
+    // верхнеуровневые (Step 9: "every protected expectedAnswer/matchReason
+    // contributes coverage OR is explicitly handled").
+    const expectedFieldCount =
+      oracle.length * 2 + oracle.reduce((n, c) => n + c.negativeCases.length * 2, 0);
+    expect(detector.secretCoverage.length).toBe(expectedFieldCount);
+  });
+
+  it('репортит unguardedSecretCount на реальном пакете — не обязательно 0, но обязано быть КОНЕЧНЫМ известным числом, не тихим пропуском (Step 9: "expose/report unguarded secrets", не "force to zero")', () => {
+    expect(Number.isFinite(detector.unguardedSecretCount)).toBe(true);
+    expect(detector.unguardedSecretCount).toBeGreaterThanOrEqual(0);
+    if (detector.unguardedSecretCount > 0) {
+      const unguarded = detector.secretCoverage.filter((e) => e.guard === 'UNGUARDED');
+      // eslint-disable-next-line no-console -- диагностика для финального отчёта, не тестовый шум по умолчанию
+      console.warn(
+        `oracle-taint: ${detector.unguardedSecretCount} secret field(s) не защищены ни shingle, ни exact-substring механизмом (совпадают дословно с источником):`,
+        unguarded.map((e) => `${e.caseId}/${e.field}${e.negativeIndex !== null ? `[neg${e.negativeIndex}]` : ''}`)
+      );
     }
   });
 });
