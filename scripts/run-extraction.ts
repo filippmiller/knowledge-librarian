@@ -288,17 +288,63 @@ function computeStageResult(
  * `reviewedAt` вручную; раннер их не проставляет и не может — сессия,
  * писавшая раннер, уже видела oracle при подготовке грейдера.
  */
-function buildReviewPacket(
+export interface ReviewPacketCanonicalSource {
+  readonly sourceRevisionHash: string;
+  readonly canonicalTextHash: string;
+  readonly parserVersion: string;
+}
+
+/**
+ * Абсолютные offsets (в `canonicalText`, не внутри блока) для evidence-цитаты
+ * unit'а — та же логика, что `assignIdentity` уже применяет к `unitId`
+ * (`resolveEvidenceOffsets` + `block.blockStart`), пересчитана здесь отдельно,
+ * т.к. `PersistedKnowledgeUnit` не хранит offsets сам по себе (только
+ * `sourceSpan.quote`, из которого их надо резолвить обратно per-unit).
+ * `null` только если блок не найден — не должно происходить для units,
+ * прошедших `assignIdentity` (их evidence уже резолвилось там), но эта
+ * функция не полагается на это молча.
+ */
+function reviewPacketOffsets(
+  unit: PersistedKnowledgeUnit,
+  block: SourceBlockLocation | undefined
+): { readonly start: number; readonly end: number } | null {
+  if (!block) return null;
+  const offsets = resolveEvidenceOffsets(block.text, unit.sourceSpan.quote);
+  if (!offsets) return null;
+  return { start: block.blockStart + offsets.start, end: block.blockStart + offsets.end };
+}
+
+/**
+ * Oracle-blind review packet — units + их evidence в исходнике, БЕЗ единой
+ * оценки. Человек, готовящий committed review manifest (translation-kup),
+ * видит ТОЛЬКО этот файл + сам DOCX — вопросы и ключ ему недоступны (план
+ * §0.3 №5, [R4b]). Ревьюер заполняет `reviewDecision`/`reviewedBy`/
+ * `reviewedAt` вручную; раннер их не проставляет и не может — сессия,
+ * писавшая раннер, уже видела oracle при подготовке грейдера.
+ *
+ * Полнота полей — Step 5, независимое ревью PR #76: `reviewedUnitHash`
+ * (`review-manifest.ts`) хэширует ВЕСЬ `PersistedKnowledgeUnit`, поэтому
+ * пакет обязан показывать ревьюеру ВСЁ, что попадёт под этот хэш —
+ * `evidenceByField` целиком (не только `evidenceQuote` == `sourceSpan.quote`,
+ * который покрывает только `statement`), `offsets` (не только `blockText`
+ * целиком — координаты цитаты внутри него), и canonical source hashes на
+ * верхнем уровне пакета (какая именно ревизия документа ревьюируется, не
+ * заставляя ревьюера открывать отдельный `canonical-document.json`).
+ */
+export function buildReviewPacket(
   persistedUnits: readonly PersistedKnowledgeUnit[],
-  blocksByAnchor: ReadonlyMap<string, SourceBlockLocation>
+  blocksByAnchor: ReadonlyMap<string, SourceBlockLocation>,
+  canonicalSource: ReviewPacketCanonicalSource
 ) {
   return {
     status: 'REVIEW_REQUIRED' as const,
+    canonicalSource,
     instructions:
       'Ревьюер должен быть oracle-blind: видеть ТОЛЬКО исходный DOCX и это извлечение. ' +
       'Файлы вопросов/ключа ответов НЕ открывать ни до, ни во время этого ревью. ' +
       'Для каждого unit: сверить statement/facets/triggerCondition/numericConstraint с blockText ' +
-      'и evidenceQuote, затем проставить reviewDecision (ACCEPT|REJECT|EDIT), reviewedBy, reviewedAt. ' +
+      'и evidenceQuote/evidenceByField, затем проставить reviewDecision (ACCEPT|REJECT|EDIT), ' +
+      'reviewedBy, reviewedAt. ' +
       'EDIT допустим только если исправление полностью выводимо из источника — это не сочинение нового текста.',
     units: persistedUnits.map((unit) => {
       const block = blocksByAnchor.get(unit.sourceSpan.anchor);
@@ -316,6 +362,8 @@ function buildReviewPacket(
         sectionPath: block?.sectionPath ?? null,
         structuralPath: block?.structuralPath ?? null,
         evidenceQuote: unit.sourceSpan.quote,
+        evidenceByField: unit.evidenceByField,
+        offsets: reviewPacketOffsets(unit, block),
         blockText: block?.text ?? null,
         uncertainties: unit.uncertainties,
         reviewDecision: null,
@@ -502,7 +550,11 @@ async function main() {
     'utf8'
   );
 
-  const reviewPacket = buildReviewPacket(identity.units, blocksByAnchor);
+  const reviewPacket = buildReviewPacket(identity.units, blocksByAnchor, {
+    sourceRevisionHash: canonical.sourceRevisionHash,
+    canonicalTextHash: canonical.canonicalTextHash,
+    parserVersion: canonical.parserVersion,
+  });
   writeFileSync(
     path.join(args.outDir, 'review-packet.json'),
     JSON.stringify(reviewPacket, null, 2),
