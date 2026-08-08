@@ -53,6 +53,7 @@ import { verifyAnswerClaims } from '@/lib/knowledge/synthesis/verify-answer-clai
 import type { PersistedKnowledgeUnit } from '@/lib/knowledge/applicability/identity-assignment';
 import type { ResolutionDecision } from '@/lib/knowledge/applicability/resolution';
 import type { NumericAssertion } from './negative-case-oracle';
+import { evaluateEvidenceGroupCoverage, type RequiredEvidenceGroup } from './evidence-groups';
 
 interface ObservedCaseCommon {
   readonly caseId: string;
@@ -98,6 +99,12 @@ export interface CaseExpectation {
   readonly requiredSelectedRuleIds?: readonly number[];
   readonly forbiddenSelectedRuleIds?: readonly number[];
   readonly requiredNumerics?: readonly NumericAssertion[];
+  /** Multi-clause coverage (pre-retrieval hardening, Step 8) — то же место в
+   *  пайплайне, что `requiredNumerics`, но для булевых/составных правил
+   *  (см. `evidence-groups.ts`): `sourceRuleId` сам по себе не гарантирует,
+   *  что выбранные units СОВМЕСТНО покрывают все обязательные компоненты
+   *  раздробленного правила. */
+  readonly requiredEvidenceGroups?: readonly RequiredEvidenceGroup[];
   readonly expectedReasonCodes?: readonly string[];
   readonly expectedMissingTriggerFacts?: readonly string[];
 }
@@ -348,6 +355,21 @@ export function gradeCase(
           'выбранные units не покрывают совместно: ' +
             uncovered.map((n) => `${n.value} ${n.unit}`).join(', ')
         );
+      }
+    }
+
+    if (expectation.requiredEvidenceGroups !== undefined) {
+      const selectedUnitsForCoverage = observed.selectedUnitIds
+        .map((id) => units.get(id)?.unit)
+        .filter((u): u is PersistedKnowledgeUnit => u !== undefined);
+      for (const group of expectation.requiredEvidenceGroups) {
+        const coverage = evaluateEvidenceGroupCoverage(group, selectedUnitsForCoverage);
+        if (!coverage.covered) {
+          reasons.push(
+            `evidence-группа «${group.description}» (правило ${group.ruleId}) не покрыта совместно — ` +
+              `не хватает: ${coverage.uncoveredClauseDescriptions.join(', ')}`
+          );
+        }
       }
     }
   } else {
