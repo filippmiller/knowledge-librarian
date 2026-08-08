@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
-import { buildOracleTaintDetector } from '../oracle-taint';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { buildOracleTaintDetector, type OracleTaintDetector } from '../oracle-taint';
 import type { OracleCase } from '../semantic-rule-oracle';
+import type { SourceRule } from '../source-rule-segmentation';
 
 /**
  * РАНТАЙМ-ГРАНИЦА изоляции oracle (план §0.3 №2/№3).
@@ -101,51 +102,61 @@ describe('buildOracleTaintDetector', () => {
  * Детектор с пустым словарём прошёл бы все юнит-тесты выше и не ловил бы
  * ничего. Проверяем на настоящем oracle и настоящем DOCX: словарь непустой,
  * и при этом законный текст правил его не задевает.
+ *
+ * Загрузка ОДИН раз в `beforeAll`, не заново в каждом `it()` (Step 7,
+ * независимое ревью PR #76 — диагностика ранее замеченной нестабильности
+ * этого файла под полной параллельной нагрузкой сьюта). Раньше каждый из
+ * четырёх тестов ниже независимо гонял `mammoth.extractRawText` по реальному
+ * DOCX + `fs.readFileSync` по реальному oracle JSONL — вживую замерено: 1-й
+ * (холодный) вызов в изоляции ~1.1с, под полной параллельной нагрузкой
+ * сьюта ~2.5с — уже половина от дефолтного `testTimeout` (5000мс) vitest,
+ * и это НЕ гонка за общее состояние (результат всегда корректен при
+ * завершении), а исчерпание запаса времени под таймаут диска/CPU-разогрева
+ * под нагрузкой. `beforeAll` не только убирает трёхкратную избыточную
+ * повторную работу (тот же DOCX/oracle не меняется между тестами одного
+ * файла), но и переносит стоимость под `hookTimeout` — эмпирически
+ * проверено (`_scratch-hook-timeout-probe`, вручную, не оставлено в
+ * репозитории): 6-секундный `beforeAll` проходит без таймаута, то есть
+ * бюджет заметно щедрее дефолтного `testTimeout`.
  */
 describe('buildOracleTaintDetector на реальном пакете', () => {
-  const realDetector = async () => {
+  let detector: OracleTaintDetector;
+  let rules: SourceRule[];
+  let oracle: OracleCase[];
+
+  beforeAll(async () => {
     const { loadSemanticRuleOracle } = await import('../semantic-rule-oracle');
     const { loadSourceRulesFromDocx } = await import('../source-rule-segmentation');
-    const rules = await loadSourceRulesFromDocx();
-    return {
-      detector: buildOracleTaintDetector({
-        oracle: loadSemanticRuleOracle(),
-        sourceText: rules.map((r) => r.text).join('\n'),
-      }),
-      rules,
-    };
-  };
-
-  it('словарь «только-oracle» непустой — иначе проверка ничего не стережёт', async () => {
-    const { detector: d } = await realDetector();
-
-    expect(d.taintedShingleCount).toBeGreaterThan(0);
+    rules = await loadSourceRulesFromDocx();
+    oracle = loadSemanticRuleOracle();
+    detector = buildOracleTaintDetector({
+      oracle,
+      sourceText: rules.map((r) => r.text).join('\n'),
+    });
   });
 
-  it('текст любого исходного правила НЕ считается утечкой', async () => {
-    const { detector: d, rules } = await realDetector();
+  it('словарь «только-oracle» непустой — иначе проверка ничего не стережёт', () => {
+    expect(detector.taintedShingleCount).toBeGreaterThan(0);
+  });
 
+  it('текст любого исходного правила НЕ считается утечкой', () => {
     for (const rule of rules) {
-      expect(() => d.assertClean({ retrievalText: rule.text }, `rule ${rule.sourceRuleId}`)).not.toThrow();
+      expect(() =>
+        detector.assertClean({ retrievalText: rule.text }, `rule ${rule.sourceRuleId}`)
+      ).not.toThrow();
     }
   });
 
-  it('каждый вопрос Q01–Q10 НЕ считается утечкой — вопрос идёт в движок', async () => {
-    const { loadSemanticRuleOracle } = await import('../semantic-rule-oracle');
-    const { detector: d } = await realDetector();
-
-    for (const testCase of loadSemanticRuleOracle()) {
-      expect(() => d.assertClean({ question: testCase.question }, testCase.id)).not.toThrow();
+  it('каждый вопрос Q01–Q10 НЕ считается утечкой — вопрос идёт в движок', () => {
+    for (const testCase of oracle) {
+      expect(() => detector.assertClean({ question: testCase.question }, testCase.id)).not.toThrow();
     }
   });
 
-  it('ожидаемый ответ любого кейса ЛОВИТСЯ как утечка', async () => {
-    const { loadSemanticRuleOracle } = await import('../semantic-rule-oracle');
-    const { detector: d } = await realDetector();
-
-    for (const testCase of loadSemanticRuleOracle()) {
+  it('ожидаемый ответ любого кейса ЛОВИТСЯ как утечка', () => {
+    for (const testCase of oracle) {
       expect(
-        () => d.assertClean({ leaked: testCase.expectedAnswer }, testCase.id),
+        () => detector.assertClean({ leaked: testCase.expectedAnswer }, testCase.id),
         `${testCase.id}: ожидаемый ответ прошёл мимо детектора`
       ).toThrow(/oracle/i);
     }
