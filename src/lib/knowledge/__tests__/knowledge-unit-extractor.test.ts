@@ -105,11 +105,11 @@ describe('buildExtractionPromptMessages — чистая функция, без 
 });
 
 describe('extractKnowledgeUnits — интеграция со structured()', () => {
-  it('валидный ответ провайдера возвращает массив units, parentRuleRef разрешается на реальный анкер', () => {
+  it('валидный ответ провайдера возвращает массив units, parentExtractionRef разрешается на extractionRef другого unit\'а этого же ответа', () => {
     return anthropicRoundTrip();
   });
 
-  it('parentRuleRef на несуществующий анкер (эфемерная метка вроде "R-17") получает DANGLING_PARENT_REF, не теряется молча', async () => {
+  it('parentExtractionRef, не резолвящийся ни в один extractionRef этого ответа (эфемерная метка вроде "R-17"), получает DANGLING_PARENT_REF; поле обнуляется, сырое значение видно в description (P0-фикс translation-rbj)', async () => {
     fetchMock.mockResolvedValue(
       anthropicOk(
         JSON.stringify({
@@ -120,7 +120,8 @@ describe('extractKnowledgeUnits — интеграция со structured()', () 
               facets: {},
               triggerCondition: null,
               numericConstraint: { factKey: 'максимум суток подряд', value: 3, unit: 'сутки' },
-              parentRuleRef: 'R-17',
+              extractionRef: 'u1',
+              parentExtractionRef: 'R-17',
               sourceSpan: { anchor: 'block-B', quote: 'не более 3 дней подряд' },
               evidenceByField: {
                 statement: { anchor: 'block-B', quote: 'не более 3 дней подряд' },
@@ -135,9 +136,9 @@ describe('extractKnowledgeUnits — интеграция со structured()', () 
 
     const result = await extractKnowledgeUnits({ blocks: [BLOCK_A, BLOCK_B], runConfig: runConfig() });
 
-    expect(result.units[0].parentRuleRef).toBe('R-17');
+    expect(result.units[0].parentExtractionRef).toBeNull();
     expect(result.units[0].uncertainties).toEqual([
-      expect.objectContaining({ kind: 'DANGLING_PARENT_REF' }),
+      expect.objectContaining({ kind: 'DANGLING_PARENT_REF', description: expect.stringContaining('R-17') }),
     ]);
   });
 });
@@ -153,7 +154,8 @@ async function anthropicRoundTrip() {
             facets: {},
             triggerCondition: null,
             numericConstraint: null,
-            parentRuleRef: null,
+            extractionRef: 'u1',
+            parentExtractionRef: null,
             sourceSpan: { anchor: 'block-A', quote: 'в уединённом месте' },
             evidenceByField: { statement: { anchor: 'block-A', quote: 'в уединённом месте' } },
             uncertainties: [],
@@ -164,7 +166,8 @@ async function anthropicRoundTrip() {
             facets: {},
             triggerCondition: null,
             numericConstraint: { factKey: 'максимум суток подряд', value: 3, unit: 'сутки' },
-            parentRuleRef: 'block-A',
+            extractionRef: 'u2',
+            parentExtractionRef: 'u1',
             sourceSpan: { anchor: 'block-B', quote: 'не более 3 дней подряд' },
             evidenceByField: {
               statement: { anchor: 'block-B', quote: 'не более 3 дней подряд' },
@@ -183,8 +186,8 @@ async function anthropicRoundTrip() {
   });
 
   expect(result.units).toHaveLength(2);
-  expect(result.units[1].parentRuleRef).toBe('block-A');
-  // Регрессия translation-2n9: если бы parentRuleRef не разрешался, здесь
-  // появилась бы DANGLING_PARENT_REF uncertainty — её нет, ссылка валидна.
+  expect(result.units[1].parentExtractionRef).toBe('u1');
+  // Регрессия translation-2n9: если бы parentExtractionRef не разрешался,
+  // здесь появилась бы DANGLING_PARENT_REF uncertainty — её нет, ссылка валидна.
   expect(result.units[1].uncertainties).toEqual([]);
 }

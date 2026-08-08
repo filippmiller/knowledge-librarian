@@ -161,4 +161,26 @@ describe('computeContentHash — fingerprint содержания, НЕ identity
     };
     expect(computeContentHash(withOneClause)).not.toBe(computeContentHash(withTwoClauses));
   });
+
+  it('preflight A (translation-apt): сортировка по fact — не только localeCompare, тотальный порядок при равном fact через equals. Схема triggerConditionSchema запрещает дубль fact, но computeContentHash принимает голый TS-объект, минуя схему — функция обязана быть корректна и на данных, которые схема бы отвергла, а не полагаться на то, что вызывающий код всегда валидирует.', () => {
+    const order1 = {
+      ...BASE,
+      triggerCondition: {
+        all: [
+          { fact: 'privacyContext' as const, equals: 'PUBLIC' as const },
+          { fact: 'privacyContext' as const, equals: 'PRIVATE' as const },
+        ],
+      },
+    };
+    const order2 = {
+      ...BASE,
+      triggerCondition: {
+        all: [
+          { fact: 'privacyContext' as const, equals: 'PRIVATE' as const },
+          { fact: 'privacyContext' as const, equals: 'PUBLIC' as const },
+        ],
+      },
+    };
+    expect(computeContentHash(order1)).toBe(computeContentHash(order2));
+  });
 });

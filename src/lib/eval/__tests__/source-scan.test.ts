@@ -54,6 +54,12 @@ describe('scanSourceReferences — specifier-ы модулей', () => {
       '@/lib/eval/oracle-tools'
     );
   });
+
+  it('preflight B (translation-5lf): видит import ... = require(...) (ImportEqualsDeclaration/ExternalModuleReference) — иначе обход oracle isolation gate', () => {
+    expect(
+      scanText("import evalModule = require('@/lib/eval');").moduleSpecifiers
+    ).toContain('@/lib/eval');
+  });
 });
 
 describe('scanSourceReferences — строковые литералы', () => {
