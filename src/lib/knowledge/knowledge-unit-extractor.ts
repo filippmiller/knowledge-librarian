@@ -13,14 +13,18 @@ import { facetCatalog, triggerFactCatalog } from './prompt-catalogs';
 /**
  * LLM-обвязка вокруг структурной экстракции (PR E, Beads translation-ypp).
  * Схема и типы — в `applicability/extraction.ts` (чистые, без IO);
- * разрешение `parentRuleRef` — в `applicability/extraction-parent-refs.ts`
- * (чистое); здесь — только промпт и вызов `structured()` (PR C).
+ * проверка `extractionRef`/`parentExtractionRef` — в
+ * `applicability/extraction-parent-refs.ts` (чистое, preflight C,
+ * translation-djc); здесь — только промпт и вызов `structured()` (PR C).
  */
 
 /** Один блок исходного текста с ЗАРАНЕЕ назначенным якорем. Разбиение
  *  документа на блоки — задача вызывающего кода (ingestion), не этого модуля:
- *  экстрактор лишь ссылается на уже существующие якоря в `parentRuleRef` и
- *  `sourceSpan`. */
+ *  экстрактор лишь ссылается на уже существующие якоря в `sourceSpan`.
+ *  `parentExtractionRef` ссылается на `extractionRef` ДРУГОГО unit'а этого
+ *  же ответа, не на anchor блока (preflight C — anchor называет место в
+ *  документе, не unit, и не может отличить несколько unit'ов на одном блоке
+ *  друг от друга). */
 export interface SourceBlock {
   readonly anchor: string;
   readonly text: string;
@@ -55,7 +59,8 @@ ${facetCatalog()}
 ${triggerFactCatalog({ booleanAsJsonLiteral: true })}
   Пример: {"all": [{"fact": "privacyContext", "equals": "PUBLIC"}]}
 - numericConstraint — если в тексте есть числовое ограничение (срок, количество, длительность): {"factKey": "что именно ограничивает число, своими словами", "value": число, "unit": "единица измерения"}. Одно числовое ограничение = один factKey = один unit. Несколько чисел в одном предложении ("15 секунд, потом пауза 30 секунд, не более 3 раз") — это НЕСКОЛЬКО отдельных unit'ов, каждый со своим factKey, не один unit с тремя числами. Иначе — null.
-- parentRuleRef — если этот unit является ФРАГМЕНТОМ более общего правила (например, числовое ограничение относится к правилу, описанному в ДРУГОМ блоке текста), укажи anchor блока, откуда взят родительский unit. НИКОГДА не изобретай метку вроде "R-17" — только anchor реального блока, показанного тебе ниже (или anchor блока, из которого извлечён другой unit этого же ответа). Если unit самостоятелен — null.
+- extractionRef — придумай короткий уникальный ID для ЭТОГО unit'а в рамках ЭТОГО ответа (например "u1", "u2", "u3"...). Обязан быть уникален среди ВСЕХ units этого ответа — два одинаковых extractionRef недопустимы.
+- parentExtractionRef — если этот unit является ФРАГМЕНТОМ более общего правила (например, числовое ограничение относится к правилу, описанному в том же или другом блоке текста), укажи extractionRef ДРУГОГО unit'а ИЗ ЭТОГО ЖЕ ОТВЕТА, который и есть родитель. Родитель обязан существовать среди units, которые ты возвращаешь сейчас — если общее правило само не выделяется отдельным unit'ом, оставь parentExtractionRef null, НЕ изобретай ссылку на unit, которого нет. Unit не может ссылаться сам на себя. Если unit самостоятелен — null.
 - sourceSpan — {"anchor": anchor блока, откуда взят unit, "quote": дословная цитата}.
 - evidenceByField — ОБЯЗАТЕЛЬНО подтверждение для КАЖДОГО заполненного поля: всегда для "statement"; для "facets", если facets непуст; для "triggerCondition", если оно не null; для "numericConstraint", если оно не null. Формат ключа {"anchor","quote"} на каждое из этих имён полей. Пропуск обязательного подтверждения — ошибка формата, не опция.
 - uncertainties — если что-то в тексте похоже на условие/число, но ты не уверен, как его структурировать: [{"kind": "UNRECOGNIZED_TRIGGER_CONDITION"|"UNRECOGNIZED_NUMERIC_CONSTRAINT"|"AMBIGUOUS_FACET"|"OTHER", "description": "...", "quote": "..."}]. НЕ пропускай такой фрагмент молча — лучше явная uncertainty, чем потерянное правило.
@@ -97,10 +102,13 @@ export interface ExtractKnowledgeUnitsResult {
 
 /**
  * Извлекает `ExtractedKnowledgeUnit[]` из блоков документа через
- * `structured()` (PR C), затем разрешает `parentRuleRef` каждого unit'а
- * (`validateParentRefs`) — фрагмент, чья ссылка на родителя не резолвится ни
- * в один реальный anchor, получает явную `DANGLING_PARENT_REF` uncertainty
- * вместо тихой потери связи (регрессия translation-2n9).
+ * `structured()` (PR C), затем проверяет `extractionRef`/`parentExtractionRef`
+ * каждого unit'а (`validateParentRefs`, preflight C) — уникальность
+ * `extractionRef`, существование/само-ссылку/циклы `parentExtractionRef`.
+ * Сломанная ссылка не резолвится в тишине — unit остаётся на месте с явной
+ * `DANGLING_PARENT_REF`/`DUPLICATE_EXTRACTION_REF` uncertainty (та же
+ * дисциплина, что закрывала регрессию translation-2n9, теперь на корректной
+ * per-run identity, а не на source-block anchor).
  */
 export async function extractKnowledgeUnits(
   options: ExtractKnowledgeUnitsOptions
@@ -114,8 +122,7 @@ export async function extractKnowledgeUnits(
     ...(options.signal && { signal: options.signal }),
   });
 
-  const knownAnchors = options.blocks.map((b) => b.anchor);
-  const units = validateParentRefs(structuredResult.data.units, knownAnchors);
+  const units = validateParentRefs(structuredResult.data.units);
 
   return { units, structuredResult };
 }

@@ -24,7 +24,8 @@ function unit(overrides: Partial<ExtractedKnowledgeUnit> = {}): ExtractedKnowled
     facets: {},
     triggerCondition: null,
     numericConstraint: null,
-    parentRuleRef: null,
+    extractionRef: 'u1',
+    parentExtractionRef: null,
     sourceSpan: { anchor: 'block-A', quote: 'уединённом месте' },
     evidenceByField: { statement: { anchor: 'block-A', quote: 'уединённом месте' } },
     uncertainties: [],
@@ -76,16 +77,18 @@ describe('assignIdentity — evidence не резолвится дословно
   });
 });
 
-describe('assignIdentity — parentRuleRef резолвится в unitId родителя, когда родитель тоже извлечён', () => {
-  it('регрессия translation-2n9: числовое ограничение ("не более 3 дней") ссылается на unitId родителя, а не на сырой anchor', () => {
+describe('assignIdentity — parentExtractionRef резолвится в unitId родителя через extractionRef (preflight C, translation-djc)', () => {
+  it('регрессия translation-2n9: числовое ограничение ("не более 3 дней") ссылается на unitId родителя', () => {
     const parent = unit({
+      extractionRef: 'p',
       statement: 'Раздражение кожи снимают в уединённом месте.',
       sourceSpan: { anchor: 'block-A', quote: 'уединённом месте' },
     });
     const fragment = unit({
+      extractionRef: 'f',
       statement: 'Не более 3 дней подряд.',
       numericConstraint: { factKey: 'максимум суток', value: 3, unit: 'сутки' },
-      parentRuleRef: 'block-A', // ссылка на E-уровне — сырой anchor
+      parentExtractionRef: 'p',
       sourceSpan: { anchor: 'block-A', quote: 'Не более 3 дней подряд' },
     });
     const result = assignIdentity([parent, fragment], new Map([['block-A', BLOCK_A]]), 'rev-1');
@@ -96,40 +99,74 @@ describe('assignIdentity — parentRuleRef резолвится в unitId род
     expect(persistedFragment.parentRuleRef).toBe(persistedParent.unitId);
   });
 
-  it('родитель ЕЩЁ не извлечён (только документный anchor) — parentRuleRef остаётся сырым anchor, как и предписывает план', () => {
+  it('ОСНОВНАЯ регрессия preflight C: родитель + три числовых fragment ИЗ ОДНОГО БЛОКА (общий sourceSpan.anchor, как правило 4 фикстуры) — все резолвятся в один и тот же parent unitId, ни один не DANGLING', () => {
+    const RULE4_BLOCK: SourceBlockLocation = {
+      anchor: 'block-rule-4',
+      text: 'Давление должно оставаться слабым. Не дольше 15 секунд. Пауза не менее 30 секунд. Не более трёх циклов.',
+      sectionPath: 'rule.4',
+      blockStart: 0,
+      blockEnd: 105,
+    };
+    const parent = unit({
+      extractionRef: 'p',
+      statement: 'Давление должно оставаться слабым.',
+      sourceSpan: { anchor: 'block-rule-4', quote: 'Давление должно оставаться слабым' },
+    });
+    const f15 = unit({
+      extractionRef: 'f15',
+      statement: 'Не дольше 15 секунд.',
+      numericConstraint: { factKey: 'максимум секунд непрерывного почёсывания', value: 15, unit: 'секунда' },
+      parentExtractionRef: 'p',
+      sourceSpan: { anchor: 'block-rule-4', quote: 'Не дольше 15 секунд' },
+    });
+    const f30 = unit({
+      extractionRef: 'f30',
+      statement: 'Пауза не менее 30 секунд.',
+      numericConstraint: { factKey: 'минимум секунд паузы', value: 30, unit: 'секунда' },
+      parentExtractionRef: 'p',
+      sourceSpan: { anchor: 'block-rule-4', quote: 'Пауза не менее 30 секунд' },
+    });
+    const f3 = unit({
+      extractionRef: 'f3',
+      statement: 'Не более трёх циклов.',
+      numericConstraint: { factKey: 'максимум циклов за эпизод', value: 3, unit: 'цикл' },
+      parentExtractionRef: 'p',
+      sourceSpan: { anchor: 'block-rule-4', quote: 'Не более трёх циклов' },
+    });
+
+    const result = assignIdentity(
+      [parent, f15, f30, f3],
+      new Map([['block-rule-4', RULE4_BLOCK]]),
+      'rev-1'
+    );
+
+    expect(result.unresolvedEvidence).toEqual([]);
+    expect(result.ambiguousDuplicates).toEqual([]);
+    expect(result.units).toHaveLength(4);
+
+    const persistedParent = result.units.find((u) => u.statement.includes('оставаться слабым'))!;
+    const fragments = result.units.filter((u) => u.statement !== persistedParent.statement);
+    expect(fragments).toHaveLength(3);
+    for (const f of fragments) {
+      expect(f.parentRuleRef).toBe(persistedParent.unitId);
+    }
+    // extractionRef/parentExtractionRef не переживают persistence — план §3
+    // preflight C: "extractionRef не является persistence identity".
+    for (const u of result.units) {
+      expect(u).not.toHaveProperty('extractionRef');
+      expect(u).not.toHaveProperty('parentExtractionRef');
+    }
+  });
+
+  it('родитель ЕЩЁ не извлечён (parentExtractionRef не резолвится ни в один extractionRef этого прогона) — parentRuleRef становится null, не мусорной строкой', () => {
     const orphanFragment = unit({
+      extractionRef: 'f',
       statement: 'Не более 3 дней подряд.',
-      parentRuleRef: 'block-A',
+      parentExtractionRef: 'p-отсутствует',
       sourceSpan: { anchor: 'block-A', quote: 'Не более 3 дней подряд' },
     });
     const result = assignIdentity([orphanFragment], new Map([['block-A', BLOCK_A]]), 'rev-1');
-    expect(result.units[0].parentRuleRef).toBe('block-A');
-  });
-
-  it('несколько unit\'ов делят anchor родителя (неоднозначно, кто именно родитель) — parentRuleRef НЕ резолвится, остаётся сырым', () => {
-    const candidate1 = unit({
-      statement: 'Кандидат 1.',
-      sourceSpan: { anchor: 'block-A', quote: 'уединённом месте' },
-    });
-    const candidate2 = unit({
-      statement: 'Кандидат 2.',
-      sourceSpan: { anchor: 'block-A', quote: 'Не более 3 дней подряд' },
-    });
-    const fragment = unit({
-      statement: 'Фрагмент.',
-      parentRuleRef: 'block-A',
-      sourceSpan: { anchor: 'block-A', quote: 'Раздражение кожи' },
-    });
-    // Три РАЗНЫХ evidence span на одном anchor — ни один unitId не
-    // схлопывается (не ambiguous duplicate); проверяем именно
-    // множественность anchor-претендентов на роль родителя.
-    const result = assignIdentity(
-      [candidate1, candidate2, fragment],
-      new Map([['block-A', BLOCK_A]]),
-      'rev-1'
-    );
-    const persistedFragment = result.units.find((u) => u.statement === 'Фрагмент.');
-    expect(persistedFragment?.parentRuleRef).toBe('block-A');
+    expect(result.units[0].parentRuleRef).toBeNull();
   });
 });
 
@@ -158,7 +195,7 @@ describe('assignIdentity — ambiguous duplicate: одинаковый kind + ev
   });
 
   it('разный kind на том же evidence span — НЕ дубликат (unitId включает kind)', () => {
-    const differentKind = unit({ kind: 'EXCEPTION_RULE', parentRuleRef: 'p' });
+    const differentKind = unit({ kind: 'EXCEPTION_RULE', parentExtractionRef: 'p' });
     const result = assignIdentity([unit(), differentKind], new Map([['block-A', BLOCK_A]]), 'rev-1');
     expect(result.units).toHaveLength(2);
     expect(result.ambiguousDuplicates).toHaveLength(0);

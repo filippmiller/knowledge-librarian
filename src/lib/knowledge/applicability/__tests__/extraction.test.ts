@@ -21,7 +21,8 @@ function validUnit(overrides: Record<string, unknown> = {}): Record<string, unkn
     facets: { scenario: 'apostille.zags.spb' },
     triggerCondition: null,
     numericConstraint: null,
-    parentRuleRef: null,
+    extractionRef: 'u1',
+    parentExtractionRef: null,
     sourceSpan: VALID_SOURCE_SPAN,
     evidenceByField: { statement: VALID_SOURCE_SPAN, facets: VALID_SOURCE_SPAN },
     uncertainties: [],
@@ -224,6 +225,46 @@ describe('extractedKnowledgeUnitSchema — triggerCondition/numericConstraint п
     const result = extractedKnowledgeUnitSchema.safeParse(
       validUnit({ triggerCondition: { description: 'в общественном месте' } })
     );
+    expect(result.success).toBe(false);
+  });
+});
+
+describe('extractedKnowledgeUnitSchema — extractionRef/parentExtractionRef (preflight C, translation-djc)', () => {
+  it('extractionRef обязателен — без него отвергается', () => {
+    const { extractionRef: _drop, ...withoutRef } = validUnit();
+    expect(extractedKnowledgeUnitSchema.safeParse(withoutRef).success).toBe(false);
+  });
+
+  it.each(['', '  '])('пустой по смыслу extractionRef (%j) отвергается', (blank) => {
+    expect(extractedKnowledgeUnitSchema.safeParse(validUnit({ extractionRef: blank })).success).toBe(
+      false
+    );
+  });
+
+  it('parentExtractionRef: null — валидно (unit самостоятелен)', () => {
+    expect(
+      extractedKnowledgeUnitSchema.safeParse(validUnit({ parentExtractionRef: null })).success
+    ).toBe(true);
+  });
+
+  it('parentExtractionRef непустой строкой — валидно', () => {
+    expect(
+      extractedKnowledgeUnitSchema.safeParse(validUnit({ parentExtractionRef: 'u0' })).success
+    ).toBe(true);
+  });
+
+  it.each(['', '  '])('пустая по смыслу parentExtractionRef (%j) отвергается', (blank) => {
+    expect(
+      extractedKnowledgeUnitSchema.safeParse(validUnit({ parentExtractionRef: blank })).success
+    ).toBe(false);
+  });
+
+  it('старое поле parentRuleRef на новой схеме отвергается — strictObject, не тихо игнорируется', () => {
+    const { extractionRef: _drop, parentExtractionRef: _drop2, ...withoutNewFields } = validUnit();
+    const result = extractedKnowledgeUnitSchema.safeParse({
+      ...withoutNewFields,
+      parentRuleRef: null,
+    });
     expect(result.success).toBe(false);
   });
 });

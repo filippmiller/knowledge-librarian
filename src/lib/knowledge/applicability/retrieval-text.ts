@@ -46,9 +46,14 @@ function numericConstraintText(unit: PersistedKnowledgeUnit): string[] {
 
 /**
  * `unitsById` — все units этого прогона (или как минимум родители фрагментов).
- * Родитель ищется по `unit.parentRuleRef` (после PR F это реальный `unitId`,
- * когда однозначно резолвился; сырой anchor — молча пропускается: контекст
- * родителя опционален, а не обязателен для построения текста).
+ * Родитель ищется по `unit.parentRuleRef` — после preflight C
+ * (translation-djc) это ВСЕГДА либо настоящий `unitId`, либо `null`, никогда
+ * сырая ссылка (`extractionRef`/anchor не переживают persistence). `if
+ * (parent)` здесь — не откат на случай нерезолвившейся ссылки, а защита от
+ * ситуации, когда `unitsById`, переданный ЭТИМ вызовом, просто не включает
+ * родителя (например, родитель — в `ambiguousDuplicates`, не в основном
+ * наборе units): контекст родителя опционален, а не обязателен для
+ * построения текста.
  */
 export function buildRetrievalText(
   unit: PersistedKnowledgeUnit,

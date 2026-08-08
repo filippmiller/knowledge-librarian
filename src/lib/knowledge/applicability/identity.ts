@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { ExtractedKnowledgeUnit } from './extraction';
 import type { KnowledgeUnitKind } from './kinds';
+import type { TriggerClause } from './trigger';
 
 /**
  * Идентификаторы для persistence (PR F, план §3, Beads translation-179).
@@ -96,17 +97,46 @@ export type ContentHashInput = Pick<
 >;
 
 /**
+ * Сравнение по code units (`<`/`>`), НЕ `localeCompare` — preflight A
+ * (translation-apt, независимое ревью). `localeCompare` без явной локали
+ * читает locale/collation среды выполнения: тот же логический набор clauses
+ * теоретически мог бы отсортироваться по-разному на разных машинах/версиях
+ * Node/сборках ICU, дав РАЗНЫЙ `contentHash` для ОДНОГО И ТОГО ЖЕ unit'а —
+ * а `reviewedContentHash` в committed review manifest (план §3 PR H)
+ * обязан совпадать между окружением ревьюера и окружением прогона. */
+function compareByCodeUnits(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+/**
  * `triggerCondition.all` — конъюнкция ("И"), не последовательность: смысл не
  * зависит от порядка условий. `stableStringify` сортирует ключи ОБЪЕКТОВ, но
  * намеренно не трогает порядок МАССИВОВ (для большинства массивов порядок
  * значим) — без этой нормализации перестановка условий той же сутью дала бы
  * другой `contentHash`, ложный сигнал дрейфа (находка независимого ревью).
+ *
+ * Тай-брейк по `equals` при равном `fact` — не гипотетический кейс:
+ * `triggerConditionSchema` (`trigger.ts`) запрещает дубль `fact` через
+ * `superRefine`, но эта функция принимает голый TS-объект БЕЗ прогона через
+ * схему (`ContentHashInput` — структурный тип, не `z.infer` с валидацией).
+ * Без тай-брейка `Array.prototype.sort` (гарантированно стабильный с ES2019)
+ * оставил бы такие clauses в порядке ВХОДА — то есть перестановка входа
+ * меняла бы `contentHash` ровно в том случае, который сортировка должна была
+ * устранить.
  */
+function compareTriggerClauses(a: TriggerClause, b: TriggerClause): number {
+  const byFact = compareByCodeUnits(a.fact, b.fact);
+  if (byFact !== 0) return byFact;
+  return compareByCodeUnits(String(a.equals), String(b.equals));
+}
+
 function normalizeTriggerCondition(
   condition: ContentHashInput['triggerCondition']
 ): ContentHashInput['triggerCondition'] {
   if (condition === null) return null;
-  return { all: [...condition.all].sort((a, b) => a.fact.localeCompare(b.fact)) };
+  return { all: [...condition.all].sort(compareTriggerClauses) };
 }
 
 /** Fingerprint содержания — меняется, когда меняется СУТЬ unit'а, и служит
