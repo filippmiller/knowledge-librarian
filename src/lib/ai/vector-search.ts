@@ -9,6 +9,7 @@ import prisma from '@/lib/db';
 import { generateEmbeddings, EMBEDDING_DIMENSIONS } from '@/lib/openai';
 import { Prisma } from '@prisma/client';
 import { admissibleAudiences, audienceSqlValues, type Audience } from '@/lib/knowledge/audience';
+import { reciprocalRankFusion } from './reciprocal-rank-fusion';
 
 export interface SearchResult {
   id: string;
@@ -181,7 +182,7 @@ export async function searchSimilarChunksPgvector(
 /**
  * Fallback: In-memory cosine similarity search (for when pgvector is unavailable)
  */
-function cosineSimilarity(a: number[], b: number[]): number {
+export function cosineSimilarity(a: number[], b: number[]): number {
   if (a.length !== b.length) return 0;
 
   let dotProduct = 0;
@@ -443,62 +444,30 @@ export async function hybridSearch(
     searchByKeywords(query, domainSlugs, limit * 2, scenarioAncestors, audience),
   ]);
 
-  // Build combined results using RRF
+  // RRF — чистая функция (PR G, [R4a]), не второй раз своя копия формулы:
+  // и этот DocChunk-путь, и in-memory JSONL-путь зовут одну и ту же
+  // reciprocal-rank-fusion.ts. Parity-тест подтверждает неизменность
+  // ранжирования после этого рефакторинга.
   const k = 60; // RRF constant
-  const combinedScores = new Map<string, {
-    result: SearchResult;
-    semanticScore: number;
-    keywordScore: number;
-    semanticRank: number;
-    keywordRank: number;
-  }>();
+  const fused = reciprocalRankFusion(
+    [semanticResults.map((r) => ({ id: r.id })), keywordResults.map((r) => ({ id: r.id }))],
+    { k, weights: [semanticWeight, 1 - semanticWeight] }
+  );
 
-  // Process semantic results
-  semanticResults.forEach((result, index) => {
-    combinedScores.set(result.id, {
-      result,
-      semanticScore: result.similarity,
-      keywordScore: 0,
-      semanticRank: index + 1,
-      keywordRank: Infinity,
-    });
-  });
+  const resultById = new Map<string, SearchResult>();
+  for (const r of semanticResults) resultById.set(r.id, r);
+  for (const r of keywordResults) if (!resultById.has(r.id)) resultById.set(r.id, r);
+  const semanticScoreById = new Map(semanticResults.map((r) => [r.id, r.similarity]));
+  const keywordScoreById = new Map(keywordResults.map((r) => [r.id, r.similarity]));
 
-  // Process keyword results
-  keywordResults.forEach((result, index) => {
-    const existing = combinedScores.get(result.id);
-    if (existing) {
-      existing.keywordScore = result.similarity;
-      existing.keywordRank = index + 1;
-    } else {
-      combinedScores.set(result.id, {
-        result,
-        semanticScore: 0,
-        keywordScore: result.similarity,
-        semanticRank: Infinity,
-        keywordRank: index + 1,
-      });
-    }
-  });
+  const results: HybridSearchResult[] = fused.map((f) => ({
+    ...resultById.get(f.id)!,
+    semanticScore: semanticScoreById.get(f.id) ?? 0,
+    keywordScore: keywordScoreById.get(f.id) ?? 0,
+    combinedScore: f.score,
+  }));
 
-  // Calculate RRF scores
-  const results: HybridSearchResult[] = Array.from(combinedScores.values()).map(entry => {
-    const semanticRRF = entry.semanticRank !== Infinity ? 1 / (k + entry.semanticRank) : 0;
-    const keywordRRF = entry.keywordRank !== Infinity ? 1 / (k + entry.keywordRank) : 0;
-    const combinedScore = semanticWeight * semanticRRF + (1 - semanticWeight) * keywordRRF;
-
-    return {
-      ...entry.result,
-      semanticScore: entry.semanticScore,
-      keywordScore: entry.keywordScore,
-      combinedScore,
-    };
-  });
-
-  // Sort by combined score and return top results
-  return results
-    .sort((a, b) => b.combinedScore - a.combinedScore)
-    .slice(0, limit);
+  return results.slice(0, limit);
 }
 
 /**
