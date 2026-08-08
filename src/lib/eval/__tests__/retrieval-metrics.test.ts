@@ -49,6 +49,29 @@ describe('evaluateRecall', () => {
   });
 });
 
+describe('evaluateRecall — валидация k (pre-retrieval hardening, Step 7)', () => {
+  const ONE_CASE = [{ query: 'Q1', expectedUnitIds: ['u1'], actualRanking: ['u1', 'u2'] }];
+
+  it.each([
+    ['NaN', NaN],
+    ['Infinity', Infinity],
+    ['-Infinity', -Infinity],
+    ['отрицательное', -1],
+    ['дробное', 2.5],
+  ])('k=%s отвергается явно, не тихой JS slice-коэрсией', (_label, k) => {
+    expect(() => evaluateRecall(ONE_CASE, k)).toThrow(/k/i);
+  });
+
+  it('k=0 — легален (диагностический вырожденный случай, та же конвенция, что finalLimit/rerankPoolSize в semantic-retrieval.ts), не бросает', () => {
+    expect(() => evaluateRecall(ONE_CASE, 0)).not.toThrow();
+    expect(evaluateRecall(ONE_CASE, 0).recallAtK).toBe(0); // top-0 никогда не содержит expectedUnitIds
+  });
+
+  it('k=5 (обычный acceptance-порог) — по-прежнему работает как раньше', () => {
+    expect(() => evaluateRecall(ONE_CASE, 5)).not.toThrow();
+  });
+});
+
 describe('evaluateMrr — диагностика, не ворота', () => {
   it('релевантный unit на первом месте -> MRR = 1', () => {
     const result = evaluateMrr([{ query: 'Q1', expectedUnitIds: ['u1'], actualRanking: ['u1', 'u2'] }]);

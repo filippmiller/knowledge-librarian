@@ -22,6 +22,15 @@ export interface RecallResult {
 }
 
 export function evaluateRecall(cases: readonly RetrievalCase[], k: number): RecallResult {
+  // NaN/Infinity/отрицательное/дробное k здесь не "естественно пустой
+  // результат" (как 0 — легальный диагностический вырожденный случай), а
+  // коэрсия `Array.slice` в неожиданное поведение (NaN трактуется как 0,
+  // отрицательное режет с конца, дробное молча усекается) — та же находка,
+  // что уже закрыта для rerankPoolSize/finalLimit/rrfK в semantic-retrieval.ts.
+  if (!Number.isInteger(k) || k < 0) {
+    throw new Error(`evaluateRecall: "k" обязан быть неотрицательным целым числом, получено ${k}`);
+  }
+
   if (cases.length === 0) {
     return { recallAtK: 1, hits: 0, total: 0, misses: [] };
   }
