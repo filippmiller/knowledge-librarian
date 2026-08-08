@@ -20,6 +20,9 @@ export interface RetrievalCandidate {
 
 export interface EmbeddedCandidate extends RetrievalCandidate {
   readonly embedding: number[];
+  /** Кто именно посчитал этот вектор — нужно retrieveUnits, чтобы не сравнивать
+   *  cosine similarity между эмбеддингами от разных моделей (translation-kis). */
+  readonly embeddingModel: ModelInfo;
 }
 
 export async function embedCandidates(
@@ -28,7 +31,14 @@ export async function embedCandidates(
 ): Promise<EmbeddedCandidate[]> {
   if (candidates.length === 0) return [];
   const vectors = await provider.embed(candidates.map((c) => c.retrievalText));
-  return candidates.map((c, i) => ({ ...c, embedding: vectors[i] }));
+  if (vectors.length !== candidates.length) {
+    throw new Error(
+      `embedCandidates: provider.embed() вернул ${vectors.length} векторов на ${candidates.length} кандидатов — ` +
+        'батч рассинхронизирован, дальнейшее сопоставление по индексу было бы угадыванием'
+    );
+  }
+  const embeddingModel = provider.modelInfo();
+  return candidates.map((c, i) => ({ ...c, embedding: vectors[i], embeddingModel }));
 }
 
 export interface RetrievalTraceEntry {
@@ -42,10 +52,20 @@ export interface RetrievalTraceEntry {
 }
 
 export interface RetrievalArtifact {
-  readonly embeddingModel: ModelInfo;
+  /** Модель, которой посчитан candidate pool. `null`, только когда пул пуст —
+   *  сравнивать не с чем, а не потому что модель неизвестна. */
+  readonly corpusEmbeddingModel: ModelInfo | null;
+  /** Модель, которой ЭТОТ вызов посчитал вектор запроса. Может отличаться от
+   *  corpusEmbeddingModel только если retrieveUnits уже отверг несовпадение —
+   *  оба поля репортятся правдиво, а не одним общим "embeddingModel". */
+  readonly queryEmbeddingModel: ModelInfo;
   readonly rerankerModel: ModelInfo;
   readonly rrfK: number;
   readonly candidatePoolSize: number;
+}
+
+function modelIdentity(info: ModelInfo): string {
+  return `${info.provider}:${info.model}`;
 }
 
 export interface RetrievalResult {
@@ -96,8 +116,32 @@ export async function retrieveUnits(
     }
   }
 
+  const queryEmbeddingModel = options.embeddingProvider.modelInfo();
+  let corpusEmbeddingModel: ModelInfo | null = null;
+
+  if (candidates.length > 0) {
+    // Прогнать это ДО эмбеддинга запроса — рассинхронизация моделей не
+    // повод тратить сетевой вызов на заведомо непригодный результат.
+    const corpusIdentities = new Set(candidates.map((c) => modelIdentity(c.embeddingModel)));
+    if (corpusIdentities.size > 1) {
+      throw new Error(
+        `retrieveUnits: candidate pool содержит эмбеддинги от нескольких разных моделей ` +
+          `(${[...corpusIdentities].join(', ')}) — cosine similarity между ними не сопоставим`
+      );
+    }
+    corpusEmbeddingModel = candidates[0].embeddingModel;
+    if (modelIdentity(corpusEmbeddingModel) !== modelIdentity(queryEmbeddingModel)) {
+      throw new Error(
+        `retrieveUnits: запрос эмбеднут моделью "${modelIdentity(queryEmbeddingModel)}", ` +
+          `candidate pool — моделью "${modelIdentity(corpusEmbeddingModel)}" — векторы из разных ` +
+          'пространств, cosine similarity между ними бессмысленен'
+      );
+    }
+  }
+
   const artifact: RetrievalArtifact = {
-    embeddingModel: options.embeddingProvider.modelInfo(),
+    corpusEmbeddingModel,
+    queryEmbeddingModel,
     rerankerModel: options.rerankerProvider.modelInfo(),
     rrfK,
     candidatePoolSize: candidates.length,

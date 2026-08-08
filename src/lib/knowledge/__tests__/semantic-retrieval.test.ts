@@ -29,6 +29,18 @@ class FakeEmbeddingProvider implements EmbeddingProvider {
   }
 }
 
+/** Вторая модель эмбеддингов — тот же провайдер, ДРУГАЯ модель/размерность.
+ *  Нужна, чтобы доказать, что identity считается по provider:model, а не по
+ *  dimensions (translation-kis: "same-dimension но другая модель — тоже reject"). */
+class OtherFakeEmbeddingProvider implements EmbeddingProvider {
+  async embed(texts: string[]): Promise<number[][]> {
+    return texts.map(() => [1, 1, 1, 1]);
+  }
+  modelInfo(): ModelInfo {
+    return { provider: 'fake', model: 'fake-embed-v2', dimensions: 4 };
+  }
+}
+
 class FakeRerankerProvider implements RerankerProvider {
   constructor(private readonly scoresById: Record<string, number>) {}
   async rerank(
@@ -72,6 +84,33 @@ describe('embedCandidates', () => {
   });
 });
 
+describe('embedCandidates — cardinality и provenance (translation-kis)', () => {
+  it('provider вернул МЕНЬШЕ векторов, чем кандидатов — явная ошибка, не тихий undefined в embedding', async () => {
+    const shortProvider: EmbeddingProvider = {
+      async embed(texts) {
+        return texts.slice(0, -1).map(() => [0, 0, 0]);
+      },
+      modelInfo: () => ({ provider: 'fake', model: 'fake-short' }),
+    };
+    await expect(embedCandidates(CANDIDATES, shortProvider)).rejects.toThrow(/векторов/i);
+  });
+
+  it('provider вернул БОЛЬШЕ векторов, чем кандидатов — тоже явная ошибка', async () => {
+    const longProvider: EmbeddingProvider = {
+      async embed(texts) {
+        return [...texts, 'extra'].map(() => [0, 0, 0]);
+      },
+      modelInfo: () => ({ provider: 'fake', model: 'fake-long' }),
+    };
+    await expect(embedCandidates(CANDIDATES, longProvider)).rejects.toThrow(/векторов/i);
+  });
+
+  it('каждый EmbeddedCandidate несёт embeddingModel провайдера, который его посчитал', async () => {
+    const embedded = await embedCandidates(CANDIDATES, new FakeEmbeddingProvider());
+    expect(embedded[0].embeddingModel).toEqual({ provider: 'fake', model: 'fake-embed-v1', dimensions: 3 });
+  });
+});
+
 describe('retrieveUnits — оркестрация lexical + semantic + RRF + reranker', () => {
   it('находит релевантного кандидата по смыслу (semantic), даже если lexical промахнулся', async () => {
     const embedded = await embedCandidates(CANDIDATES, new FakeEmbeddingProvider());
@@ -107,13 +146,14 @@ describe('retrieveUnits — оркестрация lexical + semantic + RRF + re
     expect(unrelated?.lexicalRank).toBeNull();
   });
 
-  it('артефакт хранит embedding/reranker modelInfo и RRF k — воспроизводимость (acceptance criterion)', async () => {
+  it('артефакт хранит corpus/query embedding modelInfo и reranker modelInfo и RRF k — воспроизводимость (acceptance criterion)', async () => {
     const embedded = await embedCandidates(CANDIDATES, new FakeEmbeddingProvider());
     const result = await retrieveUnits('апостиль', embedded, {
       embeddingProvider: new FakeEmbeddingProvider(),
       rerankerProvider: new FakeRerankerProvider({}),
     });
-    expect(result.artifact.embeddingModel).toEqual({ provider: 'fake', model: 'fake-embed-v1', dimensions: 3 });
+    expect(result.artifact.corpusEmbeddingModel).toEqual({ provider: 'fake', model: 'fake-embed-v1', dimensions: 3 });
+    expect(result.artifact.queryEmbeddingModel).toEqual({ provider: 'fake', model: 'fake-embed-v1', dimensions: 3 });
     expect(result.artifact.rerankerModel).toEqual({ provider: 'fake', model: 'fake-rerank-v1' });
     expect(result.artifact.rrfK).toBeGreaterThan(0);
   });
@@ -129,12 +169,13 @@ describe('retrieveUnits — оркестрация lexical + semantic + RRF + re
     expect(result.topK[0]).toBe('translation-1'); // после reranking порядок другой
   });
 
-  it('пустой candidate pool — не падает, пустой результат', async () => {
+  it('пустой candidate pool — не падает, пустой результат, corpusEmbeddingModel=null (нечего сравнивать)', async () => {
     const result = await retrieveUnits('апостиль', [], {
       embeddingProvider: new FakeEmbeddingProvider(),
       rerankerProvider: new FakeRerankerProvider({}),
     });
     expect(result.topK).toEqual([]);
+    expect(result.artifact.corpusEmbeddingModel).toBeNull();
   });
 
   it('провайдер эмбеддингов вернул пустой/короткий батч для запроса — явная ошибка, не тихая порча ранжирования (находка ревью этого PR)', async () => {
@@ -169,5 +210,49 @@ describe('retrieveUnits — оркестрация lexical + semantic + RRF + re
         [key]: value,
       })
     ).rejects.toThrow();
+  });
+
+  describe('embedding model identity — corpus и query обязаны совпадать (translation-kis)', () => {
+    it('кандидаты пришли от ДВУХ разных моделей — явная ошибка перед ранжированием', async () => {
+      const embeddedA = await embedCandidates([CANDIDATES[0]], new FakeEmbeddingProvider());
+      const embeddedB = await embedCandidates([CANDIDATES[1]], new OtherFakeEmbeddingProvider());
+      await expect(
+        retrieveUnits('апостиль', [...embeddedA, ...embeddedB], {
+          embeddingProvider: new FakeEmbeddingProvider(),
+          rerankerProvider: new FakeRerankerProvider({}),
+        })
+      ).rejects.toThrow(/модел/i);
+    });
+
+    it('query embedded моделью B, corpus — моделью A -> явное несовпадение отвергается', async () => {
+      const embedded = await embedCandidates(CANDIDATES, new FakeEmbeddingProvider());
+      await expect(
+        retrieveUnits('апостиль', embedded, {
+          embeddingProvider: new OtherFakeEmbeddingProvider(),
+          rerankerProvider: new FakeRerankerProvider({}),
+        })
+      ).rejects.toThrow(/модел/i);
+    });
+
+    it('тот же provider, РАЗНАЯ модель/размерность в ModelInfo — identity ключ provider:model, dimensions не заменяет его', async () => {
+      // OtherFakeEmbeddingProvider несёт provider:'fake' (тот же), но model:'fake-embed-v2' —
+      // доказывает, что сравнение идёт по паре provider+model, а не по одному provider.
+      const embedded = await embedCandidates(CANDIDATES, new OtherFakeEmbeddingProvider());
+      await expect(
+        retrieveUnits('апостиль', embedded, {
+          embeddingProvider: new FakeEmbeddingProvider(),
+          rerankerProvider: new FakeRerankerProvider({}),
+        })
+      ).rejects.toThrow(/модел/i);
+    });
+
+    it('идентичная модель corpus/query -> работает как раньше, без ошибки', async () => {
+      const embedded = await embedCandidates(CANDIDATES, new FakeEmbeddingProvider());
+      const result = await retrieveUnits('апостиль', embedded, {
+        embeddingProvider: new FakeEmbeddingProvider(),
+        rerankerProvider: new FakeRerankerProvider({}),
+      });
+      expect(result.topK.length).toBeGreaterThan(0);
+    });
   });
 });
