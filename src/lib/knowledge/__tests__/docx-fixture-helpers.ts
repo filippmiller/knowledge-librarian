@@ -6,7 +6,7 @@ import JSZip from 'jszip';
  * `*.test.ts` (см. прецедент `applicability/__tests__/helpers.ts`).
  *
  * `word/document.xml` — единственная запись архива, которую читает
- * `extractCanonicalDocxBlocks`; остальные части настоящего .docx (Content
+ * `extractCanonicalDocument`; остальные части настоящего .docx (Content
  * Types, rels, styles.xml) намеренно не создаются — тест ZIP им не пользуется.
  */
 
