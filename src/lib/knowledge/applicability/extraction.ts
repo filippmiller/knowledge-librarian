@@ -172,8 +172,20 @@ export const extractedKnowledgeUnitCoreSchema = z.strictObject({
   statement: nonBlankString('statement не может быть пустым'),
   title: nonBlankString('title не может быть пустым').optional(),
   facets: extractedFacetMapSchema,
-  triggerCondition: triggerConditionSchema.nullable(),
-  numericConstraint: numericConstraintSchema.nullable(),
+  // `.nullish().transform(v => v ?? null)`, не `.nullable()` — живой прогон
+  // (claude-haiku-4-5, continuation-сессия, --stage=extraction) поймал
+  // РЕАЛЬНОЕ (воспроизведено в 2 из 3 попыток) поведение модели: поле
+  // ПРОПУЩЕНО ключом целиком, а не отправлено как `null`, хотя промпт прямо
+  // требует null для неприменимых kind. Это не ослабление контракта —
+  // `TriggerCondition | null`/`NumericConstraint | null` остаются точно теми
+  // же типами для КАЖДОГО потребителя (`_ExtractedUnitTypeMatches` ниже это
+  // проверяет); нормализуется только то, что отсутствующий ключ и `null` —
+  // два синтаксически разных, но семантически одинаковых способа сказать
+  // "здесь ничего нет" в JSON. Тот же паттерн уже используется в этом
+  // проекте для устойчивости к LLM-выдаче (`test-extraction-pack.ts`,
+  // `graderResponseSchema`).
+  triggerCondition: triggerConditionSchema.nullish().transform((value) => value ?? null),
+  numericConstraint: numericConstraintSchema.nullish().transform((value) => value ?? null),
   sourceSpan: sourceSpanSchema,
   evidenceByField: z.record(z.string(), sourceSpanSchema),
   uncertainties: z.array(extractionUncertaintySchema).readonly(),

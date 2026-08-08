@@ -227,6 +227,18 @@ describe('extractedKnowledgeUnitSchema — triggerCondition/numericConstraint п
     );
     expect(result.success).toBe(false);
   });
+
+  it('РЕАЛЬНЫЙ живой прогон (claude-haiku-4-5, scratchpad/run1-log.txt, воспроизведено 2 из 3 попыток): triggerCondition/numericConstraint ПРОПУЩЕНЫ ключом целиком (не null), а не выдуманы — нормализуются в null, а не отвергаются', () => {
+    const { triggerCondition: _t, ...withoutTrigger } = validUnit();
+    const triggerResult = extractedKnowledgeUnitSchema.safeParse(withoutTrigger);
+    expect(triggerResult.success).toBe(true);
+    if (triggerResult.success) expect(triggerResult.data.triggerCondition).toBeNull();
+
+    const { numericConstraint: _n, ...withoutNumeric } = validUnit();
+    const numericResult = extractedKnowledgeUnitSchema.safeParse(withoutNumeric);
+    expect(numericResult.success).toBe(true);
+    if (numericResult.success) expect(numericResult.data.numericConstraint).toBeNull();
+  });
 });
 
 describe('extractedKnowledgeUnitSchema — extractionRef/parentExtractionRef (preflight C, translation-djc)', () => {
