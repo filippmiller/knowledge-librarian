@@ -170,6 +170,63 @@ describe('assignIdentity — parentExtractionRef резолвится в unitId 
   });
 });
 
+describe('assignIdentity — защита от невалидных parentExtractionRef ДАЖЕ БЕЗ validateParentRefs (P0, translation-rbj, PR #76 review)', () => {
+  // В реальном пайплайне extractKnowledgeUnits() всегда прогоняет units через
+  // validateParentRefs() ПЕРЕД assignIdentity(), и та уже обнуляет невалидные
+  // ссылки (см. extraction-parent-refs.ts). Но assignIdentity — экспортируемая
+  // функция, и ничто на уровне типов не заставляет вызывающего сначала
+  // провалидировать: "структура делает нарушение невозможным", а не "вызывающий
+  // обязан помнить" — поэтому эта защита дублируется здесь как ВТОРОЙ,
+  // независимый слой, не полагающийся на то, что validateParentRefs уже
+  // отработала.
+
+  it('duplicate extractionRef СЫРЫМИ (validateParentRefs не вызывалась): child получает parentRuleRef=null, не произвольного (last-write-wins) родителя', () => {
+    const RULE4_BLOCK: SourceBlockLocation = {
+      anchor: 'block-x',
+      text: 'Кандидат 1. Кандидат 2. Потомок.',
+      sectionPath: 'x',
+      blockStart: 0,
+      blockEnd: 32,
+    };
+    const p1 = unit({
+      extractionRef: 'parent',
+      statement: 'Кандидат 1.',
+      sourceSpan: { anchor: 'block-x', quote: 'Кандидат 1' },
+    });
+    const p2 = unit({
+      extractionRef: 'parent',
+      statement: 'Кандидат 2.',
+      sourceSpan: { anchor: 'block-x', quote: 'Кандидат 2' },
+    });
+    const child = unit({
+      extractionRef: 'c',
+      parentExtractionRef: 'parent',
+      statement: 'Потомок.',
+      sourceSpan: { anchor: 'block-x', quote: 'Потомок' },
+    });
+
+    const resultAB = assignIdentity([p1, p2, child], new Map([['block-x', RULE4_BLOCK]]), 'rev-1');
+    const resultBA = assignIdentity([p2, p1, child], new Map([['block-x', RULE4_BLOCK]]), 'rev-1');
+
+    const childAB = resultAB.units.find((u) => u.statement === 'Потомок.');
+    const childBA = resultBA.units.find((u) => u.statement === 'Потомок.');
+
+    expect(childAB?.parentRuleRef).toBeNull();
+    expect(childBA?.parentRuleRef).toBeNull();
+  });
+
+  it('self-reference СЫРЫМИ (validateParentRefs не вызывалась): parentRuleRef никогда не равен собственному unitId', () => {
+    const selfReferential = unit({
+      extractionRef: 'u1',
+      parentExtractionRef: 'u1',
+    });
+    const result = assignIdentity([selfReferential], new Map([['block-A', BLOCK_A]]), 'rev-1');
+    expect(result.units).toHaveLength(1);
+    expect(result.units[0].parentRuleRef).toBeNull();
+    expect(result.units[0].parentRuleRef).not.toBe(result.units[0].unitId);
+  });
+});
+
 describe('assignIdentity — ambiguous duplicate: одинаковый kind + evidence span', () => {
   it('два unit\'а, схлопнувшиеся в один unitId, — оба уходят в ambiguousDuplicates, ни один не получает случайный ordinal', () => {
     const first = unit({ statement: 'Формулировка А.' });

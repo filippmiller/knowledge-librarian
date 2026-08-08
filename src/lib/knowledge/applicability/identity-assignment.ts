@@ -26,8 +26,9 @@ export interface SourceBlockLocation {
  * identity, а `parentRuleRef` здесь ВСЕГДА либо настоящий `unitId` родителя
  * этого же прогона, либо `null` (если unit самостоятелен, либо
  * `parentExtractionRef` не резолвился — не должно происходить для units,
- * прошедших `validateParentRefs`, но эта функция не полагается на это молча,
- * см. `resolveParentRuleRefs`).
+ * прошедших `validateParentRefs` (которая с P0-фикса translation-rbj сама
+ * обнуляет невалидные ссылки), но эта функция не полагается на это молча,
+ * см. `safeUnitIdByExtractionRef`/`toPersistedUnit`).
  */
 export interface PersistedKnowledgeUnit
   extends Omit<ExtractedKnowledgeUnit, 'extractionRef' | 'parentExtractionRef'> {
@@ -112,7 +113,7 @@ export function assignIdentity(
     resolved.push({ unit, sourceBlockAnchor, unitId, contentHash });
   }
 
-  const unitIdByExtractionRef = new Map(resolved.map((r) => [r.unit.extractionRef, r.unitId]));
+  const unitIdByExtractionRef = safeUnitIdByExtractionRef(resolved);
   const persisted = resolved.map((r) => toPersistedUnit(r, unitIdByExtractionRef));
 
   const byUnitId = new Map<string, PersistedKnowledgeUnit[]>();
@@ -136,28 +137,60 @@ export function assignIdentity(
 }
 
 /**
+ * `extractionRef -> unitId`, ОТКАЗОУСТОЙЧИВАЯ к дублям, даже если
+ * `validateParentRefs` не вызывалась перед `assignIdentity` (P0,
+ * translation-rbj, независимое ревью PR #76: `assignIdentity` — экспортируемая
+ * функция, ничто на уровне типов не заставляет вызывающего сначала
+ * провалидировать). Обычный `new Map(...)` при задвоенном `extractionRef`
+ * молча оставил бы ПОСЛЕДНЕГО кандидата (last-write-wins, зависимо от порядка
+ * LLM output) — здесь любой `extractionRef`, встретившийся у >1 `resolved`
+ * unit'а, вообще НЕ попадает в карту: `.get()` для него честно вернёт
+ * `undefined`, что `toPersistedUnit` уже трактует как "родитель не резолвился".
+ */
+function safeUnitIdByExtractionRef(resolved: readonly ResolvedUnit[]): ReadonlyMap<string, string> {
+  const grouped = new Map<string, string[]>();
+  for (const r of resolved) {
+    const list = grouped.get(r.unit.extractionRef);
+    if (list) list.push(r.unitId);
+    else grouped.set(r.unit.extractionRef, [r.unitId]);
+  }
+
+  const safe = new Map<string, string>();
+  for (const [extractionRef, unitIds] of grouped) {
+    if (unitIds.length === 1) safe.set(extractionRef, unitIds[0]);
+  }
+  return safe;
+}
+
+/**
  * Строит persisted-запись из `ResolvedUnit`, заменяя `parentExtractionRef`
  * (сырая, per-run ссылка) на настоящий `unitId` родителя (preflight C,
- * translation-djc) — по карте `extractionRef -> unitId`, построенной по ВСЕМ
- * `resolved` units ЭТОГО прогона (до разделения на `ambiguousDuplicates`:
- * `extractionRef` уникален по построению `validateParentRefs`, так что карта
- * однозначна независимо от того, сколько units делят один
- * `sourceSpan.anchor`).
+ * translation-djc) — по карте `extractionRef -> unitId`
+ * (`safeUnitIdByExtractionRef`, устойчивой к дублям).
  *
- * `parentExtractionRef`, не резолвившийся в этой карте (не должно происходить
- * для units, прошедших `validateParentRefs` раньше в пайплайне — та функция
- * это уже проверяет и помечает `DANGLING_PARENT_REF`), даёт `parentRuleRef:
- * null` — НЕ сырую строку: `extractionRef` явно объявлен не-identity полем и
- * не имеет права пережить persistence ни в каком виде.
+ * `parentExtractionRef`, не резолвившийся в этой карте (задвоен, не
+ * существует — не должно происходить для units, прошедших
+ * `validateParentRefs` раньше в пайплайне, та функция это уже проверяет и
+ * помечает `DANGLING_PARENT_REF`, а с P0-фикса ещё и обнуляет само поле — но
+ * эта функция не полагается на это молча, см. `safeUnitIdByExtractionRef`),
+ * даёт `parentRuleRef: null` — НЕ сырую строку: `extractionRef` явно объявлен
+ * не-identity полем и не имеет права пережить persistence ни в каком виде.
+ *
+ * Самоссылка (`parentExtractionRef === extractionRef`) отдельно исключена
+ * ДО обращения к карте: без этой проверки unit, чьё evidence резолвилось,
+ * автоматически резолвил бы САМ СЕБЯ через карту (его собственный
+ * `extractionRef` там ЕСТЬ) — `parentRuleRef === unitId`, то есть persisted
+ * self-reference, ровно тот класс бага, который обнаружило независимое
+ * ревью PR #76.
  */
 function toPersistedUnit(
   resolved: ResolvedUnit,
   unitIdByExtractionRef: ReadonlyMap<string, string>
 ): PersistedKnowledgeUnit {
-  const { extractionRef: _extractionRef, parentExtractionRef, ...rest } = resolved.unit;
+  const { extractionRef, parentExtractionRef, ...rest } = resolved.unit;
 
   const parentRuleRef =
-    parentExtractionRef === null
+    parentExtractionRef === null || parentExtractionRef === extractionRef
       ? null
       : (unitIdByExtractionRef.get(parentExtractionRef) ?? null);
 

@@ -109,7 +109,7 @@ describe('extractKnowledgeUnits — интеграция со structured()', () 
     return anthropicRoundTrip();
   });
 
-  it('parentExtractionRef, не резолвящийся ни в один extractionRef этого ответа (эфемерная метка вроде "R-17"), получает DANGLING_PARENT_REF, не теряется молча', async () => {
+  it('parentExtractionRef, не резолвящийся ни в один extractionRef этого ответа (эфемерная метка вроде "R-17"), получает DANGLING_PARENT_REF; поле обнуляется, сырое значение видно в description (P0-фикс translation-rbj)', async () => {
     fetchMock.mockResolvedValue(
       anthropicOk(
         JSON.stringify({
@@ -136,9 +136,9 @@ describe('extractKnowledgeUnits — интеграция со structured()', () 
 
     const result = await extractKnowledgeUnits({ blocks: [BLOCK_A, BLOCK_B], runConfig: runConfig() });
 
-    expect(result.units[0].parentExtractionRef).toBe('R-17');
+    expect(result.units[0].parentExtractionRef).toBeNull();
     expect(result.units[0].uncertainties).toEqual([
-      expect.objectContaining({ kind: 'DANGLING_PARENT_REF' }),
+      expect.objectContaining({ kind: 'DANGLING_PARENT_REF', description: expect.stringContaining('R-17') }),
     ]);
   });
 });
