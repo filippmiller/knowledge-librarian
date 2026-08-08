@@ -22,7 +22,19 @@ import type { PersistedKnowledgeUnit } from '@/lib/knowledge/applicability/ident
 import type { ExtractionUncertainty } from '@/lib/knowledge/applicability/extraction';
 import type { TriggerClause, TriggerCondition } from '@/lib/knowledge/applicability/trigger';
 
-export type UnitDriftStatus = 'STABLE' | 'CONTENT_CHANGE' | 'CONTENT_OMISSION' | 'CONTENT_ADDITION';
+export type UnitDriftStatus =
+  | 'STABLE'
+  | 'CONTENT_CHANGE'
+  | 'CONTENT_OMISSION'
+  | 'CONTENT_ADDITION'
+  /** unitId встретился больше одного раза на ОДНОЙ стороне сравнения — не
+   *  должно происходить для units, прошедших `assignIdentity` (тот уже
+   *  выделяет такие коллизии в `ambiguousDuplicates` и не пускает их дальше),
+   *  но эта функция не полагается на это молча (Step 6, независимое ревью PR
+   *  #76: "ambiguous cases should report UNKNOWN/REVIEW_REQUIRED rather than
+   *  guessing" — тот же класс защиты, что P0 translation-rbj,
+   *  `safeUnitIdByExtractionRef`). */
+  | 'AMBIGUOUS_DUPLICATE_UNIT_ID';
 
 export interface UnitDriftDetail {
   readonly contentHashChanged: boolean;
@@ -54,6 +66,7 @@ export interface ExtractionDriftReport {
   readonly contentChangedCount: number;
   readonly omittedCount: number;
   readonly addedCount: number;
+  readonly ambiguousDuplicateCount: number;
   readonly entries: readonly UnitDriftEntry[];
   readonly fragmentationChanges: readonly FragmentationChangeGroup[];
 }
@@ -136,16 +149,62 @@ function computeFragmentationChanges(
   return groups.sort((x, y) => compareByCodeUnits(x.sourceBlockAnchor, y.sourceBlockAnchor));
 }
 
+/** `unitId -> unit`, отказоустойчивая к дублям — тот же класс защиты, что
+ *  `safeUnitIdByExtractionRef` (`identity-assignment.ts`, P0 translation-rbj):
+ *  обычный `new Map(arr.map(u => [u.unitId, u]))` при задвоенном unitId
+ *  молча оставил бы ПОСЛЕДНИЙ элемент (last-write-wins) — другой исчез бы из
+ *  сравнения без следа, а оставшийся получил бы вердикт (STABLE/CONTENT_
+ *  CHANGE/...), как будто он был единственным. Здесь любой unitId,
+ *  встретившийся у >1 unit'а с ЭТОЙ стороны, вообще не попадает в `byId` —
+ *  `.get()` честно вернёт `undefined`, а сам unitId отдельно фиксируется в
+ *  `duplicated`. */
+function safeUnitByUnitId(units: readonly PersistedKnowledgeUnit[]): {
+  readonly byId: ReadonlyMap<string, PersistedKnowledgeUnit>;
+  readonly duplicated: ReadonlySet<string>;
+} {
+  const grouped = new Map<string, PersistedKnowledgeUnit[]>();
+  for (const u of units) {
+    const list = grouped.get(u.unitId);
+    if (list) list.push(u);
+    else grouped.set(u.unitId, [u]);
+  }
+
+  const byId = new Map<string, PersistedKnowledgeUnit>();
+  const duplicated = new Set<string>();
+  for (const [unitId, list] of grouped) {
+    if (list.length === 1) byId.set(unitId, list[0]);
+    else duplicated.add(unitId);
+  }
+  return { byId, duplicated };
+}
+
 export function compareExtractionRuns(
   baseline: readonly PersistedKnowledgeUnit[],
   candidate: readonly PersistedKnowledgeUnit[]
 ): ExtractionDriftReport {
-  const baselineById = new Map(baseline.map((u) => [u.unitId, u]));
-  const candidateById = new Map(candidate.map((u) => [u.unitId, u]));
-  const allIds = new Set([...baselineById.keys(), ...candidateById.keys()]);
+  const { byId: baselineById, duplicated: baselineDuplicated } = safeUnitByUnitId(baseline);
+  const { byId: candidateById, duplicated: candidateDuplicated } = safeUnitByUnitId(candidate);
+  const allIds = new Set([
+    ...baselineById.keys(),
+    ...candidateById.keys(),
+    ...baselineDuplicated,
+    ...candidateDuplicated,
+  ]);
 
   const entries: UnitDriftEntry[] = [];
   for (const id of allIds) {
+    // Задвоенность на ЛЮБОЙ стороне делает сам unitId неоднозначным для
+    // сравнения целиком — какой из нескольких units с этим unitId сравнивать
+    // с другой стороной, неизвестно, и это НЕ то же самое, что "unit пропал"
+    // (CONTENT_OMISSION) или "unit появился" (CONTENT_ADDITION): отдельная,
+    // более настораживающая категория, требующая человеческого разбора
+    // ВЫШЕ по пайплайну (assignIdentity/ambiguousDuplicates), не просто
+    // молчаливого исключения отсюда.
+    if (baselineDuplicated.has(id) || candidateDuplicated.has(id)) {
+      entries.push({ unitId: id, status: 'AMBIGUOUS_DUPLICATE_UNIT_ID', sourceBlockAnchor: null, detail: null });
+      continue;
+    }
+
     const b = baselineById.get(id);
     const c = candidateById.get(id);
 
@@ -181,6 +240,7 @@ export function compareExtractionRuns(
     contentChangedCount: entries.filter((e) => e.status === 'CONTENT_CHANGE').length,
     omittedCount: entries.filter((e) => e.status === 'CONTENT_OMISSION').length,
     addedCount: entries.filter((e) => e.status === 'CONTENT_ADDITION').length,
+    ambiguousDuplicateCount: entries.filter((e) => e.status === 'AMBIGUOUS_DUPLICATE_UNIT_ID').length,
     entries,
     fragmentationChanges: computeFragmentationChanges(entries),
   };

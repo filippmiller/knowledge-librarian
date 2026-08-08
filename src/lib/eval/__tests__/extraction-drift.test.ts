@@ -180,3 +180,64 @@ describe('compareExtractionRuns — не бросает, всегда возвр
     expect(report.stableCount).toBe(0);
   });
 });
+
+describe('compareExtractionRuns — задвоенный unitId на одной стороне — AMBIGUOUS, не тихий last-write-wins (Step 6, независимое ревью PR #76: "ambiguous cases should report UNKNOWN/REVIEW_REQUIRED rather than guessing")', () => {
+  // Не должно происходить для units, прошедших assignIdentity (тот уже
+  // выделяет коллизии в ambiguousDuplicates и не пускает их в persisted
+  // units) — но у compareExtractionRuns нет типового гаранта, что вызывающий
+  // код гарантированно передал именно такой, уже очищенный массив. Тот же
+  // класс дефекта, что P0 translation-rbj (safeUnitIdByExtractionRef,
+  // identity-assignment.ts): `new Map(arr.map(u => [u.key, u]))` при дубле
+  // ключа молча оставляет ПОСЛЕДНИЙ элемент — здесь это означало бы, что один
+  // из двух units с одинаковым unitId вообще исчезает из отчёта без следа, а
+  // другой получает вердикт (STABLE/CONTENT_CHANGE), как будто он был
+  // единственным. Оба — реальные units, оба заслуживают появиться в отчёте с
+  // явным сигналом "неоднозначно", не молчаливым выбором одного из двух.
+
+  it('дубль unitId В BASELINE — оба unit\'а уходят в AMBIGUOUS_DUPLICATE_UNIT_ID, ни один не резолвится молча как "единственный"', () => {
+    const baselineA = unit({ unitId: 'dup', contentHash: 'hash-A', statement: 'Вариант А.' });
+    const baselineB = unit({ unitId: 'dup', contentHash: 'hash-B', statement: 'Вариант Б.' });
+    const report = compareExtractionRuns([baselineA, baselineB], []);
+
+    const dupEntries = report.entries.filter((e) => e.unitId === 'dup');
+    expect(dupEntries).toHaveLength(1);
+    expect(dupEntries[0].status).toBe('AMBIGUOUS_DUPLICATE_UNIT_ID');
+    expect(dupEntries[0].detail).toBeNull();
+    // Задвоенный unitId — не CONTENT_OMISSION по ошибке (это НЕ то же самое,
+    // что "unit пропал между прогонами" — это "unit неоднозначен ВНУТРИ
+    // одной стороны сравнения", отдельная категория проблемы).
+    expect(report.omittedCount).toBe(0);
+  });
+
+  it('дубль unitId В CANDIDATE — та же защита, порядко-независимо (A,B и B,A дают тот же результат)', () => {
+    const candidateA = unit({ unitId: 'dup', contentHash: 'hash-A' });
+    const candidateB = unit({ unitId: 'dup', contentHash: 'hash-B' });
+
+    const reportAB = compareExtractionRuns([], [candidateA, candidateB]);
+    const reportBA = compareExtractionRuns([], [candidateB, candidateA]);
+
+    for (const report of [reportAB, reportBA]) {
+      const dupEntries = report.entries.filter((e) => e.unitId === 'dup');
+      expect(dupEntries).toHaveLength(1);
+      expect(dupEntries[0].status).toBe('AMBIGUOUS_DUPLICATE_UNIT_ID');
+      expect(report.addedCount).toBe(0);
+    }
+  });
+
+  it('дубль unitId НЕ участвует в fragmentationChanges — неоднозначность на уровне unitId и группировка по sourceBlockAnchor решают разные вопросы, смешивать их означало бы новую тихую догадку', () => {
+    const baselineA = unit({ unitId: 'dup', sourceBlockAnchor: 'block-7' });
+    const baselineB = unit({ unitId: 'dup', sourceBlockAnchor: 'block-7', contentHash: 'hash-B' });
+    const report = compareExtractionRuns([baselineA, baselineB], []);
+    expect(report.fragmentationChanges).toEqual([]);
+  });
+
+  it('unitId, задвоенный ТОЛЬКО на baseline, но чистый (не задвоенный) на candidate — candidate-сторона резолвится нормально, задвоенность одной стороны не заражает другую', () => {
+    const baselineA = unit({ unitId: 'dup', contentHash: 'hash-A' });
+    const baselineB = unit({ unitId: 'dup', contentHash: 'hash-B' });
+    const clean = unit({ unitId: 'clean', contentHash: 'hash-clean' });
+    const report = compareExtractionRuns([baselineA, baselineB, clean], [clean]);
+
+    const cleanEntry = report.entries.find((e) => e.unitId === 'clean');
+    expect(cleanEntry?.status).toBe('STABLE');
+  });
+});
