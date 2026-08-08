@@ -3,6 +3,7 @@ import { isKnownConcept } from './concepts';
 import { FACET_KEYS, type FacetKey } from './facets';
 import type { PersistedKnowledgeUnit } from './identity-assignment';
 import { TRIGGER_FACT_REGISTRY, type TriggerFactKey } from './trigger-facts';
+import { getScenario } from '@/lib/knowledge/scenarios';
 
 /**
  * Индексируемый текст unit'а (PR G, план §3). НЕ только `statement`:
@@ -27,6 +28,30 @@ function facetsText(unit: PersistedKnowledgeUnit): string[] {
     if (label) parts.push(label);
   }
   return parts;
+}
+
+/** `scenario`/`documentForm` — единственные facets БЕЗ записи в
+ *  `CONCEPT_VOCABULARY_BY_FACET` (`concept-registry.ts`, "обрабатываются
+ *  отдельно на месте использования"). `facetsText()` их поэтому молча
+ *  пропускает — это то самое "место использования". */
+const DOCUMENT_FORM_LABELS: Record<string, string> = {
+  ORIGINAL: 'оригинал',
+  SCAN: 'скан',
+  COPY: 'копия',
+};
+
+function scenarioText(unit: PersistedKnowledgeUnit): string[] {
+  const value = unit.facets.scenario;
+  if (value === undefined) return [];
+  const label = getScenario(value)?.label;
+  return label ? [label] : [];
+}
+
+function documentFormText(unit: PersistedKnowledgeUnit): string[] {
+  const value = unit.facets.documentForm;
+  if (value === undefined) return [];
+  const label = DOCUMENT_FORM_LABELS[value];
+  return label ? [label] : [];
 }
 
 function triggerConditionText(unit: PersistedKnowledgeUnit): string[] {
@@ -79,6 +104,8 @@ export function buildRetrievalText(
 
   parts.push(unit.sourceSpan.quote);
   parts.push(...facetsText(unit));
+  parts.push(...scenarioText(unit));
+  parts.push(...documentFormText(unit));
   parts.push(...triggerConditionText(unit));
   parts.push(...numericConstraintText(unit));
 

@@ -81,6 +81,27 @@ describe('buildRetrievalText — регрессия Q04: контекст род
   });
 });
 
+describe('buildRetrievalText — полнота: facets БЕЗ ConceptVocabulary (scenario, documentForm) не теряются (pre-retrieval hardening, Step 4)', () => {
+  it('scenario — единственный семантический контекст statement — сохраняется в retrievalText человекочитаемой меткой (регрессия: facetsText молча пропускает facet без ConceptVocabulary)', () => {
+    const genericUnit = unit({
+      statement: 'Требуется оригинал документа.',
+      facets: { scenario: 'apostille.zags.spb' },
+    });
+    const text = buildRetrievalText(genericUnit, new Map());
+    expect(text).toContain('Апостиль в КЗАГС Санкт-Петербурга');
+  });
+
+  it('documentForm попадает в retrievalText читаемым словом, не кодом ORIGINAL/SCAN/COPY', () => {
+    const text = buildRetrievalText(unit({ facets: { documentForm: 'SCAN' } }), new Map());
+    expect(text).toContain('скан');
+    expect(text).not.toContain('SCAN');
+  });
+
+  it('неизвестный scenario key — не падает, просто без метки (защита от рассинхронизации с реестром)', () => {
+    expect(() => buildRetrievalText(unit({ facets: { scenario: 'нет-такого-сценария' } }), new Map())).not.toThrow();
+  });
+});
+
 describe('buildRetrievalText — структурные условия и facets словами, не кодами', () => {
   it('numericConstraint попадает в текст читаемо (factKey + value + unit)', () => {
     const withConstraint = unit({
