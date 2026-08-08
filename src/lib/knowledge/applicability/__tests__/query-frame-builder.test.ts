@@ -14,8 +14,45 @@ import {
  * - конфликт текущего сообщения с историей попадает в ambiguities, текущее побеждает.
  */
 
-const CURRENT: ConversationMessage = { id: 'm2', role: 'user', text: 'сколько стоит апостиль?' };
-const HISTORY_MSG: ConversationMessage = { id: 'm1', role: 'user', text: 'нужен апостиль на диплом' };
+/**
+ * `text` — намеренно широкий, содержит буквально КАЖДУЮ цитату (`quote`),
+ * используемую тестами ниже с этим `messageId` — pre-retrieval hardening,
+ * Step 5: `buildQueryFrame` теперь требует, чтобы `quote` была настоящей
+ * подстрокой текста referenced-сообщения (раньше проверялось только
+ * непустое `quote`, дословность не проверялась вообще). Один общий фикстур
+ * дешевле, чем переписывать text под каждый тест по отдельности.
+ */
+const CURRENT: ConversationMessage = {
+  id: 'm2',
+  role: 'user',
+  text: [
+    'сколько стоит апостиль в СПб?',
+    'не апостиль',
+    'легализация',
+    'апостиль тоже',
+    'перевод',
+    'муж рядом',
+    'она согласна',
+    '???',
+    'на улице',
+    'дома',
+    'апостиль на загс спб',
+    'загс',
+    'из России',
+  ].join(' '),
+};
+const HISTORY_MSG: ConversationMessage = {
+  id: 'm1',
+  role: 'user',
+  text: [
+    'нужен апостиль на диплом',
+    'свидетельство ЗАГС',
+    'перевод',
+    'апостиль в СПб',
+    'в автобусе',
+    'без согласия',
+  ].join(' '),
+};
 
 function extraction(overrides: Partial<RawQueryExtraction> = {}): RawQueryExtraction {
   return {
@@ -408,6 +445,74 @@ describe('messageId не из разговора — упоминание не �
       [HISTORY_MSG, CURRENT]
     );
     expect(frame.facets.service).toEqual({ state: 'UNKNOWN' });
+  });
+});
+
+describe('buildQueryFrame — trust boundary: messageId и quote (pre-retrieval hardening, Step 5)', () => {
+  it('пустой (пробельный) message.id — бросает', () => {
+    const messages: ConversationMessage[] = [{ id: '   ', role: 'user', text: 'нужен перевод' }];
+    expect(() => buildQueryFrame(extraction(), messages)).toThrow(/id/i);
+  });
+
+  it('дубль message.id в разговоре — бросает (сообщения неразличимы)', () => {
+    const messages: ConversationMessage[] = [
+      { id: 'dup', role: 'user', text: 'нужен перевод' },
+      { id: 'dup', role: 'user', text: 'и апостиль тоже' },
+    ];
+    expect(() => buildQueryFrame(extraction(), messages)).toThrow(/id/i);
+  });
+
+  it('quote — НЕ дословная подстрока текста referenced-сообщения (сфабрикованная цитата) с РЕАЛЬНЫМ messageId -> mention отбрасывается, не доезжает до QueryFrame', () => {
+    const frame = buildQueryFrame(
+      extraction({
+        facetMentions: [
+          {
+            facet: 'service',
+            polarity: 'INCLUDE',
+            rawValue: 'apostille_spb',
+            messageId: CURRENT.id,
+            quote: 'этой фразы нет в сообщении вообще',
+          },
+        ],
+      }),
+      [CURRENT]
+    );
+    expect(frame.facets.service).toEqual({ state: 'UNKNOWN' });
+  });
+
+  it('quote — дословная подстрока -> mention принимается как раньше (regression guard: quote-проверка не ломает легитимные упоминания)', () => {
+    const frame = buildQueryFrame(
+      extraction({
+        facetMentions: [
+          {
+            facet: 'service',
+            polarity: 'INCLUDE',
+            rawValue: 'apostille_spb',
+            messageId: CURRENT.id,
+            quote: 'апостиль в СПб',
+          },
+        ],
+      }),
+      [CURRENT]
+    );
+    expect(frame.facets.service.state).toBe('KNOWN');
+  });
+
+  it('та же защита для triggerFactMentions — сфабрикованная цитата отбрасывается', () => {
+    const frame = buildQueryFrame(
+      extraction({
+        triggerFactMentions: [
+          {
+            fact: 'helperPresent',
+            rawValue: 'true',
+            messageId: CURRENT.id,
+            quote: 'выдуманная цитата, которой нет в тексте',
+          },
+        ],
+      }),
+      [CURRENT]
+    );
+    expect(frame.triggerFacts.helperPresent).toEqual({ state: 'UNKNOWN' });
   });
 });
 

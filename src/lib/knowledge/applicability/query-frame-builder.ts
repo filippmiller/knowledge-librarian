@@ -314,18 +314,50 @@ export function buildQueryFrame(
   if (messages.length === 0) {
     throw new Error('buildQueryFrame: messages не может быть пуст — нет текущего сообщения');
   }
+
+  // Trust boundary (pre-retrieval hardening, Step 5): `id` обязан
+  // однозначно идентифицировать сообщение. Пустой `id` не отличим ни от
+  // одного реального сообщения; задвоенный `id` делает currentMessageId
+  // (последнее сообщение) неразличимым от одноимённого сообщения истории —
+  // упоминание из "истории" молча приписалось бы текущему, и наоборот.
+  const seenMessageIds = new Set<string>();
+  for (const m of messages) {
+    if (m.id.trim().length === 0) {
+      throw new Error(
+        `buildQueryFrame: ConversationMessage.id не может быть пустым (текст: "${m.text.slice(0, 40)}")`
+      );
+    }
+    if (seenMessageIds.has(m.id)) {
+      throw new Error(
+        `buildQueryFrame: ConversationMessage.id "${m.id}" встречается в разговоре дважды — сообщения неразличимы`
+      );
+    }
+    seenMessageIds.add(m.id);
+  }
+
   const currentMessageId = messages[messages.length - 1].id;
   const ambiguities: string[] = [];
+  const messageById = new Map(messages.map((m) => [m.id, m]));
 
   // Упоминание, сославшееся на messageId вне реального разговора — не
   // "исторический факт" и не "текущее сообщение", а непроверяемая цитата.
   // `!== currentMessageId` без этой проверки тихо зачислял бы такое
   // упоминание в HISTORY — ссылка на источник врала бы, даже если само
   // значение реальное (см. ревью Grok на этот PR).
+  //
+  // `quote` дополнительно обязана быть дословной подстрокой текста ИМЕННО
+  // этого сообщения (pre-retrieval hardening, Step 5) — раньше проверялась
+  // только непустота (`nonBlankString` в query-frame.ts), значит
+  // сфабрикованная цитата с настоящим messageId проходила насквозь: реальный
+  // источник, но придуманное содержание. `&&` короткого замыкания оставляет
+  // `messageById.get(...)!` безопасным — до него уже отфильтрован любой
+  // messageId, которого нет в карте.
   const knownMessageIds = new Set(messages.map((m) => m.id));
-  const facetMentions = extraction.facetMentions.filter((m) => knownMessageIds.has(m.messageId));
-  const triggerFactMentions = extraction.triggerFactMentions.filter((m) =>
-    knownMessageIds.has(m.messageId)
+  const facetMentions = extraction.facetMentions.filter(
+    (m) => knownMessageIds.has(m.messageId) && messageById.get(m.messageId)!.text.includes(m.quote)
+  );
+  const triggerFactMentions = extraction.triggerFactMentions.filter(
+    (m) => knownMessageIds.has(m.messageId) && messageById.get(m.messageId)!.text.includes(m.quote)
   );
 
   const facets = { ...UNKNOWN_QUERY_FACETS } as Record<FacetKey, QueryFacetState<unknown>>;

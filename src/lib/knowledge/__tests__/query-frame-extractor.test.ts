@@ -93,7 +93,10 @@ describe('extractQueryFrame — интеграция со structured()', () => {
               polarity: 'INCLUDE',
               rawValue: 'apostille_spb',
               messageId: CURRENT.id,
-              quote: 'апостиль',
+              // Дословная подстрока CURRENT.text ('сколько стоит?') —
+              // pre-retrieval hardening Step 5, buildQueryFrame теперь
+              // требует quote-подстроку, а не любую непустую строку.
+              quote: 'сколько стоит',
             },
           ],
           triggerFactMentions: [],
@@ -137,5 +140,18 @@ describe('extractQueryFrame — интеграция со structured()', () => {
     await expect(
       extractQueryFrame({ messages: [CURRENT], runConfig: runConfig() })
     ).rejects.toThrow();
+  });
+
+  it('дубль message.id в messages — extractQueryFrame бросает ту же ошибку, что и прямой вызов buildQueryFrame (item E, pre-retrieval hardening Step 5: прямые вызовы buildQueryFrame и extractQueryFrame проходят одну и ту же валидацию)', async () => {
+    fetchMock.mockResolvedValue(
+      anthropicOk(JSON.stringify({ facetMentions: [], triggerFactMentions: [], questionAspects: [] }))
+    );
+    const dupMessages: ConversationMessage[] = [
+      { id: 'same', role: 'user', text: 'нужен перевод' },
+      { id: 'same', role: 'user', text: 'апостиль тоже' },
+    ];
+    await expect(
+      extractQueryFrame({ messages: dupMessages, runConfig: runConfig() })
+    ).rejects.toThrow(/id/i);
   });
 });
