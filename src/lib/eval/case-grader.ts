@@ -16,11 +16,15 @@
  * текст совпал с ожидаемым: правильный ответ без найденного knowledge unit
  * означает, что сработала общая эрудиция модели, а не база знаний.
  *
- * ГРЕЙДЕР САМ ВЫЗЫВАЕТ `verifyAnswerClaims`, а не принимает готовый вердикт.
- * Раньше `ObservedCase` нёс предвычисленный `VerificationResult` — тот же
- * класс дыры, что был с числовым покрытием (raннер мог передать любой
- * результат, включая сфабрикованный). Теперь на вход идут `DraftAnswer` и
- * `EvidencePack`, а проверку грейдер делает сам.
+ * ЕДИНЫЙ ИСТОЧНИК ИСТИНЫ НА unitId — `GradeContext.units`. Раньше правило
+ * (`sourceRuleByUnitId`), числа (`numericsByUnitId`) и содержание ответа
+ * (caller-supplied `EvidencePack`) были ТРЕМЯ независимыми картами, которые
+ * runner мог рассинхронизировать между собой — например, оставить верные
+ * unitId в `selectedUnitIds`, но подложить под них чужой или сфабрикованный
+ * `EvidencePack`. Теперь на unitId есть ровно ОДНА запись — реальный
+ * `PersistedKnowledgeUnit` плюс его `sourceRuleId` — и evidence pack грейдер
+ * строит из неё САМ, из `selectedUnitIds`. Runner передаёт только `DraftAnswer`
+ * (сам текст ответа — то, что реально проверяется) и трассировку id.
  *
  * ЧЕГО ЭТОТ ГРЕЙДЕР НЕ ДЕЛАЕТ — и это ограничение, а не недоделка.
  *
@@ -39,38 +43,39 @@
  * units и будет выбран только один фрагмент, `sourceRuleId` всё равно
  * засчитает правило целиком. Механизм для этого сознательно не построен —
  * форма фрагментации неизвестна до реальной DOCX-экстракции (Beads
- * translation-tds), а гадать её означало бы проектировать вслепую.
+ * translation-rw3), а гадать её означало бы проектировать вслепую.
  */
 
 import type { ActualDisposition } from './disposition';
 import type { DraftAnswer } from '@/lib/knowledge/synthesis/draft-answer';
-import type { EvidencePack } from '@/lib/knowledge/synthesis/evidence-pack';
+import { buildEvidencePack } from '@/lib/knowledge/synthesis/evidence-pack';
 import { verifyAnswerClaims } from '@/lib/knowledge/synthesis/verify-answer-claims';
+import type { PersistedKnowledgeUnit } from '@/lib/knowledge/applicability/identity-assignment';
+import type { ResolutionDecision } from '@/lib/knowledge/applicability/resolution';
 import type { NumericAssertion } from './negative-case-oracle';
 
-/** Что прогон реально показал по кейсу. Всё, на чём строится вердикт. */
-export interface ObservedCase {
+interface ObservedCaseCommon {
   readonly caseId: string;
   /** Пул до applicability-фильтрации. */
   readonly candidateUnitIds: readonly string[];
   /** Финальный порядок после reranker'а. */
   readonly rerankedUnitIds: readonly string[];
   readonly selectedUnitIds: readonly string[];
-  readonly disposition: ActualDisposition;
   readonly reasonCodes: readonly string[];
   /** Какие условия система назвала недостающими при уточнении. */
   readonly missingTriggerFacts?: readonly string[];
-  /**
-   * Присутствует, только когда система реально синтезировала ответ.
-   * `buildEvidencePack` сам отказывается работать при disposition, отличном
-   * от `ANSWER` — в этой архитектуре у HOLD нет черновика ответа в принципе,
-   * не только «его не проверяют».
-   */
-  readonly answer?: {
-    readonly draft: DraftAnswer;
-    readonly evidencePack: EvidencePack;
-  };
 }
+
+/**
+ * Дискриминированное объединение по `disposition`: у HOLD/ERROR в принципе НЕТ
+ * поля `draft` — состояние «HOLD, но с синтезированным ответом» невозможно
+ * сконструировать типобезопасно, а не просто «не проверяется». Раньше `answer`
+ * было опциональным полем на любой disposition, и runner мог по ошибке
+ * приложить черновик к HOLD-кейсу — грейдер это молча игнорировал.
+ */
+export type ObservedCase =
+  | (ObservedCaseCommon & { readonly disposition: 'DIRECT_ANSWER'; readonly draft: DraftAnswer })
+  | (ObservedCaseCommon & { readonly disposition: Exclude<ActualDisposition, 'DIRECT_ANSWER'> });
 
 /** Чего ожидает oracle. Поля-опции — только там, где неприменимы. */
 export interface CaseExpectation {
@@ -92,30 +97,24 @@ export interface CaseVerdict {
   readonly reasons: readonly string[];
 }
 
-/**
- * Провенанс прогона. `numericsByUnitId` здесь, а не в `ObservedCase`, намеренно:
- * покрытие чисел ВЫЧИСЛЯЕТСЯ грейдером по выбранным units, а не принимается со
- * слов раннера. Иначе ошибка раннера (взять числа из oracle или со всех
- * фрагментов правила вместо реально выбранных) выглядела бы как пройденные
- * ворота — та же граница доверия, что и с oracle. Карту всё равно строит
- * вызывающий код: полностью закрыть границу можно только передав сюда реальные
- * persisted units вместо готовой карты — это отдельная, более крупная правка
- * раннера, а не этого модуля.
- */
-export interface GradeContext {
-  readonly topK: number;
-  readonly sourceRuleByUnitId: ReadonlyMap<string, number>;
-  readonly numericsByUnitId: ReadonlyMap<string, readonly NumericAssertion[]>;
+/** Единственный trusted факт про unitId: реальный unit плюс его исходное правило. */
+export interface UnitProvenance {
+  readonly unit: PersistedKnowledgeUnit;
+  /** Evaluation-only provenance (план §0.3) — не поле unit'а, не попадает в retrievalText. */
+  readonly sourceRuleId: number;
 }
 
-function rulesOf(
-  unitIds: readonly string[],
-  sourceRuleByUnitId: ReadonlyMap<string, number>
-): Set<number> {
+export interface GradeContext {
+  /** Ворота retrieval: план фиксирует top-5. Обязано быть положительным целым. */
+  readonly topK: number;
+  readonly units: ReadonlyMap<string, UnitProvenance>;
+}
+
+function rulesOf(unitIds: readonly string[], units: ReadonlyMap<string, UnitProvenance>): Set<number> {
   const rules = new Set<number>();
   for (const unitId of unitIds) {
-    const ruleId = sourceRuleByUnitId.get(unitId);
-    if (ruleId !== undefined) rules.add(ruleId);
+    const entry = units.get(unitId);
+    if (entry !== undefined) rules.add(entry.sourceRuleId);
   }
   return rules;
 }
@@ -144,7 +143,12 @@ export function gradeCase(
   context: GradeContext
 ): CaseVerdict {
   const reasons: string[] = [];
-  const { sourceRuleByUnitId, numericsByUnitId, topK } = context;
+  const { units, topK } = context;
+
+  if (!Number.isInteger(topK) || topK <= 0) {
+    reasons.push(`topK обязан быть положительным целым, получено: ${topK}`);
+    return { caseId: expectation.caseId, result: 'FAIL', reasons };
+  }
 
   if (observed.caseId !== expectation.caseId) {
     reasons.push(
@@ -181,27 +185,27 @@ export function gradeCase(
     );
   }
 
-  // Units без записи в карте провенанса сообщаются ОТДЕЛЬНО. Молча их
-  // отбрасывая, грейдер превращал бы устаревшую или пустую карту в
-  // «правило не найдено» — диагностическую чёрную дыру, где сбой инструментовки
-  // неотличим от сбоя поиска. Скан включает candidateUnitIds: неотображённый
-  // unit, который так и не прошёл дальше пула кандидатов, — тот же симптом.
+  // Units без записи в trusted-карте сообщаются ОТДЕЛЬНО. Молча их отбрасывая,
+  // грейдер превращал бы устаревшую или пустую карту в «правило не найдено» —
+  // диагностическую чёрную дыру, где сбой инструментовки неотличим от сбоя
+  // поиска. Скан включает candidateUnitIds: неотображённый unit, застрявший в
+  // пуле кандидатов и не прошедший дальше, — тот же симптом.
   const unmapped = [
     ...new Set([
       ...observed.candidateUnitIds,
       ...observed.rerankedUnitIds,
       ...observed.selectedUnitIds,
     ]),
-  ].filter((unitId) => !sourceRuleByUnitId.has(unitId));
+  ].filter((unitId) => !units.has(unitId));
   if (unmapped.length > 0) {
     reasons.push(
-      `units вне карты провенанса (не отображены на правило): ${unmapped.join(', ')} — ` +
+      `units вне trusted-карты (нет записи UnitProvenance): ${unmapped.join(', ')} — ` +
         'карта пуста или устарела; это сбой инструментовки, а не поиска'
     );
   }
 
   // Retrieval gate.
-  const inTopK = rulesOf(observed.rerankedUnitIds.slice(0, topK), sourceRuleByUnitId);
+  const inTopK = rulesOf(observed.rerankedUnitIds.slice(0, topK), units);
   const missing = expectation.expectedRuleIds.filter((ruleId) => !inTopK.has(ruleId));
   if (missing.length > 0) {
     reasons.push(
@@ -213,7 +217,7 @@ export function gradeCase(
   // Кандидаты: конкурирующее правило обязано БЫТЬ найдено, даже если потом
   // отброшено. Иначе «не применил» неотличимо от «не нашёл».
   if (expectation.requiredCandidateRuleIds !== undefined) {
-    const candidates = rulesOf(observed.candidateUnitIds, sourceRuleByUnitId);
+    const candidates = rulesOf(observed.candidateUnitIds, units);
     const absent = expectation.requiredCandidateRuleIds.filter((id) => !candidates.has(id));
     if (absent.length > 0) {
       reasons.push(
@@ -222,7 +226,7 @@ export function gradeCase(
     }
   }
 
-  const selected = rulesOf(observed.selectedUnitIds, sourceRuleByUnitId);
+  const selected = rulesOf(observed.selectedUnitIds, units);
 
   /**
    * Умолчание — ключевая правка после первого ревью. Без него кейс проходил,
@@ -261,22 +265,41 @@ export function gradeCase(
   }
 
   if (expectation.expectedDisposition === 'DIRECT_ANSWER') {
-    if (observed.answer === undefined) {
+    if (observed.disposition !== 'DIRECT_ANSWER') {
       reasons.push(
         'ожидался прямой ответ, но синтезированного ответа нет — нечего верифицировать'
       );
-    } else {
-      const { draft, evidencePack } = observed.answer;
+    } else if (unmapped.length === 0) {
+      // Evidence pack строится ГРЕЙДЕРОМ из trusted units по selectedUnitIds —
+      // тем же `buildEvidencePack`, которым пользуется сам движок (единый
+      // источник политики). Runner не может подложить чужой pack: он передаёт
+      // только текст ответа (`draft`), а не то, против чего этот текст
+      // проверяется. Пропускается, только если unmapped уже нашёл нерешаемую
+      // проблему с провенансом selected — buildEvidencePack иначе просто
+      // упадёт исключением на том же самом отсутствующем unit'е.
+      const selectedUnits = observed.selectedUnitIds
+        .map((id) => units.get(id)?.unit)
+        .filter((u): u is PersistedKnowledgeUnit => u !== undefined);
+      const resolution: ResolutionDecision = {
+        disposition: 'ANSWER',
+        selected: observed.selectedUnitIds,
+        undetermined: [],
+        excluded: [],
+        overridden: [],
+        numericConflicts: [],
+        requiresHumanReview: false,
+        clarificationNeeds: { facets: [], triggerFacts: [], ambiguities: [] },
+        reasons: [],
+      };
+      const evidencePack = buildEvidencePack(selectedUnits, resolution);
 
-      if (draft.answerSource !== 'knowledge_base') {
+      if (observed.draft.answerSource !== 'knowledge_base') {
         reasons.push(
-          `answerSource=${draft.answerSource} — прямой ответ обязан быть из базы знаний (§0.3 №4)`
+          `answerSource=${observed.draft.answerSource} — прямой ответ обязан быть из базы знаний (§0.3 №4)`
         );
       }
 
-      // Вызывается напрямую, а не принимается готовым результатом: раннер
-      // не может подложить сфабрикованный VerificationResult.
-      const verification = verifyAnswerClaims(draft, evidencePack);
+      const verification = verifyAnswerClaims(observed.draft, evidencePack);
       for (const violation of verification.violations) {
         reasons.push(`непроверенное утверждение [${violation.code}]: ${violation.detail}`);
       }
@@ -284,9 +307,10 @@ export function gradeCase(
 
     if (expectation.requiredNumerics !== undefined) {
       const covered = new Set(
-        observed.selectedUnitIds.flatMap((unitId) =>
-          (numericsByUnitId.get(unitId) ?? []).map(numericKey)
-        )
+        observed.selectedUnitIds.flatMap((unitId) => {
+          const constraint = units.get(unitId)?.unit.numericConstraint;
+          return constraint !== null && constraint !== undefined ? [numericKey(constraint)] : [];
+        })
       );
       const uncovered = expectation.requiredNumerics.filter(
         (required) => !covered.has(numericKey(required))
