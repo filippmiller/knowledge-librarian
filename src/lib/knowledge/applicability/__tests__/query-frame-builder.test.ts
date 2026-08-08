@@ -234,8 +234,13 @@ describe('факт из истории не становится UNKNOWN — р�
   });
 });
 
-describe('конфликт текущего сообщения с историей — не молчаливый override', () => {
-  it('разные значения в истории и в текущем -> ambiguities непусто, текущее побеждает', () => {
+describe('additive vs replacement — история и текущее сообщение (pre-retrieval hardening, Step 6)', () => {
+  it('текущее упоминает НОВОЕ значение facet, НЕ повторяя значение из истории -> ОБА сохраняются аддитивно, НЕ конфликт (буквальный пример плана: "нужен перевод" + "и апостиль тоже", текущее не переспрашивает перевод)', () => {
+    // Раньше (до Step 6) это ошибочно считалось конфликтом: winning = current
+    // ТОЛЬКО, когда current непусто, поэтому 'перевод' из истории тихо
+    // терялся, а ambiguities получал ложное "текущее противоречит истории" —
+    // хотя текущее сообщение вообще не высказывалось о переводе, только
+    // ДОБАВИЛО апостиль.
     const frame = buildQueryFrame(
       extraction({
         facetMentions: [
@@ -259,11 +264,50 @@ describe('конфликт текущего сообщения с историе
     );
     expect(frame.facets.service.state).toBe('KNOWN');
     if (frame.facets.service.state === 'KNOWN') {
-      expect(frame.facets.service.include).toEqual(['apostille_spb']);
-      expect(frame.facets.service.evidence[0].source).toBe('CURRENT_MESSAGE');
+      expect([...frame.facets.service.include].sort()).toEqual(['apostille_spb', 'translation']);
     }
-    expect(frame.ambiguities.length).toBeGreaterThan(0);
-    expect(frame.ambiguities.some((a) => a.includes('service'))).toBe(true);
+    expect(frame.ambiguities).toEqual([]);
+  });
+
+  it('текущее ЯВНО исключает значение, известное из истории, и добавляет замену -> история НЕ выигрывает, значение исключено, не включено (буквальный пример плана: "нужен апостиль" + "нет, не апостиль, а легализация")', () => {
+    // Настоящая замена — это явное EXCLUDE того же значения, не просто
+    // "текущее сказало что-то другое". "always union history" здесь был бы
+    // неверным фиксом: apostille_spb обязан оказаться в exclude, а не
+    // остаться в include только потому что история его когда-то включала.
+    const frame = buildQueryFrame(
+      extraction({
+        facetMentions: [
+          {
+            facet: 'service',
+            polarity: 'INCLUDE',
+            rawValue: 'apostille_spb',
+            messageId: HISTORY_MSG.id,
+            quote: 'апостиль в СПб',
+          },
+          {
+            facet: 'service',
+            polarity: 'EXCLUDE',
+            rawValue: 'apostille_spb',
+            messageId: CURRENT.id,
+            quote: 'не апостиль',
+          },
+          {
+            facet: 'service',
+            polarity: 'INCLUDE',
+            rawValue: 'консульская легализация',
+            messageId: CURRENT.id,
+            quote: 'легализация',
+          },
+        ],
+      }),
+      [HISTORY_MSG, CURRENT]
+    );
+    expect(frame.facets.service.state).toBe('KNOWN');
+    if (frame.facets.service.state === 'KNOWN') {
+      expect(frame.facets.service.include).not.toContain('apostille_spb');
+      expect(frame.facets.service.exclude).toContain('apostille_spb');
+      expect(frame.facets.service.include).toContain('consular_legalization');
+    }
   });
 
   it('текущее сообщение ДОБАВЛЯЕТ значение поверх истории (не заменяет) — НЕ конфликт', () => {
