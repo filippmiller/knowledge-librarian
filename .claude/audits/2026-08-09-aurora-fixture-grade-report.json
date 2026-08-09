@@ -1,0 +1,464 @@
+{
+  "gradedAt": "2026-08-09T03:54:29.719Z",
+  "runDirs": [
+    "run-1-2026-08-09T03-46-42-900Z",
+    "run-2-2026-08-09T03-49-29-551Z"
+  ],
+  "perRunSummary": [
+    {
+      "runId": "run-1-2026-08-09T03-46-42-900Z",
+      "positivePassed": 7,
+      "positiveTotal": 10,
+      "negativePassed": 1,
+      "negativeTotal": 6
+    },
+    {
+      "runId": "run-2-2026-08-09T03-49-29-551Z",
+      "positivePassed": 4,
+      "positiveTotal": 10,
+      "negativePassed": 1,
+      "negativeTotal": 6
+    }
+  ],
+  "passRateByCase": [
+    {
+      "caseId": "Q01",
+      "passCount": 2,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q02",
+      "passCount": 2,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q03",
+      "passCount": 2,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q04",
+      "passCount": 2,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q05",
+      "passCount": 0,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q06",
+      "passCount": 1,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q07",
+      "passCount": 1,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q08",
+      "passCount": 1,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q09",
+      "passCount": 0,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q10",
+      "passCount": 0,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q01-M1",
+      "passCount": 0,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q04-N1",
+      "passCount": 2,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q05-N1",
+      "passCount": 0,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q05-M1",
+      "passCount": 0,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q09-N1",
+      "passCount": 0,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q10-N1",
+      "passCount": 0,
+      "totalRuns": 2
+    }
+  ],
+  "casesFailingInAnyRun": [
+    "Q01-M1",
+    "Q05",
+    "Q05-M1",
+    "Q05-N1",
+    "Q06",
+    "Q07",
+    "Q08",
+    "Q09",
+    "Q09-N1",
+    "Q10",
+    "Q10-N1"
+  ],
+  "allVerdicts": [
+    {
+      "runId": "run-1-2026-08-09T03-46-42-900Z",
+      "caseId": "Q01",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-1-2026-08-09T03-46-42-900Z",
+      "caseId": "Q02",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-1-2026-08-09T03-46-42-900Z",
+      "caseId": "Q03",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-1-2026-08-09T03-46-42-900Z",
+      "caseId": "Q04",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-1-2026-08-09T03-46-42-900Z",
+      "caseId": "Q05",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "HOLD",
+      "primaryFailureStage": "RESOLUTION_ERROR",
+      "diagnosticFlags": [
+        "APPLICABILITY/RESOLUTION: rule(s) 5 in top-K but not selected"
+      ]
+    },
+    {
+      "runId": "run-1-2026-08-09T03-46-42-900Z",
+      "caseId": "Q06",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-1-2026-08-09T03-46-42-900Z",
+      "caseId": "Q07",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-1-2026-08-09T03-46-42-900Z",
+      "caseId": "Q08",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-1-2026-08-09T03-46-42-900Z",
+      "caseId": "Q09",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "RESOLUTION_ERROR",
+      "diagnosticFlags": [
+        "EVIDENCE_GROUP_UNCOVERED (rule 9): явное согласие того, кому помогают"
+      ]
+    },
+    {
+      "runId": "run-1-2026-08-09T03-46-42-900Z",
+      "caseId": "Q10",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "HOLD",
+      "primaryFailureStage": "UNEXPECTED_HOLD",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-1-2026-08-09T03-46-42-900Z",
+      "caseId": "Q01-M1",
+      "pass": false,
+      "expectedDisposition": "HOLD",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "EXPECTED_CLARIFICATION_MISSED",
+      "diagnosticFlags": [
+        "expected HOLD/clarify, engine answered directly — the dangerous false-positive case",
+        "engine did not name missing trigger fact(s): privacyContext",
+        "missing expected reason code(s): privacyContext_unknown, clarification_required_missing_trigger_fact"
+      ]
+    },
+    {
+      "runId": "run-1-2026-08-09T03-46-42-900Z",
+      "caseId": "Q04-N1",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-1-2026-08-09T03-46-42-900Z",
+      "caseId": "Q05-N1",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "APPLICABILITY_ERROR",
+      "diagnosticFlags": [
+        "required selected rule(s) 3 not selected",
+        "forbidden rule(s) 5 were selected — narrow exception applied where it should not",
+        "missing expected reason code(s): privacyContext_violated"
+      ]
+    },
+    {
+      "runId": "run-1-2026-08-09T03-46-42-900Z",
+      "caseId": "Q05-M1",
+      "pass": false,
+      "expectedDisposition": "HOLD",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "EXPECTED_CLARIFICATION_MISSED",
+      "diagnosticFlags": [
+        "expected HOLD/clarify, engine answered directly — the dangerous false-positive case",
+        "engine did not name missing trigger fact(s): privacyContext",
+        "missing expected reason code(s): privacyContext_unknown, clarification_required_missing_trigger_fact"
+      ]
+    },
+    {
+      "runId": "run-1-2026-08-09T03-46-42-900Z",
+      "caseId": "Q09-N1",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": [
+        "missing expected reason code(s): consentStatus_violated"
+      ]
+    },
+    {
+      "runId": "run-1-2026-08-09T03-46-42-900Z",
+      "caseId": "Q10-N1",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "APPLICABILITY_ERROR",
+      "diagnosticFlags": [
+        "forbidden rule(s) 10 were selected — narrow exception applied where it should not",
+        "missing expected reason code(s): reachability_violated"
+      ]
+    },
+    {
+      "runId": "run-2-2026-08-09T03-49-29-551Z",
+      "caseId": "Q01",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-2-2026-08-09T03-49-29-551Z",
+      "caseId": "Q02",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-2-2026-08-09T03-49-29-551Z",
+      "caseId": "Q03",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-2-2026-08-09T03-49-29-551Z",
+      "caseId": "Q04",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-2-2026-08-09T03-49-29-551Z",
+      "caseId": "Q05",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "EXTRACTION_MISS",
+      "diagnosticFlags": [
+        "EXTRACTION_MISS: rule(s) 5 never extracted this run"
+      ]
+    },
+    {
+      "runId": "run-2-2026-08-09T03-49-29-551Z",
+      "caseId": "Q06",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "EXTRACTION_MISS",
+      "diagnosticFlags": [
+        "EXTRACTION_MISS: rule(s) 6 never extracted this run"
+      ]
+    },
+    {
+      "runId": "run-2-2026-08-09T03-49-29-551Z",
+      "caseId": "Q07",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "EXTRACTION_MISS",
+      "diagnosticFlags": [
+        "EXTRACTION_MISS: rule(s) 7 never extracted this run"
+      ]
+    },
+    {
+      "runId": "run-2-2026-08-09T03-49-29-551Z",
+      "caseId": "Q08",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "EXTRACTION_MISS",
+      "diagnosticFlags": [
+        "EXTRACTION_MISS: rule(s) 8 never extracted this run"
+      ]
+    },
+    {
+      "runId": "run-2-2026-08-09T03-49-29-551Z",
+      "caseId": "Q09",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "EXTRACTION_MISS",
+      "diagnosticFlags": [
+        "EXTRACTION_MISS: rule(s) 9 never extracted this run",
+        "EVIDENCE_GROUP_UNCOVERED (rule 9): явное согласие того, кому помогают; чистые одноразовые перчатки; немедленная остановка по первой просьбе"
+      ]
+    },
+    {
+      "runId": "run-2-2026-08-09T03-49-29-551Z",
+      "caseId": "Q10",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "EXTRACTION_MISS",
+      "diagnosticFlags": [
+        "EXTRACTION_MISS: rule(s) 10 never extracted this run",
+        "EVIDENCE_GROUP_UNCOVERED (rule 10): альтернативный способ при невозможности дотянуться; запрет твёрдого/острого приспособления даже при ограниченной подвижности"
+      ]
+    },
+    {
+      "runId": "run-2-2026-08-09T03-49-29-551Z",
+      "caseId": "Q01-M1",
+      "pass": false,
+      "expectedDisposition": "HOLD",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "EXPECTED_CLARIFICATION_MISSED",
+      "diagnosticFlags": [
+        "required candidate rule(s) 5 never entered candidate pool — \"не нашёл\" неотличимо от \"не применил\"",
+        "expected HOLD/clarify, engine answered directly — the dangerous false-positive case",
+        "engine did not name missing trigger fact(s): privacyContext",
+        "missing expected reason code(s): privacyContext_unknown, clarification_required_missing_trigger_fact"
+      ]
+    },
+    {
+      "runId": "run-2-2026-08-09T03-49-29-551Z",
+      "caseId": "Q04-N1",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-2-2026-08-09T03-49-29-551Z",
+      "caseId": "Q05-N1",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "RETRIEVAL_MISS",
+      "diagnosticFlags": [
+        "required candidate rule(s) 5 never entered candidate pool — \"не нашёл\" неотличимо от \"не применил\"",
+        "required selected rule(s) 3 not selected",
+        "missing expected reason code(s): privacyContext_violated, exception_trigger_inactive"
+      ]
+    },
+    {
+      "runId": "run-2-2026-08-09T03-49-29-551Z",
+      "caseId": "Q05-M1",
+      "pass": false,
+      "expectedDisposition": "HOLD",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "EXPECTED_CLARIFICATION_MISSED",
+      "diagnosticFlags": [
+        "expected HOLD/clarify, engine answered directly — the dangerous false-positive case",
+        "engine did not name missing trigger fact(s): privacyContext",
+        "missing expected reason code(s): privacyContext_unknown, clarification_required_missing_trigger_fact"
+      ]
+    },
+    {
+      "runId": "run-2-2026-08-09T03-49-29-551Z",
+      "caseId": "Q09-N1",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "RETRIEVAL_MISS",
+      "diagnosticFlags": [
+        "required candidate rule(s) 9 never entered candidate pool — \"не нашёл\" неотличимо от \"не применил\"",
+        "required selected rule(s) 9 not selected",
+        "missing expected reason code(s): consentStatus_violated"
+      ]
+    },
+    {
+      "runId": "run-2-2026-08-09T03-49-29-551Z",
+      "caseId": "Q10-N1",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "RETRIEVAL_MISS",
+      "diagnosticFlags": [
+        "required candidate rule(s) 10 never entered candidate pool — \"не нашёл\" неотличимо от \"не применил\"",
+        "missing expected reason code(s): reachability_violated, exception_trigger_inactive"
+      ]
+    }
+  ],
+  "note": "Deterministic grading only — no LLM semantic judge this session (see final report for that gap)."
+}
