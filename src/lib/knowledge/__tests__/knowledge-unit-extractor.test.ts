@@ -92,6 +92,32 @@ describe('buildExtractionPromptMessages — чистая функция, без 
     expect(system.content).toContain('{"all":');
   });
 
+  // Real cost bug (2026-08-09): 43 of 43 SCHEMA_MISMATCH extraction failures
+  // across every benchmark run this session were the SAME error — the model
+  // puts trigger-fact names (privacyContext, consentStatus, reachability,
+  // helperPresent) directly on the unit object as top-level keys, instead of
+  // nested inside triggerCondition.all[].fact. Root cause: triggerFactCatalog()
+  // and facetCatalog() render in the IDENTICAL visual format
+  // ("- key: description\n  Допустимые значения: ...") right next to each
+  // other in this prompt, and facets genuinely ARE flat top-level keys —
+  // nothing distinguishes the two catalogs' very different correct usage.
+  // This burned ~80+ wasted paid retries in one day. Fix: an explicit
+  // WRONG-vs-RIGHT example pair right after the trigger-fact catalog,
+  // naming a real trigger fact so the warning can't be mistaken for
+  // referring to facets instead.
+  it('промпт явно предупреждает: имена trigger facts НЕ являются top-level полями unit — только значения "fact" внутри triggerCondition', () => {
+    const messages = buildExtractionPromptMessages([BLOCK_A]);
+    const system = messages.find((m) => m.role === 'system')!;
+    expect(system.content).toContain('НЕ отдельные top-level поля unit');
+    // Конкретный пример неправильной формы, с реальным именем факта — общее
+    // предупреждение без примера уже не помогало (тот же класс ошибки,
+    // что humanReviewed=false formatting: описание без конкретного примера
+    // не считается). Пример должен явно называть privacyContext, а не
+    // абстрактное "имя факта", иначе не факт, что модель свяжет
+    // предупреждение именно с trigger-fact каталогом, а не facets.
+    expect(system.content).toContain('"privacyContext": "PUBLIC"');
+  });
+
   it('evidenceByField описан как ОБЯЗАТЕЛЬНЫЙ для непустых полей, а не опциональный', () => {
     const messages = buildExtractionPromptMessages([BLOCK_A]);
     const system = messages.find((m) => m.role === 'system')!;
