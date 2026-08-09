@@ -97,13 +97,16 @@ export function interpretCoverageAuditResponse(
   return { blockAnchor, findings, hasGap };
 }
 
-const coverageAuditResponseSchema = z.strictObject({
+export const coverageAuditResponseSchema = z.strictObject({
   findings: z
     .array(
       z.strictObject({
         verdict: z.enum(COVERAGE_VERDICTS),
         quote: z.string(),
-        explanation: z.string(),
+        explanation: z
+          .string()
+          .nullish()
+          .transform((v) => v ?? ''),
       })
     )
     .readonly(),

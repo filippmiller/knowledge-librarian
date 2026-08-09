@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildCoverageAuditPromptMessages,
+  coverageAuditResponseSchema,
   interpretCoverageAuditResponse,
   type RawCoverageFinding,
 } from '../extraction-coverage-auditor';
@@ -89,5 +90,35 @@ describe('interpretCoverageAuditResponse — quote-grounding, не слепое 
 
   it('пустой список findings -> hasGap=false (вырожденный случай, не отсутствие проверки)', () => {
     expect(interpretCoverageAuditResponse('b1', BLOCK_TEXT, []).hasGap).toBe(false);
+  });
+});
+
+describe('coverageAuditResponseSchema — explanation ключ ПРОПУЩЕН целиком для COVERED, тот же класс LLM-выдачи, что уже нормализован для uncertainties/facets/triggerCondition/numericConstraint', () => {
+  // goal-shift continuation (2026-08-09), full-smoke2 run, anthropic/claude-sonnet-5:
+  // модель вернула {"findings": [{"verdict": "COVERED", "quote": ""}]} — без ключа
+  // explanation вообще (нечего объяснять, когда ничего не пропущено). Схема требовала
+  // explanation: z.string() безусловно -> StructuredOutputError валил весь прогон.
+  it('finding без ключа explanation -> валиден, explanation становится \'\'', () => {
+    const parsed = coverageAuditResponseSchema.safeParse({
+      findings: [{ verdict: 'COVERED', quote: '' }],
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.findings[0].explanation).toBe('');
+  });
+
+  it('finding с explanation: null -> тоже валиден, становится \'\'', () => {
+    const parsed = coverageAuditResponseSchema.safeParse({
+      findings: [{ verdict: 'COVERED', quote: '', explanation: null }],
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.findings[0].explanation).toBe('');
+  });
+
+  it('finding с реальным explanation — не подменяется пустой строкой', () => {
+    const parsed = coverageAuditResponseSchema.safeParse({
+      findings: [{ verdict: 'UNREPRESENTED_CLAUSE', quote: 'x', explanation: 'условие не извлечено' }],
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.findings[0].explanation).toBe('условие не извлечено');
   });
 });
