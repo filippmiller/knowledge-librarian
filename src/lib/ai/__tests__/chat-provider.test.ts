@@ -25,8 +25,11 @@ const MESSAGES: ChatCompletionOptions['messages'] = [
 
 let fetchMock: ReturnType<typeof vi.fn>;
 
-function anthropicOk(text: string): Response {
-  return new Response(JSON.stringify({ content: [{ type: 'text', text }] }), {
+function anthropicOk(
+  text: string,
+  usage: { input_tokens: number; output_tokens: number } = { input_tokens: 10, output_tokens: 5 }
+): Response {
+  return new Response(JSON.stringify({ content: [{ type: 'text', text }], usage }), {
     status: 200,
   });
 }
@@ -36,8 +39,14 @@ function anthropicFailure(status = 500, body = 'anthropic is down'): Response {
   return new Response(body, { status });
 }
 
-function openaiOk(text: string) {
-  return { choices: [{ message: { content: text } }] };
+function openaiOk(
+  text: string,
+  usage: { prompt_tokens: number; completion_tokens: number } = {
+    prompt_tokens: 12,
+    completion_tokens: 6,
+  }
+) {
+  return { choices: [{ message: { content: text } }], usage };
 }
 
 function openaiFailure(message = 'openai is down') {
@@ -295,6 +304,33 @@ describe('createChatCompletionDetailed — primary success', () => {
     await expect(
       createChatCompletion({ messages: MESSAGES, provider: 'anthropic' })
     ).resolves.toBe('hello');
+  });
+
+  // Cost meter (Task 37, 2026-08-09): token usage was previously discarded
+  // entirely at this layer — callAnthropic/callOpenAI returned only `string`,
+  // throwing away the provider's own usage block. No cost/call meter could
+  // exist without this. Captured per-attempt (not just on the final result)
+  // because a failed/retried attempt still costs real tokens.
+  it('захватывает usage из ответа Anthropic (input_tokens/output_tokens)', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('hello', { input_tokens: 123, output_tokens: 45 }));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+    });
+
+    expect(result.attempts[0].usage).toEqual({ inputTokens: 123, outputTokens: 45 });
+  });
+
+  it('захватывает usage из ответа OpenAI (prompt_tokens/completion_tokens)', async () => {
+    openaiCreate.mockResolvedValue(openaiOk('hi', { prompt_tokens: 77, completion_tokens: 33 }));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'openai',
+    });
+
+    expect(result.attempts[0].usage).toEqual({ inputTokens: 77, outputTokens: 33 });
   });
 });
 

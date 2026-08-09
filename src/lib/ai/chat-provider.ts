@@ -77,6 +77,13 @@ export interface ChatCompletionOptions extends Partial<CompletionRunConfig> {
   signal?: AbortSignal;
 }
 
+/** Токены реального вызова провайдера — источник для cost meter (Task 37).
+ *  Отсутствует у ERROR/ABORTED попыток без ответа: нечего посчитать. */
+export interface CompletionUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
 export interface CompletionAttempt {
   provider: Provider;
   model: string;
@@ -86,6 +93,7 @@ export interface CompletionAttempt {
   outcome: 'SUCCESS' | 'ERROR' | 'ABORTED';
   statusCode?: number;
   errorCode?: string;
+  usage?: CompletionUsage;
 }
 
 export interface ChatCompletionResult {
@@ -761,12 +769,19 @@ async function postAnthropicMessages(
   });
 }
 
+interface ProviderCallResult {
+  text: string;
+  /** `null` when the provider's response didn't carry a usage block —
+   *  don't fabricate zeros, a cost meter reading 0 looks like a free call. */
+  usage: CompletionUsage | null;
+}
+
 async function callAnthropic(
   options: ChatCompletionOptions,
   model: string,
   defaults: ResolvedDefaults,
   signal: AbortSignal | undefined
-): Promise<string> {
+): Promise<ProviderCallResult> {
   const apiKey = defaults.anthropicApiKey;
   if (!apiKey) {
     throw new ProviderRequestError('ANTHROPIC_API_KEY is not set', {
@@ -802,6 +817,7 @@ async function callAnthropic(
   const data = (await response.json()) as {
     content?: { type: string; text?: string }[];
     error?: { message?: string; type?: string };
+    usage?: { input_tokens?: number; output_tokens?: number };
   };
 
   if (data.error?.message) {
@@ -814,7 +830,12 @@ async function callAnthropic(
     ? data.content.map((part) => part.text || '').join('')
     : '';
 
-  return content.trim();
+  const usage =
+    typeof data.usage?.input_tokens === 'number' && typeof data.usage?.output_tokens === 'number'
+      ? { inputTokens: data.usage.input_tokens, outputTokens: data.usage.output_tokens }
+      : null;
+
+  return { text: content.trim(), usage };
 }
 
 /**
@@ -847,7 +868,7 @@ async function callOpenAI(
   model: string,
   defaults: ResolvedDefaults,
   signal: AbortSignal | undefined
-): Promise<string> {
+): Promise<ProviderCallResult> {
   const response = await openai.chat.completions.create(
     {
       model,
@@ -861,7 +882,14 @@ async function callOpenAI(
     signal ? { signal } : undefined
   );
 
-  return response.choices[0]?.message?.content?.trim() || '';
+  const text = response.choices[0]?.message?.content?.trim() || '';
+  const usage =
+    typeof response.usage?.prompt_tokens === 'number' &&
+    typeof response.usage?.completion_tokens === 'number'
+      ? { inputTokens: response.usage.prompt_tokens, outputTokens: response.usage.completion_tokens }
+      : null;
+
+  return { text, usage };
 }
 
 type AttemptResult =
@@ -881,10 +909,11 @@ async function runCompletionAttempt(
   const gate = createAttemptGate(options.signal, timeoutMs);
 
   try {
-    const raw =
+    const providerResult =
       provider === 'anthropic'
         ? await callAnthropic(options, model, defaults, gate.signal)
         : await callOpenAI(options, model, defaults, gate.signal);
+    const raw = providerResult.text;
 
     const text =
       options.responseFormat === 'json_object' ? normalizeJsonResponse(raw) : raw;
@@ -899,6 +928,7 @@ async function runCompletionAttempt(
         startedAt,
         latencyMs: Date.now() - startedMs,
         outcome: 'SUCCESS',
+        ...(providerResult.usage && { usage: providerResult.usage }),
       },
     };
   } catch (error) {
