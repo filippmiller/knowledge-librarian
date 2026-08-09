@@ -269,7 +269,6 @@ describe('buildOracleTaintDetector на реальном пакете', () => {
     expect(detector.unguardedSecretCount).toBeGreaterThanOrEqual(0);
     if (detector.unguardedSecretCount > 0) {
       const unguarded = detector.secretCoverage.filter((e) => e.guard === 'UNGUARDED');
-      // eslint-disable-next-line no-console -- диагностика для финального отчёта, не тестовый шум по умолчанию
       console.warn(
         `oracle-taint: ${detector.unguardedSecretCount} secret field(s) не защищены ни shingle, ни exact-substring механизмом (совпадают дословно с источником):`,
         unguarded.map((e) => `${e.caseId}/${e.field}${e.negativeIndex !== null ? `[neg${e.negativeIndex}]` : ''}`)
