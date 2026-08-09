@@ -32,7 +32,12 @@ import {
   extractCanonicalDocument,
   toSourceBlockLocation,
 } from '../src/lib/knowledge/docx-canonical-blocks';
-import { extractKnowledgeUnits } from '../src/lib/knowledge/knowledge-unit-extractor';
+import {
+  extractKnowledgeUnits,
+  type ExtractKnowledgeUnitsOptions,
+  type ExtractKnowledgeUnitsResult,
+} from '../src/lib/knowledge/knowledge-unit-extractor';
+import { ChatCompletionError } from '../src/lib/ai/chat-provider';
 import {
   assignIdentity,
   type PersistedKnowledgeUnit,
@@ -60,7 +65,7 @@ import {
 import type { DraftAnswer } from '../src/lib/knowledge/synthesis/draft-answer';
 import { verifyAnswerClaims, type VerificationResult } from '../src/lib/knowledge/synthesis/verify-answer-claims';
 import { resolveExtractionRunConfig } from '../src/lib/ai/extraction-run';
-import { structured } from '../src/lib/ai/structured-output';
+import { structured, StructuredOutputError } from '../src/lib/ai/structured-output';
 import type { RequestContext } from '../src/lib/knowledge/applicability/eligibility';
 
 import { buildEvaluationSnapshot, type EvaluationKnowledgeSnapshot } from '../src/lib/eval/evaluation-snapshot';
@@ -150,6 +155,57 @@ interface EngineContext {
   readonly queryFrameRunConfig: ReturnType<typeof resolveExtractionRunConfig>;
   readonly answerGenerator: AnswerGenerator;
   readonly taintDetector: OracleTaintDetector;
+}
+
+interface ExtractionAttemptLog {
+  readonly attempt: number;
+  readonly outcome: 'SUCCESS' | 'SCHEMA_MISMATCH' | 'TRUNCATED_JSON' | 'NETWORK_ERROR' | 'OTHER_ERROR';
+  readonly message: string | null;
+}
+
+/**
+ * Same bounded retry class as scripts/run-extraction.ts's
+ * extractKnowledgeUnitsWithRetry — structured() deliberately doesn't retry
+ * SCHEMA_MISMATCH/TRUNCATED_JSON itself (caller's decision per its own
+ * docstring), and this is the caller. Retries on schema/transport failure
+ * classes only, never to "fish" for a more favorable extraction — every
+ * attempt (including failures) is logged, and this run is recorded as a
+ * failure if maxAttempts is exhausted (Step 3 of the goal-shift spec: don't
+ * silently retry beyond the bounded transport/schema policy).
+ */
+async function extractKnowledgeUnitsWithRetry(
+  options: ExtractKnowledgeUnitsOptions,
+  maxAttempts: number
+): Promise<{ result: ExtractKnowledgeUnitsResult; attemptLog: ExtractionAttemptLog[] }> {
+  const attemptLog: ExtractionAttemptLog[] = [];
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const result = await extractKnowledgeUnits(options);
+      attemptLog.push({ attempt, outcome: 'SUCCESS', message: null });
+      return { result, attemptLog };
+    } catch (error) {
+      const outcome: ExtractionAttemptLog['outcome'] =
+        error instanceof StructuredOutputError
+          ? error.reason === 'SCHEMA_MISMATCH'
+            ? 'SCHEMA_MISMATCH'
+            : error.reason === 'TRUNCATED_JSON'
+              ? 'TRUNCATED_JSON'
+              : 'OTHER_ERROR'
+          : error instanceof ChatCompletionError
+            ? 'NETWORK_ERROR'
+            : 'OTHER_ERROR';
+      const retryable = outcome !== 'OTHER_ERROR';
+      attemptLog.push({
+        attempt,
+        outcome,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      console.warn(`[extraction attempt ${attempt}/${maxAttempts}] failed (${outcome}): ${attemptLog[attemptLog.length - 1].message}`);
+      if (!retryable || attempt === maxAttempts) throw error;
+    }
+  }
+  throw new Error('extractKnowledgeUnitsWithRetry: unreachable');
 }
 
 const answerSchema = z.strictObject({
@@ -275,6 +331,7 @@ interface ExtractionRunOutcome {
   readonly snapshot: EvaluationKnowledgeSnapshot;
   readonly sourceRuleIdByUnitId: ReadonlyMap<string, number | null>;
   readonly results: readonly EngineQuestionResult[];
+  readonly extractionAttemptLog: readonly ExtractionAttemptLog[];
 }
 
 async function runOneExtractionRun(
@@ -298,12 +355,11 @@ async function runOneExtractionRun(
 
   const extractionRunConfig = resolveExtractionRunConfig();
   console.log('вызов LLM (extractKnowledgeUnits)...');
-  const extraction = await extractKnowledgeUnits({
-    blocks: sourceBlocks,
-    runConfig: extractionRunConfig,
-    maxTokens: 16000,
-  });
-  console.log(`extracted ${extraction.units.length} raw unit(s)`);
+  const { result: extraction, attemptLog } = await extractKnowledgeUnitsWithRetry(
+    { blocks: sourceBlocks, runConfig: extractionRunConfig, maxTokens: 16000 },
+    6
+  );
+  console.log(`extracted ${extraction.units.length} raw unit(s) after ${attemptLog.length} attempt(s)`);
 
   const identity = assignIdentity(extraction.units, blocksByAnchor, canonical.sourceRevisionHash);
   console.log(`assignIdentity: ${identity.units.length} persisted, ${identity.ambiguousDuplicates.length} ambiguous`);
@@ -370,7 +426,7 @@ async function runOneExtractionRun(
     results.push(result);
   }
 
-  return { runId, snapshot, sourceRuleIdByUnitId, results };
+  return { runId, snapshot, sourceRuleIdByUnitId, results, extractionAttemptLog: attemptLog };
 }
 
 // ────────────────────────────────── main ─────────────────────────────────────
@@ -438,6 +494,11 @@ async function main() {
       'utf8'
     );
     writeFileSync(path.join(runDir, 'engine-results.json'), JSON.stringify(outcome.results, null, 2), 'utf8');
+    writeFileSync(
+      path.join(runDir, 'extraction-attempt-log.json'),
+      JSON.stringify(outcome.extractionAttemptLog, null, 2),
+      'utf8'
+    );
   }
 
   writeFileSync(
