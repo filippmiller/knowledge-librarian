@@ -48,6 +48,14 @@ Read the full `resolution` object for every unexpected-HOLD case (`engine-result
 
 This looks like a real ambiguity in what `parentRuleRef` is supposed to mean when extraction splits one source rule into multiple `EXCEPTION_RULE` units at different granularities — worth investigating at the extraction schema/prompt level, not the resolution layer.
 
+### 3c. Unified root cause, found after 3a/3b: the focused-retry mechanism always adds, never dedupes
+
+Checked `focused-retry-log.json` for this run. Block `b9` (rule 5's source block) already had 2 legitimate units from the normal batch pass (`39edcdb6bfb413bc`, `cb05cac11445ee2b`). The coverage auditor then flagged a **minor** gap on that same block — `POSSIBLE_OMISSION`, missing quote `"разрешено один раз прижать ладонь через чистую одежду"`, explanation: the extracted statements didn't call out that the clothing must specifically be *clean*. This triggered `audited-extraction.ts`'s one-shot focused retry, which re-extracted the **whole block from scratch** and added **6 more units** describing the same rule-5 content — all namespaced `focused-b9-...` with `parentExtractionRef` forced to `null` by the module's design (session 2, `audited-extraction.ts` — deliberate: retry units never saw the original batch's units, so any parent ref they invented could only coincidentally match, never legitimately).
+
+The result: rule 5 alone contributed **5 separate root-level (`parentRuleRef: null`) `EXCEPTION_RULE` candidates** in the persisted knowledge base (`39edcdb6bfb413bc`, `b4a9f07af40342af`, `5d61cf0ca13f137f`, `b6092ed97b499415`, plus `cb05cac11445ee2b` linked as a child of one of them) instead of the 1–2 a human curator would produce. This is very likely the dominant contributor to *both* 3a and 3b: more duplicate, unlinked, near-identical exception units for the same source rule mean more independent chances for an unrelated question's retrieval to pull one in (3a), and more chances for extraction to link one duplicate as a "child" of another sibling duplicate instead of the true general rule (3b).
+
+**This is a real, general (non-fixture-specific) design gap in the focused-retry mechanism**, not something to patch reactively: it re-extracts and unconditionally unions on *any* confirmed gap, with no distinction between "the original pass missed the rule entirely" (union is correct) and "the original pass captured the rule's substance but missed one qualifying adjective" (union produces semantic duplication). Fixing this properly needs a real design decision (e.g., only keep focused-retry units whose content doesn't already overlap the block's existing units; or have the auditor itself judge gap severity; or dedupe by semantic similarity post-hoc) — deliberately not implemented this session. A rushed fix here risks either reintroducing real omissions (if dedup is too aggressive) or fixing nothing (if it's too conservative), and deserves the same TDD rigor as every other fix this session, not a same-turn patch on top of an already-long investigation.
+
 ## §4. Anti-overfitting compliance
 
 No fix this session touched retrieval aliases, reranker prompts, or extraction prompts to chase this fixture's specific wording. The taint-retry bound increase is a uniform budget knob, applied regardless of which phrase collides. Both new findings (§3) were deliberately **not** patched this session — a rushed fix to either would risk tuning to this fixture's specific candidate shapes rather than fixing the general mechanism, which the standing instruction explicitly forbids.
@@ -58,7 +66,8 @@ No fix this session touched retrieval aliases, reranker prompts, or extraction p
 
 ## §6. Recommended next steps
 
-1. Task 28 (parent-linking semantics) and Task 29 (retrieval precision) both need real design attention before another benchmark run is worth executing — re-running now would likely reproduce the same shape of result.
-2. Once either lands, re-run the full pipeline (`--extraction-runs=1` first to confirm, then `--extraction-runs=3` for the real Phase-C acceptance check).
-3. Q09-N1's transient mid-pipeline network error (isolated correctly, not crashed) suggests `runEngineOnQuestion` could use the same bounded-retry treatment already given to extraction and coverage-audit calls — smaller, safe follow-up.
-4. Wire the completeness auditor into the production runner `scripts/run-extraction.ts` (still not done, carried over from session 2).
+1. **Highest priority (§3c):** fix the focused-retry always-additive-never-dedup design gap in `audited-extraction.ts` — this is very likely the dominant driver of *both* 3a and 3b, so fixing it first before touching either symptom directly is the right earliest-stage-first move. Needs a real design decision (see §3c for options), not a rushed patch.
+2. Re-check 3a/3b after that fix lands — they may shrink substantially or resolve as side effects rather than needing independent fixes.
+3. Re-run the full pipeline (`--extraction-runs=1` first to confirm, then `--extraction-runs=3` for the real Phase-C acceptance check) once §6.1 lands.
+4. Q09-N1's transient mid-pipeline network error (isolated correctly, not crashed) suggests `runEngineOnQuestion` could use the same bounded-retry treatment already given to extraction and coverage-audit calls — smaller, safe follow-up.
+5. Wire the completeness auditor into the production runner `scripts/run-extraction.ts` (still not done, carried over from session 2).
