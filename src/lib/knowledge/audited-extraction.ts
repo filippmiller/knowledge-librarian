@@ -35,7 +35,7 @@ import {
 import { validateParentRefs } from './applicability/extraction-parent-refs';
 import type { ExtractedKnowledgeUnit } from './applicability/extraction';
 import type { ExtractionRunConfig } from '@/lib/ai/extraction-run';
-import { locateQuote } from './quote-locator';
+import { quoteSpansOverlap } from './quote-locator';
 
 export interface FocusedRetryLog {
   readonly blockAnchor: string;
@@ -59,19 +59,9 @@ export interface AuditedExtractionDeps {
 
 /** True iff `quote`'s span in `blockText` overlaps ANY of `existingQuotes`'
  *  spans — either direction (substring or superset), not just exact match.
- *  A quote that can't be located at all (no `locateQuote` match) can't be
- *  proven to overlap, so it's treated as new — dropping unlocatable content
- *  would silently discard real findings, the opposite of this module's
- *  purpose. */
+ *  Thin wrapper over the shared `quoteSpansOverlap` (quote-locator.ts). */
 function quoteOverlapsAny(blockText: string, quote: string, existingQuotes: readonly string[]): boolean {
-  const range = locateQuote(blockText, quote);
-  if (range === null) return false;
-  for (const existing of existingQuotes) {
-    const existingRange = locateQuote(blockText, existing);
-    if (existingRange === null) continue;
-    if (range.start < existingRange.end && existingRange.start < range.end) return true;
-  }
-  return false;
+  return existingQuotes.some((existing) => quoteSpansOverlap(blockText, quote, existing));
 }
 
 export async function extractKnowledgeUnitsWithCompletenessAudit(
