@@ -42,7 +42,11 @@ import {
   type FocusedRetryLog,
 } from '../src/lib/knowledge/audited-extraction';
 import type { BatchExtractionLog } from '../src/lib/knowledge/batch-extraction';
-import type { BlockCoverageAuditResult } from '../src/lib/knowledge/extraction-coverage-auditor';
+import {
+  auditBlockCoverage,
+  type AuditBlockCoverageOptions,
+  type BlockCoverageAuditResult,
+} from '../src/lib/knowledge/extraction-coverage-auditor';
 import { ChatCompletionError } from '../src/lib/ai/chat-provider';
 import {
   assignIdentity,
@@ -190,16 +194,26 @@ interface ExtractionAttemptLog {
  * attempt (including failures) is logged, and this run is recorded as a
  * failure if maxAttempts is exhausted (Step 3 of the goal-shift spec: don't
  * silently retry beyond the bounded transport/schema policy).
+ *
+ * Generic over any single structured() call (extraction batch, coverage
+ * audit, ...) — the classification/retry policy is identical, only the
+ * underlying call and its log label differ. A real full-benchmark run
+ * (full-smoke4, 2026-08-09) crashed the whole run on a single transient
+ * "fetch failed" INSIDE the coverage-audit step specifically, because that
+ * call had no retry wrapper at all while the extraction call did — this
+ * generalization closes that gap instead of duplicating the same
+ * classification logic a second time for the auditor call.
  */
-async function extractKnowledgeUnitsWithRetry(
-  options: ExtractKnowledgeUnitsOptions,
-  maxAttempts: number
-): Promise<{ result: ExtractKnowledgeUnitsResult; attemptLog: ExtractionAttemptLog[] }> {
+async function withStructuredRetry<T>(
+  call: () => Promise<T>,
+  maxAttempts: number,
+  label: string
+): Promise<{ result: T; attemptLog: ExtractionAttemptLog[] }> {
   const attemptLog: ExtractionAttemptLog[] = [];
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const result = await extractKnowledgeUnits(options);
+      const result = await call();
       attemptLog.push({ attempt, outcome: 'SUCCESS', message: null });
       return { result, attemptLog };
     } catch (error) {
@@ -219,11 +233,18 @@ async function extractKnowledgeUnitsWithRetry(
         outcome,
         message: error instanceof Error ? error.message : String(error),
       });
-      console.warn(`[extraction attempt ${attempt}/${maxAttempts}] failed (${outcome}): ${attemptLog[attemptLog.length - 1].message}`);
+      console.warn(`[${label} attempt ${attempt}/${maxAttempts}] failed (${outcome}): ${attemptLog[attemptLog.length - 1].message}`);
       if (!retryable || attempt === maxAttempts) throw error;
     }
   }
-  throw new Error('extractKnowledgeUnitsWithRetry: unreachable');
+  throw new Error(`withStructuredRetry(${label}): unreachable`);
+}
+
+async function extractKnowledgeUnitsWithRetry(
+  options: ExtractKnowledgeUnitsOptions,
+  maxAttempts: number
+): Promise<{ result: ExtractKnowledgeUnitsResult; attemptLog: ExtractionAttemptLog[] }> {
+  return withStructuredRetry(() => extractKnowledgeUnits(options), maxAttempts, 'extraction');
 }
 
 const answerSchema = z.strictObject({
@@ -387,6 +408,15 @@ async function runOneExtractionRun(
     allAttemptLogs.push(...attemptLog);
     return result;
   };
+  // Same bounded transport/schema retry as extraction itself — a real run
+  // (full-smoke4) crashed the whole extraction run on a single transient
+  // "fetch failed" INSIDE the coverage-audit call, which previously had no
+  // retry wrapper at all.
+  const retryingAuditor = async (options: AuditBlockCoverageOptions): Promise<BlockCoverageAuditResult> => {
+    const { result, attemptLog } = await withStructuredRetry(() => auditBlockCoverage(options), 6, 'coverage audit');
+    allAttemptLogs.push(...attemptLog);
+    return result;
+  };
 
   console.log(`вызов LLM (extractKnowledgeUnitsWithCompletenessAudit, batchSize=${args.batchSize})...`);
   const audited = await extractKnowledgeUnitsWithCompletenessAudit(
@@ -394,7 +424,7 @@ async function runOneExtractionRun(
     args.batchSize,
     { runConfig: extractionRunConfig, maxTokens: 16000 },
     extractionRunConfig,
-    { extractor: retryingExtractor }
+    { extractor: retryingExtractor, auditor: retryingAuditor }
   );
   const gapsFound = audited.auditResults.filter((a) => a.hasGap).length;
   console.log(
