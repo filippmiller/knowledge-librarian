@@ -67,6 +67,7 @@ import type { ConversationMessage } from '../src/lib/knowledge/applicability/que
 import type { QueryFrame } from '../src/lib/knowledge/applicability/query-frame';
 import { buildEvaluatedCandidate } from '../src/lib/eval/knowledge-unit-adapter';
 import { resolveKnowledgeSet, type ResolutionDecision } from '../src/lib/knowledge/applicability/resolution';
+import { applyDecisionRelevanceGate, type GateCandidateInput, type GatedCandidate } from '../src/lib/knowledge/applicability/decision-relevance';
 import { buildEvidencePack, type EvidencePack } from '../src/lib/knowledge/synthesis/evidence-pack';
 import {
   synthesizeFromSelectedUnits,
@@ -170,6 +171,12 @@ interface EngineQuestionResult {
    *  retry policy) — false for a genuine engine bug or a taint trip, which
    *  must never be silently retried away. */
   readonly errorRetryable: boolean;
+  /** Every retrieval candidate with its Decision Relevance Gate verdict —
+   *  the full trace the architectural review requires for debugging real
+   *  company documents later (§6): which candidates were filtered before
+   *  ever reaching resolution, and why. `null` only if the pipeline never
+   *  reached retrieval (a real engine error before that point). */
+  readonly decisionRelevanceTrace: readonly GatedCandidate[] | null;
 }
 
 interface EngineContext {
@@ -181,6 +188,7 @@ interface EngineContext {
   readonly reviewedAt: string;
   readonly queryFrameRunConfig: ReturnType<typeof resolveExtractionRunConfig>;
   readonly answerGenerator: AnswerGenerator;
+  readonly decisionRelevanceRunConfig: ReturnType<typeof resolveExtractionRunConfig>;
   readonly taintDetector: OracleTaintDetector;
 }
 
@@ -322,7 +330,22 @@ async function runEngineOnQuestion(
       buildEvaluatedCandidate(u, queryFrame, ctx.requestContext, ctx.reviewedAt)
     );
 
-    const resolution = resolveKnowledgeSet(evaluatedCandidates, queryFrame);
+    // Decision Relevance Gate (architectural correction, 2026-08-09): a
+    // retrieval top-K candidate no longer automatically gains the right to
+    // influence resolveKnowledgeSet purely by topical adjacency. See
+    // decision-relevance.ts's module docstring for the full rationale.
+    const gateInputs: GateCandidateInput[] = candidateUnits.map((u, i) => ({
+      evaluated: evaluatedCandidates[i],
+      statement: u.statement,
+      quote: u.sourceSpan.quote,
+    }));
+    const decisionRelevance = await applyDecisionRelevanceGate(
+      gateInputs,
+      input.question,
+      ctx.decisionRelevanceRunConfig
+    );
+
+    const resolution = resolveKnowledgeSet(decisionRelevance.relevant, queryFrame);
 
     if (resolution.disposition !== 'ANSWER') {
       return {
@@ -336,6 +359,7 @@ async function runEngineOnQuestion(
         actualDisposition: 'HOLD',
         errorMessage: null,
         errorRetryable: false,
+        decisionRelevanceTrace: decisionRelevance.trace,
       };
     }
 
@@ -361,6 +385,7 @@ async function runEngineOnQuestion(
       actualDisposition: 'DIRECT_ANSWER',
       errorMessage: null,
       errorRetryable: false,
+      decisionRelevanceTrace: decisionRelevance.trace,
     };
   } catch (err) {
     // A genuine OracleTaintError (assertClean above) is NEVER retryable here —
@@ -377,6 +402,7 @@ async function runEngineOnQuestion(
       actualDisposition: 'ERROR',
       errorMessage: err instanceof Error ? err.message : String(err),
       errorRetryable: classifyStructuredError(err) !== 'OTHER_ERROR',
+      decisionRelevanceTrace: null,
     };
   }
 }
@@ -525,6 +551,9 @@ async function runOneExtractionRun(
   const answerGenerator = buildRealAnswerGenerator(
     resolveExtractionRunConfig({ promptVersion: 'aurora-fixture-synthesis-v1' })
   );
+  const decisionRelevanceRunConfig = resolveExtractionRunConfig({
+    promptVersion: 'aurora-fixture-decision-relevance-v1',
+  });
 
   const ctx: EngineContext = {
     embeddedCandidates,
@@ -535,6 +564,7 @@ async function runOneExtractionRun(
     reviewedAt,
     queryFrameRunConfig,
     answerGenerator,
+    decisionRelevanceRunConfig,
     taintDetector,
   };
 
