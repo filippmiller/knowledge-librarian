@@ -65,6 +65,13 @@ export interface SecretCoverageEntry {
   readonly guard: SecretGuardKind;
 }
 
+/** Отличима от прочих фатальных ошибок программно (instanceof), не по тексту
+ *  сообщения — так раннер может дать прогону bounded auto-retry на свежей
+ *  LLM-выборке (тот же класс решения, что и retry на NETWORK_ERROR/
+ *  SCHEMA_MISMATCH: этот КОНКРЕТНЫЙ прогон недействителен, не «повторять,
+ *  пока не понравится оценка»), не путая утечку с настоящим багом. */
+export class OracleTaintError extends Error {}
+
 export interface OracleTaintDetector {
   /** Бросает исключение, если payload содержит текст, выводимый только из oracle. */
   assertClean(payload: unknown, label: string): void;
@@ -199,7 +206,7 @@ export function buildOracleTaintDetector({
         if (tainted.size > 0) {
           for (const shingle of shingles(normalize(value), shingleSize)) {
             if (tainted.has(shingle)) {
-              throw new Error(
+              throw new OracleTaintError(
                 `Утечка oracle в «${label}»: обнаружена формулировка, выводимая только из ключа — «${shingle}». ` +
                   'Прогон недействителен (план §0.3).'
               );
@@ -210,7 +217,7 @@ export function buildOracleTaintDetector({
           const normalizedValue = normalize(value).join(' ');
           for (const phrase of taintedPhrases) {
             if (phrase.length > 0 && normalizedValue.includes(phrase)) {
-              throw new Error(
+              throw new OracleTaintError(
                 `Утечка oracle в «${label}»: обнаружена короткая формулировка, выводимая только из ключа — «${phrase}». ` +
                   'Прогон недействителен (план §0.3).'
               );

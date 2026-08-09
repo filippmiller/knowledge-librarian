@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import { buildOracleTaintDetector, type OracleTaintDetector } from '../oracle-taint';
+import { buildOracleTaintDetector, OracleTaintError, type OracleTaintDetector } from '../oracle-taint';
 import type { OracleCase } from '../semantic-rule-oracle';
 import type { SourceRule } from '../source-rule-segmentation';
 
@@ -95,6 +95,24 @@ describe('buildOracleTaintDetector', () => {
 
   it('короткое совпадение слов не считается утечкой — иначе ложные срабатывания', () => {
     expect(() => detector().assertClean({ note: 'предметы использовать' }, 'x')).not.toThrow();
+  });
+
+  // goal-shift continuation (2026-08-09): раннер должен уметь ОТЛИЧИТЬ утечку
+  // oracle от других фатальных ошибок программно, а не по regex на текст
+  // сообщения — чтобы иметь право на bounded auto-retry (свежая LLM-выборка),
+  // не трогая при этом обработку настоящих багов.
+  it('бросает именно OracleTaintError (не просто Error) — раннер должен уметь отличить утечку от других фатальных ошибок программно', () => {
+    expect(OracleTaintError).toBeDefined();
+    let caught: unknown;
+    try {
+      detector().assertClean(
+        { hint: 'Ногти, карточки и другие твёрдые предметы использовать нельзя' },
+        'engine input'
+      );
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught instanceof OracleTaintError).toBe(true);
   });
 });
 

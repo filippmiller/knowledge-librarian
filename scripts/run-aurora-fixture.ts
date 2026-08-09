@@ -79,7 +79,7 @@ import { loadSemanticRuleOracle, ORACLE_PACK_DIR, SOURCE_DOCX_FILENAME } from '.
 import { loadNegativeCaseOracle } from '../src/lib/eval/negative-case-oracle';
 import { loadSourceRulesFromDocx, type SourceRule } from '../src/lib/eval/source-rule-segmentation';
 import { resolveSourceRuleId } from '../src/lib/eval/source-rule-mapping';
-import { buildOracleTaintDetector, type OracleTaintDetector } from '../src/lib/eval/oracle-taint';
+import { buildOracleTaintDetector, OracleTaintError, type OracleTaintDetector } from '../src/lib/eval/oracle-taint';
 
 // ─────────────────────────────────── CLI ────────────────────────────────────
 
@@ -480,6 +480,44 @@ async function runOneExtractionRun(
   };
 }
 
+/** Максимум ПОЛНЫХ прогонов извлечения на один runIndex, если очередная
+ *  LLM-выборка случайно (не по вине экстракции) задевает защищённую
+ *  формулировку oracle. Не «пока не понравится оценка» — тот же класс
+ *  решения, что и transport/schema retry на batch-уровне: конкретная выборка
+ *  недействительна, нужна свежая независимая выборка (см. OracleTaintError). */
+const MAX_TAINT_RETRY_ATTEMPTS = 3;
+
+/** Оборачивает `runOneExtractionRun` bounded-ретраем СПЕЦИФИЧНО на
+ *  `OracleTaintError` — короткие формулировки в узком юридическом домене
+ *  документа иногда случайно совпадают у независимо сгенерированного
+ *  парафраза модели и независимо написанного ответа oracle (подтверждено
+ *  вручную: источник — «трёх ТАКИХ циклов», и модель, и oracle одинаково
+ *  опускают «таких»). Единственная законная реакция на такое совпадение —
+ *  выбросить прогон целиком и получить свежую независимую выборку; словарь
+ *  секретов НЕ ослабляется и НЕ подстраивается под конкретную формулировку.
+ *  Любая другая ошибка (реальный баг, network/schema после исчерпания
+ *  собственного retry и т.п.) пробрасывается немедленно, без ретрая здесь. */
+async function runOneExtractionRunWithTaintRetry(
+  runIndex: number,
+  args: CliArgs,
+  questions: readonly EngineQuestionInput[],
+  sourceRules: readonly SourceRule[],
+  taintDetector: OracleTaintDetector
+): Promise<ExtractionRunOutcome> {
+  for (let attempt = 1; attempt <= MAX_TAINT_RETRY_ATTEMPTS; attempt++) {
+    try {
+      return await runOneExtractionRun(runIndex, args, questions, sourceRules, taintDetector);
+    } catch (err) {
+      if (!(err instanceof OracleTaintError) || attempt === MAX_TAINT_RETRY_ATTEMPTS) throw err;
+      console.warn(
+        `прогон ${runIndex}, попытка ${attempt}/${MAX_TAINT_RETRY_ATTEMPTS}: случайное совпадение с oracle ` +
+          `(не баг — см. OracleTaintError), прогон отброшен, беру свежую независимую выборку: ${err.message}`
+      );
+    }
+  }
+  throw new Error('unreachable');
+}
+
 // ────────────────────────────────── main ─────────────────────────────────────
 
 async function main() {
@@ -528,7 +566,7 @@ async function main() {
 
   const runs: ExtractionRunOutcome[] = [];
   for (let i = 1; i <= args.extractionRuns; i++) {
-    const outcome = await runOneExtractionRun(i, args, questions, sourceRules, taintDetector);
+    const outcome = await runOneExtractionRunWithTaintRetry(i, args, questions, sourceRules, taintDetector);
     runs.push(outcome);
 
     const runDir = path.join(args.outDir, outcome.runId);
