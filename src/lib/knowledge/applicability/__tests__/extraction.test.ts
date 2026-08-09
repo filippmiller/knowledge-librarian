@@ -57,6 +57,21 @@ describe('uncertainties — ключ ПРОПУЩЕН целиком (не []), 
   });
 });
 
+describe('facets — значение null (не {}), тот же класс LLM-выдачи (goal-shift benchmark, 2026-08-09, openai/gpt-4o: facets: null на первой попытке)', () => {
+  it('unit с facets: null -> валиден, facets становится {}', () => {
+    const parsed = extractedKnowledgeUnitSchema.safeParse(validUnit({ facets: null }));
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.facets).toEqual({});
+  });
+
+  it('unit с реальными facets — не подменяются пустым объектом', () => {
+    const real = { scenario: 'apostille.zags.spb' };
+    const parsed = extractedKnowledgeUnitSchema.safeParse(validUnit({ facets: real }));
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.facets).toEqual(real);
+  });
+});
+
 describe('sourceSpanSchema', () => {
   it('принимает непустые anchor и quote', () => {
     expect(sourceSpanSchema.safeParse(VALID_SOURCE_SPAN).success).toBe(true);

@@ -171,7 +171,11 @@ export const extractedKnowledgeUnitCoreSchema = z.strictObject({
   kind: knowledgeUnitKindSchema,
   statement: nonBlankString('statement не может быть пустым'),
   title: nonBlankString('title не может быть пустым').optional(),
-  facets: extractedFacetMapSchema,
+  // `.nullish().transform(v => v ?? {})` — тот же класс LLM-выдачи, что и
+  // triggerCondition/numericConstraint/uncertainties ниже: живой прогон
+  // (goal-shift benchmark, 2026-08-09, openai/gpt-4o) прислал `facets: null`
+  // вместо пустого объекта на unit'ах без применимых фасет.
+  facets: extractedFacetMapSchema.nullish().transform((value) => value ?? {}),
   // `.nullish().transform(v => v ?? null)`, не `.nullable()` — живой прогон
   // (claude-haiku-4-5, continuation-сессия, --stage=extraction) поймал
   // РЕАЛЬНОЕ (воспроизведено в 2 из 3 попыток) поведение модели: поле
