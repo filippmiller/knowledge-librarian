@@ -165,6 +165,11 @@ interface EngineQuestionResult {
   readonly verification: VerificationResult | null;
   readonly actualDisposition: 'DIRECT_ANSWER' | 'HOLD' | 'ERROR';
   readonly errorMessage: string | null;
+  /** True iff `errorMessage` is a transport/schema failure class the caller
+   *  may legitimately retry (same classification as batch-extraction's own
+   *  retry policy) — false for a genuine engine bug or a taint trip, which
+   *  must never be silently retried away. */
+  readonly errorRetryable: boolean;
 }
 
 interface EngineContext {
@@ -183,6 +188,22 @@ interface ExtractionAttemptLog {
   readonly attempt: number;
   readonly outcome: 'SUCCESS' | 'SCHEMA_MISMATCH' | 'TRUNCATED_JSON' | 'NETWORK_ERROR' | 'OTHER_ERROR';
   readonly message: string | null;
+}
+
+/**
+ * Same classification everywhere a bounded retry decision is made in this
+ * file: transport/schema failure classes are retryable, anything else is a
+ * real bug and must surface immediately, never silently retried away.
+ */
+function classifyStructuredError(error: unknown): ExtractionAttemptLog['outcome'] {
+  if (error instanceof StructuredOutputError) {
+    return error.reason === 'SCHEMA_MISMATCH'
+      ? 'SCHEMA_MISMATCH'
+      : error.reason === 'TRUNCATED_JSON'
+        ? 'TRUNCATED_JSON'
+        : 'OTHER_ERROR';
+  }
+  return error instanceof ChatCompletionError ? 'NETWORK_ERROR' : 'OTHER_ERROR';
 }
 
 /**
@@ -217,16 +238,7 @@ async function withStructuredRetry<T>(
       attemptLog.push({ attempt, outcome: 'SUCCESS', message: null });
       return { result, attemptLog };
     } catch (error) {
-      const outcome: ExtractionAttemptLog['outcome'] =
-        error instanceof StructuredOutputError
-          ? error.reason === 'SCHEMA_MISMATCH'
-            ? 'SCHEMA_MISMATCH'
-            : error.reason === 'TRUNCATED_JSON'
-              ? 'TRUNCATED_JSON'
-              : 'OTHER_ERROR'
-          : error instanceof ChatCompletionError
-            ? 'NETWORK_ERROR'
-            : 'OTHER_ERROR';
+      const outcome = classifyStructuredError(error);
       const retryable = outcome !== 'OTHER_ERROR';
       attemptLog.push({
         attempt,
@@ -323,6 +335,7 @@ async function runEngineOnQuestion(
         verification: null,
         actualDisposition: 'HOLD',
         errorMessage: null,
+        errorRetryable: false,
       };
     }
 
@@ -347,8 +360,12 @@ async function runEngineOnQuestion(
       verification,
       actualDisposition: 'DIRECT_ANSWER',
       errorMessage: null,
+      errorRetryable: false,
     };
   } catch (err) {
+    // A genuine OracleTaintError (assertClean above) is NEVER retryable here —
+    // classifyStructuredError correctly falls through to OTHER_ERROR for it,
+    // same as any other real bug. Only transport/schema failure classes are.
     return {
       ...base,
       queryFrame: null,
@@ -359,8 +376,39 @@ async function runEngineOnQuestion(
       verification: null,
       actualDisposition: 'ERROR',
       errorMessage: err instanceof Error ? err.message : String(err),
+      errorRetryable: classifyStructuredError(err) !== 'OTHER_ERROR',
     };
   }
+}
+
+/** Max attempts for one question's engine pipeline on a transient
+ *  transport/schema failure. A real full-benchmark run (full-smoke8,
+ *  2026-08-09) hit widespread transient "fetch failed" during a period of
+ *  provider instability — 15 of 16 questions came back ERROR, each from a
+ *  single unretried blip, even though extraction and coverage-audit (both
+ *  already bounded-retried) succeeded moments earlier in the same run.
+ *  `runEngineOnQuestion` is a pure, self-contained function (no shared state
+ *  across calls), so retrying it wholesale needs no rewiring — unlike the
+ *  taint-check retry, this never touches which content is treated as
+ *  tainted (see `errorRetryable`'s docstring). */
+const MAX_ENGINE_QUESTION_RETRY_ATTEMPTS = 3;
+
+async function runEngineOnQuestionWithRetry(
+  input: EngineQuestionInput,
+  ctx: EngineContext
+): Promise<EngineQuestionResult> {
+  let result: EngineQuestionResult = await runEngineOnQuestion(input, ctx);
+  for (
+    let attempt = 2;
+    result.actualDisposition === 'ERROR' && result.errorRetryable && attempt <= MAX_ENGINE_QUESTION_RETRY_ATTEMPTS;
+    attempt++
+  ) {
+    console.warn(
+      `[engine ${input.caseId}] попытка ${attempt}/${MAX_ENGINE_QUESTION_RETRY_ATTEMPTS} после (retryable): ${result.errorMessage}`
+    );
+    result = await runEngineOnQuestion(input, ctx);
+  }
+  return result;
 }
 
 // ──────────────────────────── one extraction run ────────────────────────────
@@ -493,7 +541,7 @@ async function runOneExtractionRun(
   const results: EngineQuestionResult[] = [];
   for (const question of questions) {
     console.log(`  [${runId}] ${question.caseId}: "${question.question.slice(0, 60)}..."`);
-    const result = await runEngineOnQuestion(question, ctx);
+    const result = await runEngineOnQuestionWithRetry(question, ctx);
     console.log(`    -> ${result.actualDisposition}${result.errorMessage ? ` (${result.errorMessage})` : ''}`);
     results.push(result);
   }
