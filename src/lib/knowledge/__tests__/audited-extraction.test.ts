@@ -126,6 +126,140 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
     expect(result.auditResults).toHaveLength(3);
   });
 
+  it('focused retry, чей quote является ПОДСТРОКОЙ уже покрытого исходного quote -- не добавляется дубликатом', async () => {
+    const text = 'Правило: разрешено один раз прижать ладонь через чистую одежду не более чем на три секунды.';
+    const blocks = [block('b0', text)];
+    let extractorCalls = 0;
+    const extractor = async (_options: { blocks: readonly SourceBlock[] }) => {
+      extractorCalls++;
+      if (extractorCalls === 1) {
+        return {
+          units: [
+            unit({
+              extractionRef: 'orig',
+              sourceSpan: { anchor: 'b0', quote: 'разрешено один раз прижать ладонь через чистую одежду не более чем на три секунды' },
+            }),
+          ],
+          structuredResult: {} as never,
+        };
+      }
+      // focused retry: re-derives the SAME content, just a shorter (tail) quote window.
+      return {
+        units: [unit({ extractionRef: 'dup', sourceSpan: { anchor: 'b0', quote: 'не более чем на три секунды' } })],
+        structuredResult: {} as never,
+      };
+    };
+    const auditor = async (): Promise<BlockCoverageAuditResult> => ({
+      blockAnchor: 'b0',
+      findings: [{ verdict: 'POSSIBLE_OMISSION', quote: 'не более чем на три секунды', explanation: 'x', quoteVerified: true }],
+      hasGap: true,
+    });
+
+    const result = await extractKnowledgeUnitsWithCompletenessAudit(
+      blocks,
+      5,
+      { runConfig: {} as never },
+      {} as never,
+      { extractor, auditor }
+    );
+
+    expect(result.units).toHaveLength(1);
+    expect(result.units[0].extractionRef).toBe('b0-orig');
+    expect(result.focusedRetryLogs[0].additionalUnitCount).toBe(0);
+  });
+
+  it('focused retry, чей quote СОДЕРЖИТ уже покрытый исходный quote целиком -- тоже не добавляется дубликатом', async () => {
+    const text = 'Правило: разрешено один раз прижать ладонь через чистую одежду не более чем на три секунды.';
+    const blocks = [block('b0', text)];
+    let extractorCalls = 0;
+    const extractor = async (_options: { blocks: readonly SourceBlock[] }) => {
+      extractorCalls++;
+      if (extractorCalls === 1) {
+        return {
+          units: [
+            unit({
+              extractionRef: 'orig',
+              sourceSpan: { anchor: 'b0', quote: 'разрешено один раз прижать ладонь через чистую одежду не более чем на три секунды' },
+            }),
+          ],
+          structuredResult: {} as never,
+        };
+      }
+      // focused retry: re-derives the SAME content, wrapped in a WIDER quote window.
+      return {
+        units: [
+          unit({
+            extractionRef: 'dup-superset',
+            sourceSpan: {
+              anchor: 'b0',
+              quote: 'Правило: разрешено один раз прижать ладонь через чистую одежду не более чем на три секунды.',
+            },
+          }),
+        ],
+        structuredResult: {} as never,
+      };
+    };
+    const auditorWithGap = async (): Promise<BlockCoverageAuditResult> => ({
+      blockAnchor: 'b0',
+      findings: [{ verdict: 'UNREPRESENTED_CLAUSE', quote: 'разрешено', explanation: 'x', quoteVerified: true }],
+      hasGap: true,
+    });
+
+    const result = await extractKnowledgeUnitsWithCompletenessAudit(
+      blocks,
+      5,
+      { runConfig: {} as never },
+      {} as never,
+      { extractor, auditor: auditorWithGap }
+    );
+
+    expect(result.units).toHaveLength(1);
+    expect(result.units[0].extractionRef).toBe('b0-orig');
+  });
+
+  it('focused retry, чей quote ПЕРЕСЕКАЕТСЯ (но не вложен) с уже покрытым -- всё равно не добавляется дубликатом', async () => {
+    const text = 'Раздел один. Разрешено прижать ладонь через одежду не более трёх секунд, повторно нельзя.';
+    const blocks = [block('b0', text)];
+    let extractorCalls = 0;
+    const extractor = async (_options: { blocks: readonly SourceBlock[] }) => {
+      extractorCalls++;
+      if (extractorCalls === 1) {
+        return {
+          units: [
+            unit({
+              extractionRef: 'orig',
+              sourceSpan: { anchor: 'b0', quote: 'Разрешено прижать ладонь через одежду не более трёх секунд' },
+            }),
+          ],
+          structuredResult: {} as never,
+        };
+      }
+      // Overlapping window shifted right: shares "не более трёх секунд, повторно нельзя" territory with `orig`.
+      return {
+        units: [
+          unit({ extractionRef: 'dup-shifted', sourceSpan: { anchor: 'b0', quote: 'не более трёх секунд, повторно нельзя' } }),
+        ],
+        structuredResult: {} as never,
+      };
+    };
+    const auditor = async (): Promise<BlockCoverageAuditResult> => ({
+      blockAnchor: 'b0',
+      findings: [{ verdict: 'UNREPRESENTED_CLAUSE', quote: 'повторно нельзя', explanation: 'x', quoteVerified: true }],
+      hasGap: true,
+    });
+
+    const result = await extractKnowledgeUnitsWithCompletenessAudit(
+      blocks,
+      5,
+      { runConfig: {} as never },
+      {} as never,
+      { extractor, auditor }
+    );
+
+    expect(result.units).toHaveLength(1);
+    expect(result.units[0].extractionRef).toBe('b0-orig');
+  });
+
   it('блок без ни одного extracted unit\'а всё равно проходит аудит (пустой extractedStatements)', async () => {
     const blocks = [block('b0', 'преамбула без содержательных правил')];
     const extractor = async () => ({ units: [], structuredResult: {} as never });

@@ -35,6 +35,7 @@ import {
 import { validateParentRefs } from './applicability/extraction-parent-refs';
 import type { ExtractedKnowledgeUnit } from './applicability/extraction';
 import type { ExtractionRunConfig } from '@/lib/ai/extraction-run';
+import { locateQuote } from './quote-locator';
 
 export interface FocusedRetryLog {
   readonly blockAnchor: string;
@@ -54,6 +55,23 @@ type CoverageAuditor = (options: AuditBlockCoverageOptions) => Promise<BlockCove
 export interface AuditedExtractionDeps {
   readonly extractor?: BatchExtractor;
   readonly auditor?: CoverageAuditor;
+}
+
+/** True iff `quote`'s span in `blockText` overlaps ANY of `existingQuotes`'
+ *  spans — either direction (substring or superset), not just exact match.
+ *  A quote that can't be located at all (no `locateQuote` match) can't be
+ *  proven to overlap, so it's treated as new — dropping unlocatable content
+ *  would silently discard real findings, the opposite of this module's
+ *  purpose. */
+function quoteOverlapsAny(blockText: string, quote: string, existingQuotes: readonly string[]): boolean {
+  const range = locateQuote(blockText, quote);
+  if (range === null) return false;
+  for (const existing of existingQuotes) {
+    const existingRange = locateQuote(blockText, existing);
+    if (existingRange === null) continue;
+    if (range.start < existingRange.end && existingRange.start < range.end) return true;
+  }
+  return false;
 }
 
 export async function extractKnowledgeUnitsWithCompletenessAudit(
@@ -97,7 +115,26 @@ export async function extractKnowledgeUnitsWithCompletenessAudit(
     if (!audit.hasGap) continue;
 
     const retryResult: ExtractKnowledgeUnitsResult = await extractor({ ...optionsPerBatch, blocks: [block] });
-    const namespaced = retryResult.units.map((u) => ({
+    // The retry re-extracts the WHOLE block from scratch without seeing the
+    // original batch pass's units — a confirmed gap (even a minor one, like
+    // one missing adjective) makes it re-derive content the original pass
+    // ALREADY covered, not just the genuinely missing part. Real observed
+    // effect (goal-shift continuation, 2026-08-09, full-smoke6 benchmark run):
+    // one source rule ended up with 5 near-duplicate root-level units instead
+    // of the 1-2 a human curator would produce, purely from this. A retry
+    // unit whose quote occupies the SAME span of the block's text as an
+    // already-covered quote (either direction — substring or superset) adds
+    // no new information and is dropped; only genuinely new quote-territory
+    // is kept, so a real omission is still filled.
+    const coveredQuotes = unitsForBlock.map((u) => u.sourceSpan.quote);
+    const keptUnits: ExtractedKnowledgeUnit[] = [];
+    for (const candidate of retryResult.units) {
+      if (quoteOverlapsAny(block.text, candidate.sourceSpan.quote, coveredQuotes)) continue;
+      coveredQuotes.push(candidate.sourceSpan.quote);
+      keptUnits.push(candidate);
+    }
+
+    const namespaced = keptUnits.map((u) => ({
       ...u,
       extractionRef: `focused-${block.anchor}-${u.extractionRef}`,
       parentExtractionRef: null,
