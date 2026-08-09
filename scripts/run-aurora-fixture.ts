@@ -41,7 +41,7 @@ import {
   extractKnowledgeUnitsWithCompletenessAudit,
   type FocusedRetryLog,
 } from '../src/lib/knowledge/audited-extraction';
-import type { BatchExtractionLog } from '../src/lib/knowledge/batch-extraction';
+import type { BatchExtractionLog, BatchExtractor } from '../src/lib/knowledge/batch-extraction';
 import {
   auditBlockCoverage,
   type AuditBlockCoverageOptions,
@@ -265,6 +265,90 @@ async function extractKnowledgeUnitsWithRetry(
   maxAttempts: number
 ): Promise<{ result: ExtractKnowledgeUnitsResult; attemptLog: ExtractionAttemptLog[] }> {
   return withStructuredRetry(() => extractKnowledgeUnits(options), maxAttempts, 'extraction');
+}
+
+interface TaintResampleLog {
+  readonly blockAnchor: string;
+  readonly round: number;
+}
+
+/**
+ * Targeted per-block resample when the retrieval-candidate taint check trips
+ * — a cheaper first attempt than discarding the whole extraction run
+ * (`runOneExtractionRunWithTaintRetry`'s whole-run auto-retry remains the
+ * safety-net fallback, unchanged, if this doesn't converge). Session data
+ * (2026-08-09) showed the two known false-positive collisions on this
+ * fixture individually colliding often enough that even 6 whole-run
+ * attempts sometimes exhaust (`full-smoke7`) — each whole-run attempt
+ * re-extracts all 15 blocks and runs coverage audit on all 15 before even
+ * reaching the taint check, when the actual problem is usually 1-2 blocks'
+ * specific wording.
+ *
+ * Checks each retrieval candidate INDIVIDUALLY (`assertClean`'s per-string
+ * check never compares across array items, so probing one candidate at a
+ * time produces identical per-item verdicts to checking the whole batch at
+ * once — same detection semantics, just localized) to find exactly which
+ * unit(s) are tainted, re-extracts just their source block(s) fresh, and
+ * REPLACES that block's units entirely — not additive like the focused-retry
+ * completeness path: the old units are exactly what's tainted, there is
+ * nothing to preserve alongside a fresh sample. Bounded rounds; if a round
+ * still finds taint after resampling every affected block, it tries again
+ * up to `maxRounds`, then returns whatever it has — the caller's own,
+ * unchanged, authoritative final `assertClean` call is the real safety gate
+ * and will throw if this didn't fully converge, falling back to the
+ * existing whole-run retry exactly as before this function existed.
+ */
+async function resolveTaintedCandidates(
+  initialUnits: readonly PersistedKnowledgeUnit[],
+  blocksByAnchor: ReadonlyMap<string, SourceBlockLocation>,
+  sourceRevisionHash: string,
+  taintDetector: OracleTaintDetector,
+  extractor: BatchExtractor,
+  optionsPerBatch: Omit<ExtractKnowledgeUnitsOptions, 'blocks'>,
+  maxRounds: number
+): Promise<{ units: PersistedKnowledgeUnit[]; resampleLogs: TaintResampleLog[] }> {
+  let units = [...initialUnits];
+  const resampleLogs: TaintResampleLog[] = [];
+
+  for (let round = 1; round <= maxRounds; round++) {
+    const unitsById = new Map(units.map((u) => [u.unitId, u]));
+    const candidates = units.map((u) => ({ unitId: u.unitId, retrievalText: buildRetrievalText(u, unitsById) }));
+
+    const taintedUnitIds = new Set<string>();
+    for (const candidate of candidates) {
+      try {
+        taintDetector.assertClean([candidate], 'targeted taint probe');
+      } catch (err) {
+        if (!(err instanceof OracleTaintError)) throw err;
+        taintedUnitIds.add(candidate.unitId);
+      }
+    }
+    if (taintedUnitIds.size === 0) return { units, resampleLogs };
+
+    const affectedAnchors = new Set(
+      units.filter((u) => taintedUnitIds.has(u.unitId)).map((u) => u.sourceSpan.anchor)
+    );
+
+    for (const anchor of affectedAnchors) {
+      const block = blocksByAnchor.get(anchor);
+      if (block === undefined) continue;
+
+      const retryResult = await extractor({
+        ...optionsPerBatch,
+        blocks: [{ anchor: block.anchor, text: block.text }],
+      });
+      const namespaced = retryResult.units.map((u) => ({
+        ...u,
+        extractionRef: `taint-retry-${anchor}-${u.extractionRef}`,
+        parentExtractionRef: null,
+      }));
+      const identity = assignIdentity(namespaced, blocksByAnchor, sourceRevisionHash);
+      units = [...units.filter((u) => u.sourceSpan.anchor !== anchor), ...identity.units];
+      resampleLogs.push({ blockAnchor: anchor, round });
+    }
+  }
+
+  return { units, resampleLogs };
 }
 
 const answerSchema = z.strictObject({
@@ -514,6 +598,22 @@ async function runOneExtractionRun(
     throw new Error(`runOneExtractionRun(${runIndex}): экстракция не выдала ни одного unit — прогон недействителен`);
   }
 
+  const resampled = await resolveTaintedCandidates(
+    identity.units,
+    blocksByAnchor,
+    canonical.sourceRevisionHash,
+    taintDetector,
+    retryingExtractor,
+    { runConfig: extractionRunConfig, maxTokens: 16000 },
+    3
+  );
+  if (resampled.resampleLogs.length > 0) {
+    const affectedBlocks = new Set(resampled.resampleLogs.map((l) => l.blockAnchor)).size;
+    console.log(
+      `targeted taint resample: ${resampled.resampleLogs.length} re-extraction(s) across ${affectedBlocks} block(s) — cheaper first attempt before falling back to a whole-run retry`
+    );
+  }
+
   const reviewedAt = new Date().toISOString();
   const snapshot = buildEvaluationSnapshot(
     {
@@ -526,7 +626,7 @@ async function runOneExtractionRun(
       extractionPromptVersion: extractionRunConfig.promptVersion,
       extractionSchemaVersion: extractionRunConfig.extractionSchemaVersion,
     },
-    identity.units
+    resampled.units
   );
 
   const unitsById = new Map(snapshot.units.map((u) => [u.unitId, u]));
