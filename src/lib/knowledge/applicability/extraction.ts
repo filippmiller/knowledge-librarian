@@ -188,7 +188,16 @@ export const extractedKnowledgeUnitCoreSchema = z.strictObject({
   numericConstraint: numericConstraintSchema.nullish().transform((value) => value ?? null),
   sourceSpan: sourceSpanSchema,
   evidenceByField: z.record(z.string(), sourceSpanSchema),
-  uncertainties: z.array(extractionUncertaintySchema).readonly(),
+  // `.nullish().transform(v => v ?? [])` — та же нормализация, что уже
+  // применена к triggerCondition/numericConstraint выше, по той же причине:
+  // живой прогон (goal-shift benchmark, 2026-08-09, openai/gpt-4o)
+  // систематически (6/6 попыток) не включал ключ uncertainties в JSON вовсе,
+  // хотя промпт требует его всегда, даже пустым массивом.
+  uncertainties: z
+    .array(extractionUncertaintySchema)
+    .readonly()
+    .nullish()
+    .transform((value) => value ?? []),
 });
 
 /**

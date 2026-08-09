@@ -30,6 +30,33 @@ function validUnit(overrides: Record<string, unknown> = {}): Record<string, unkn
   };
 }
 
+describe('uncertainties — ключ ПРОПУЩЕН целиком (не []), тот же класс LLM-выдачи, что уже нормализован для triggerCondition/numericConstraint', () => {
+  // Живой прогон против openai/gpt-4o (goal-shift benchmark, 2026-08-09):
+  // модель СИСТЕМАТИЧЕСКИ (6 из 6 попыток) не включала ключ uncertainties в
+  // JSON вовсе, хотя промпт требует его всегда (даже пустым массивом).
+  // triggerCondition/numericConstraint уже получили `.nullish().transform(v
+  // => v ?? null)` за ровно то же поведение — uncertainties отставал.
+  it('unit без ключа uncertainties -> валиден, uncertainties становится []', () => {
+    const { uncertainties: _omitted, ...withoutUncertainties } = validUnit();
+    const parsed = extractedKnowledgeUnitSchema.safeParse(withoutUncertainties);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.uncertainties).toEqual([]);
+  });
+
+  it('unit с uncertainties: null -> тоже валиден, становится []', () => {
+    const parsed = extractedKnowledgeUnitSchema.safeParse(validUnit({ uncertainties: null }));
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.uncertainties).toEqual([]);
+  });
+
+  it('unit с реальными uncertainties — не подменяются пустым массивом', () => {
+    const real = [{ kind: 'OTHER' as const, description: 'находка', quote: 'x' }];
+    const parsed = extractedKnowledgeUnitSchema.safeParse(validUnit({ uncertainties: real }));
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.uncertainties).toEqual(real);
+  });
+});
+
 describe('sourceSpanSchema', () => {
   it('принимает непустые anchor и quote', () => {
     expect(sourceSpanSchema.safeParse(VALID_SOURCE_SPAN).success).toBe(true);
