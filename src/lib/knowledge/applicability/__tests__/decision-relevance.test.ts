@@ -250,11 +250,26 @@ describe('applyDecisionRelevanceGate — детерминированный сл
     expect(result.relevant.map((r) => r.unitId)).toEqual(['rule5-exc']);
   });
 
-  it('EXCEPTION_RULE с trigger=null (без triggerCondition вовсе) -> RELEVANT, классификатор НЕ вызывается — resolveKnowledgeSet сам корректно исключает такой кандидат (exception_without_trigger) и поднимает requiresHumanReview; гейт не должен молча гасить этот сигнал качества данных фильтрацией как IRRELEVANT', async () => {
+  // Real bug found running the full fixture (drg1, 2026-08-09): a malformed
+  // EXCEPTION_RULE (trigger=null — extraction never attached a
+  // triggerCondition) that was topically irrelevant to Q02 still reached
+  // resolveKnowledgeSet unconditionally, which correctly excludes it
+  // (exception_without_trigger) but ALSO sets requiresHumanReview=true —
+  // and THAT flag alone forced the whole question to HOLD even though two
+  // good, confidently-selected candidates already answered it. Marking
+  // trigger=null candidates unconditionally RELEVANT (the original design)
+  // let a record irrelevant to THIS question poison its disposition anyway
+  // — the exact "one component, two jobs" problem the gate exists to fix,
+  // recurring one layer downstream. Fix: trigger=null goes through the same
+  // parent-propagation-then-classifier path as trigger=UNKNOWN, not an
+  // automatic pass-through. The data-quality concern itself doesn't
+  // disappear — it's just no longer conflated with per-question answering.
+  it('EXCEPTION_RULE с trigger=null и parentRuleRef на scope-MATCH кандидата -> CONDITIONALLY_RELEVANT через структурную пропагацию, классификатор не нужен', async () => {
     let classifierCalls = 0;
-    const exception = candidate({ unitId: 'malformed', kind: 'EXCEPTION_RULE', parentRuleRef: null, trigger: null });
+    const parent = candidate({ unitId: 'base', kind: 'PROCEDURE_STEP' });
+    const malformed = candidate({ unitId: 'malformed', kind: 'EXCEPTION_RULE', parentRuleRef: 'base', trigger: null });
     const result = await applyDecisionRelevanceGate(
-      [input({ evaluated: exception })],
+      [input({ evaluated: parent }), input({ evaluated: malformed })],
       'Вопрос?',
       {} as never,
       async () => {
@@ -263,7 +278,29 @@ describe('applyDecisionRelevanceGate — детерминированный сл
       }
     );
     expect(classifierCalls).toBe(0);
-    expect(result.trace[0].relevance.verdict).toBe('RELEVANT');
+    expect(result.trace.find((t) => t.unitId === 'malformed')!.relevance.verdict).toBe('CONDITIONALLY_RELEVANT');
+  });
+
+  it('EXCEPTION_RULE с trigger=null, без доказанного релевантного родителя, классификатор говорит IRRELEVANT -> кандидат отфильтрован, НЕ доходит до resolveKnowledgeSet и не может испортить requiresHumanReview для несвязанного вопроса (реальный кейс Q02)', async () => {
+    const malformed = candidate({ unitId: 'malformed', kind: 'EXCEPTION_RULE', parentRuleRef: null, trigger: null });
+    const result = await applyDecisionRelevanceGate(
+      [input({ evaluated: malformed })],
+      'Можно ли трогать кожу сразу, если ладони на вид не грязные?',
+      {} as never,
+      async () => ({ verdict: 'IRRELEVANT', reason: 'другая ситуация', potentiallyDecidingFacts: [] })
+    );
+    expect(result.relevant).toEqual([]);
+    expect(result.trace[0].relevance.verdict).toBe('IRRELEVANT');
+  });
+
+  it('EXCEPTION_RULE с trigger=null, классификатор говорит RELEVANT (запись реально спорна для ЭТОГО вопроса) -> кандидат проходит гейт, resolveKnowledgeSet сам корректно применит exception_without_trigger/requiresHumanReview к genuine-релевантной записи', async () => {
+    const malformed = candidate({ unitId: 'malformed', kind: 'EXCEPTION_RULE', parentRuleRef: null, trigger: null });
+    const result = await applyDecisionRelevanceGate(
+      [input({ evaluated: malformed })],
+      'Вопрос про то, о чём именно эта запись.',
+      {} as never,
+      async () => ({ verdict: 'RELEVANT', reason: 'прямо по теме', potentiallyDecidingFacts: [] })
+    );
     expect(result.relevant.map((r) => r.unitId)).toEqual(['malformed']);
   });
 

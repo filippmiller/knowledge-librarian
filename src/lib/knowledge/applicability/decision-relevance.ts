@@ -39,11 +39,21 @@
  *    link survives extraction, and needs no LLM call to prove.
  *
  * 2. Oracle-blind LLM classifier, invoked ONLY for what's left: an
- *    `EXCEPTION_RULE` with an unresolved trigger AND no structurally-proven
- *    relevant parent. This is exactly the genuinely ambiguous remainder —
- *    real judgment about THIS question's content, not a blanket score
- *    threshold (which the architectural review explicitly rejected: reranker
- *    scores are model- and query-relative, too fragile as the sole signal).
+ *    `EXCEPTION_RULE` with an unresolved trigger (`UNKNOWN` verdict, OR no
+ *    `triggerCondition` at all — a malformed/incomplete extraction is a
+ *    relevance question too, not exempt from it: a real full-benchmark run
+ *    found a malformed record with no triggerCondition that was topically
+ *    irrelevant to a question, yet still reached `resolveKnowledgeSet`
+ *    unconditionally, which correctly excluded it but ALSO set
+ *    `requiresHumanReview = true` — poisoning that question's disposition
+ *    to `HOLD` even with two other confidently-selected candidates ready to
+ *    answer it. The data-quality concern doesn't disappear; it's just no
+ *    longer conflated with whether THIS question can be answered) AND no
+ *    structurally-proven relevant parent. This is exactly the genuinely
+ *    ambiguous remainder — real judgment about THIS question's content, not
+ *    a blanket score threshold (which the architectural review explicitly
+ *    rejected: reranker scores are model- and query-relative, too fragile
+ *    as the sole signal).
  */
 
 import type { ChatMessage } from '@/lib/ai/chat-provider';
@@ -197,19 +207,7 @@ export async function applyDecisionRelevanceGate(
         reason: 'not an exception — already scope-matched by retrieval/applicability',
         potentiallyDecidingFacts: [],
       };
-    } else if (ev.trigger === null) {
-      // No triggerCondition at all — a malformed/incomplete extraction, not
-      // a relevance question. resolveKnowledgeSet already excludes this
-      // deterministically (`exception_without_trigger`) and raises
-      // `requiresHumanReview` for the data-quality issue; silently filtering
-      // it here as IRRELEVANT would suppress that signal instead of letting
-      // the existing, correct handling run.
-      relevance = {
-        verdict: 'RELEVANT',
-        reason: 'no trigger condition at all — resolution\'s exception_without_trigger handling applies',
-        potentiallyDecidingFacts: [],
-      };
-    } else if (ev.trigger.verdict !== 'UNKNOWN') {
+    } else if (ev.trigger !== null && ev.trigger.verdict !== 'UNKNOWN') {
       relevance = {
         verdict: 'RELEVANT',
         reason: `trigger already confidently ${ev.trigger.verdict} — resolution handles this deterministically`,
