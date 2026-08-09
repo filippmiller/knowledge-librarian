@@ -37,6 +37,12 @@ import {
   type ExtractKnowledgeUnitsOptions,
   type ExtractKnowledgeUnitsResult,
 } from '../src/lib/knowledge/knowledge-unit-extractor';
+import {
+  extractKnowledgeUnitsWithCompletenessAudit,
+  type FocusedRetryLog,
+} from '../src/lib/knowledge/audited-extraction';
+import type { BatchExtractionLog } from '../src/lib/knowledge/batch-extraction';
+import type { BlockCoverageAuditResult } from '../src/lib/knowledge/extraction-coverage-auditor';
 import { ChatCompletionError } from '../src/lib/ai/chat-provider';
 import {
   assignIdentity,
@@ -85,13 +91,14 @@ interface CliArgs {
   readonly extractionRuns: number;
   readonly outDir: string;
   readonly docPath: string;
+  readonly batchSize: number;
 }
 
 const USAGE =
-  'Usage: npx tsx scripts/run-aurora-fixture.ts --mode=e2e --extraction-runs=N --out=path/to/dir [--doc=path/to/source.docx]';
+  'Usage: npx tsx scripts/run-aurora-fixture.ts --mode=e2e --extraction-runs=N --out=path/to/dir [--doc=path/to/source.docx] [--batch-size=N]';
 
 function parseArgs(argv: readonly string[]): CliArgs {
-  const known = ['--mode=', '--extraction-runs=', '--out=', '--doc='];
+  const known = ['--mode=', '--extraction-runs=', '--out=', '--doc=', '--batch-size='];
   const unknown = argv.filter((a) => !known.some((k) => a.startsWith(k)));
   if (unknown.length > 0) {
     throw new Error(`Неизвестные аргументы: ${unknown.join(', ')}\n${USAGE}`);
@@ -101,6 +108,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
   const runsArg = argv.find((a) => a.startsWith('--extraction-runs='))?.slice('--extraction-runs='.length);
   const outArg = argv.find((a) => a.startsWith('--out='))?.slice('--out='.length);
   const docArg = argv.find((a) => a.startsWith('--doc='))?.slice('--doc='.length);
+  const batchSizeArg = argv.find((a) => a.startsWith('--batch-size='))?.slice('--batch-size='.length);
 
   if (!modeArg || !outArg) {
     throw new Error(`--mode и --out обязательны.\n${USAGE}`);
@@ -114,11 +122,21 @@ function parseArgs(argv: readonly string[]): CliArgs {
     throw new Error(`--extraction-runs обязан быть положительным целым, получено "${runsArg}".\n${USAGE}`);
   }
 
+  // Дефолт 4 -- достаточно мал, чтобы модель не "устала" на длинной генерации
+  // и не забыла хвост документа (реальный наблюдённый провал: whole-document
+  // вызов дал 28/10 правил, а в другом прогоне — 18/4), достаточно велик,
+  // чтобы группировать несколько соседних блоков в одном вызове.
+  const batchSize = batchSizeArg ? Number(batchSizeArg) : 4;
+  if (!Number.isInteger(batchSize) || batchSize < 1) {
+    throw new Error(`--batch-size обязан быть положительным целым, получено "${batchSizeArg}".\n${USAGE}`);
+  }
+
   return {
     mode: modeArg as Mode,
     extractionRuns,
     outDir: outArg,
     docPath: docArg ?? path.join(ORACLE_PACK_DIR, SOURCE_DOCX_FILENAME),
+    batchSize,
   };
 }
 
@@ -332,6 +350,9 @@ interface ExtractionRunOutcome {
   readonly sourceRuleIdByUnitId: ReadonlyMap<string, number | null>;
   readonly results: readonly EngineQuestionResult[];
   readonly extractionAttemptLog: readonly ExtractionAttemptLog[];
+  readonly batchLogs: readonly BatchExtractionLog[];
+  readonly auditResults: readonly BlockCoverageAuditResult[];
+  readonly focusedRetryLogs: readonly FocusedRetryLog[];
 }
 
 async function runOneExtractionRun(
@@ -354,14 +375,35 @@ async function runOneExtractionRun(
   );
 
   const extractionRunConfig = resolveExtractionRunConfig();
-  console.log('вызов LLM (extractKnowledgeUnits)...');
-  const { result: extraction, attemptLog } = await extractKnowledgeUnitsWithRetry(
-    { blocks: sourceBlocks, runConfig: extractionRunConfig, maxTokens: 16000 },
-    6
-  );
-  console.log(`extracted ${extraction.units.length} raw unit(s) after ${attemptLog.length} attempt(s)`);
+  const allAttemptLogs: ExtractionAttemptLog[] = [];
+  // Каждый batch проходит СВОЙ transport/schema retry (extractKnowledgeUnitsWithRetry,
+  // до 6 попыток) -- та же дисциплина, что раньше применялась ко всему
+  // документу одним вызовом, но теперь per-batch, поверх нового bounded-batch +
+  // completeness-audit пути (goal-shift continuation, 2026-08-09): один
+  // whole-document вызов молча забыл правила 5-10 на реальном прогоне, хотя
+  // JSON был схема-валиден и retry на это не сработал бы никогда.
+  const retryingExtractor = async (options: ExtractKnowledgeUnitsOptions): Promise<ExtractKnowledgeUnitsResult> => {
+    const { result, attemptLog } = await extractKnowledgeUnitsWithRetry(options, 6);
+    allAttemptLogs.push(...attemptLog);
+    return result;
+  };
 
-  const identity = assignIdentity(extraction.units, blocksByAnchor, canonical.sourceRevisionHash);
+  console.log(`вызов LLM (extractKnowledgeUnitsWithCompletenessAudit, batchSize=${args.batchSize})...`);
+  const audited = await extractKnowledgeUnitsWithCompletenessAudit(
+    sourceBlocks,
+    args.batchSize,
+    { runConfig: extractionRunConfig, maxTokens: 16000 },
+    extractionRunConfig,
+    { extractor: retryingExtractor }
+  );
+  const gapsFound = audited.auditResults.filter((a) => a.hasGap).length;
+  console.log(
+    `extracted ${audited.units.length} raw unit(s) across ${audited.batchLogs.length} batch(es), ` +
+      `${allAttemptLogs.length} extraction attempt(s), coverage audit: ${gapsFound}/${audited.auditResults.length} ` +
+      `block(s) flagged a gap, ${audited.focusedRetryLogs.length} focused retr${audited.focusedRetryLogs.length === 1 ? 'y' : 'ies'} run`
+  );
+
+  const identity = assignIdentity(audited.units, blocksByAnchor, canonical.sourceRevisionHash);
   console.log(`assignIdentity: ${identity.units.length} persisted, ${identity.ambiguousDuplicates.length} ambiguous`);
 
   if (identity.units.length === 0) {
@@ -426,7 +468,16 @@ async function runOneExtractionRun(
     results.push(result);
   }
 
-  return { runId, snapshot, sourceRuleIdByUnitId, results, extractionAttemptLog: attemptLog };
+  return {
+    runId,
+    snapshot,
+    sourceRuleIdByUnitId,
+    results,
+    extractionAttemptLog: allAttemptLogs,
+    batchLogs: audited.batchLogs,
+    auditResults: audited.auditResults,
+    focusedRetryLogs: audited.focusedRetryLogs,
+  };
 }
 
 // ────────────────────────────────── main ─────────────────────────────────────
@@ -497,6 +548,17 @@ async function main() {
     writeFileSync(
       path.join(runDir, 'extraction-attempt-log.json'),
       JSON.stringify(outcome.extractionAttemptLog, null, 2),
+      'utf8'
+    );
+    writeFileSync(path.join(runDir, 'batch-logs.json'), JSON.stringify(outcome.batchLogs, null, 2), 'utf8');
+    writeFileSync(
+      path.join(runDir, 'coverage-audit-results.json'),
+      JSON.stringify(outcome.auditResults, null, 2),
+      'utf8'
+    );
+    writeFileSync(
+      path.join(runDir, 'focused-retry-log.json'),
+      JSON.stringify(outcome.focusedRetryLogs, null, 2),
       'utf8'
     );
   }
