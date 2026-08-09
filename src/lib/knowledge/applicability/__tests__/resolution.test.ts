@@ -193,6 +193,41 @@ describe('§4.1 п.2 — последствия активации исключ�
     expect(decision.excluded).toEqual([]);
   });
 
+  it('Q01-M1 / Q05-M1 РЕАЛЬНЫЙ случай: условие неизвестно, а parentRuleRef ПУСТ (экстракция не связала исключение с родителем) — всё равно CLARIFY, не молчаливый ANSWER', () => {
+    // Живой прогон (goal-shift benchmark, 2026-08-09): реальная экстракция
+    // НЕ линкует это конкретное исключение (публичное место) ни к какому
+    // родителю — parentRuleRef приходит null, не "ссылка есть, но не в
+    // выдаче" (тот случай уже покрыт следующим тестом и остаётся ANSWER).
+    // Старая логика isDecisive требовала candidate.parentRuleRef !== null,
+    // поэтому неопределённость этого исключения тихо игнорировалась, и
+    // движок отвечал общим правилом, как будто исключения не существует —
+    // хотя оно РЕАЛЬНО могло изменить ответ (публично vs приватно).
+    //
+    // Отличие от следующего теста ("БЕЗ конкуренции") принципиально: там
+    // exception явно называет родителя, которого просто нет в текущей
+    // выдаче — известно, что спорить не с чем. Здесь родитель НЕИЗВЕСТЕН
+    // вовсе, и любое уверенно выбранное правило МОГЛО БЫ быть тем, что это
+    // исключение переопределяет — рисковать нельзя.
+    const decision = resolveKnowledgeSet(
+      [
+        candidate({ unitId: 'rule-1' }),
+        candidate({
+          unitId: 'rule-5',
+          kind: 'EXCEPTION_RULE',
+          scope: scopeOf('EXCEPTION_RULE'),
+          trigger: triggerIn(null),
+          parentRuleRef: null,
+        }),
+      ],
+      QUERY
+    );
+
+    expect(decision.disposition).toBe('CLARIFY');
+    expect(decision.clarificationNeeds.triggerFacts).toEqual(['privacyContext']);
+    expect(decision.selected).toEqual(['rule-1']);
+    expect(decision.undetermined).toEqual([{ unitId: 'rule-5', reason: 'exception_trigger_unknown' }]);
+  });
+
   it('неизвестное условие БЕЗ конкуренции не заставляет переспрашивать', () => {
     // §4.1 п.2: существование исключения не блокирует общее правило. Родителя
     // среди кандидатов нет — спорить не с чем, значит и уточнять нечего.
