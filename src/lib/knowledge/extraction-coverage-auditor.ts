@@ -12,7 +12,7 @@
  * bounded, focused re-extraction of just that block).
  */
 
-import type { ChatMessage } from '@/lib/ai/chat-provider';
+import type { ChatMessage, CompletionAttempt } from '@/lib/ai/chat-provider';
 import type { ExtractionRunConfig } from '@/lib/ai/extraction-run';
 import { structured } from '@/lib/ai/structured-output';
 import { z } from 'zod';
@@ -49,6 +49,10 @@ export interface BlockCoverageAuditResult {
    *  AMBIGUOUS alone does not set this — an unresolved ambiguity is not the
    *  same claim as a confirmed gap. */
   readonly hasGap: boolean;
+  /** Attempts made by the underlying `structured()` call — source for the
+   *  cost ledger (Task 37). Optional: hand-built test fixtures for the
+   *  `auditor` dependency (audited-extraction.ts) never made a real call. */
+  readonly attempts?: readonly CompletionAttempt[];
 }
 
 const SYSTEM_PROMPT = `Ты проверяешь ПОЛНОТУ извлечения структурированных единиц знания из ОДНОГО блока исходного текста.
@@ -127,5 +131,8 @@ export async function auditBlockCoverage(
     messages: buildCoverageAuditPromptMessages(options.blockText, options.extractedStatements),
     runConfig: options.runConfig,
   });
-  return interpretCoverageAuditResponse(options.blockAnchor, options.blockText, result.data.findings);
+  return {
+    ...interpretCoverageAuditResponse(options.blockAnchor, options.blockText, result.data.findings),
+    attempts: result.attempts,
+  };
 }

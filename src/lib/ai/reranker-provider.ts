@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { CompletionAttempt } from './chat-provider';
 import type { ModelInfo } from './embedding-provider';
 import { structured, type StructuredRunConfig } from './structured-output';
 
@@ -36,13 +37,22 @@ const rerankResponseSchema = z.strictObject({
  * просто ранжируется последним.
  */
 export class LlmRerankerProvider implements RerankerProvider {
+  /** Attempts from the most recent `rerank()` call — source for the cost
+   *  ledger (Task 37). Not on the `RerankerProvider` interface: it's an
+   *  observability detail of THIS implementation, not a contract other
+   *  providers (e.g. test doubles) need to honor. */
+  private pendingAttempts: CompletionAttempt[] = [];
+
   constructor(private readonly runConfig: StructuredRunConfig) {}
 
   async rerank(
     query: string,
     candidates: readonly RerankCandidate[]
   ): Promise<RankedCandidate[]> {
-    if (candidates.length === 0) return [];
+    if (candidates.length === 0) {
+      this.pendingAttempts = [];
+      return [];
+    }
 
     const candidateList = candidates
       .map((c) => `[${c.id}] ${c.text}`)
@@ -63,6 +73,7 @@ export class LlmRerankerProvider implements RerankerProvider {
       ],
       runConfig: this.runConfig,
     });
+    this.pendingAttempts = result.attempts;
 
     const scoreById = new Map(result.data.scores.map((s) => [s.id, s.score]));
     return candidates
@@ -72,5 +83,12 @@ export class LlmRerankerProvider implements RerankerProvider {
 
   modelInfo(): ModelInfo {
     return { provider: this.runConfig.provider, model: this.runConfig.model };
+  }
+
+  /** Returns and clears attempts from the most recent `rerank()` call. */
+  drainAttempts(): readonly CompletionAttempt[] {
+    const attempts = this.pendingAttempts;
+    this.pendingAttempts = [];
+    return attempts;
   }
 }

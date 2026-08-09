@@ -1,10 +1,20 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const openaiCreate = vi.hoisted(() => vi.fn());
+
+vi.mock('@/lib/openai', () => ({
+  openai: { chat: { completions: { create: openaiCreate } } },
+  CHAT_MODEL: 'gpt-4o',
+}));
+
 import {
+  auditBlockCoverage,
   buildCoverageAuditPromptMessages,
   coverageAuditResponseSchema,
   interpretCoverageAuditResponse,
   type RawCoverageFinding,
 } from '../extraction-coverage-auditor';
+import type { ExtractionRunConfig } from '@/lib/ai/extraction-run';
 
 /**
  * Goal-shift continuation (2026-08-09): a general, oracle-blind completeness
@@ -120,5 +130,58 @@ describe('coverageAuditResponseSchema — explanation ключ ПРОПУЩЕН 
     });
     expect(parsed.success).toBe(true);
     if (parsed.success) expect(parsed.data.findings[0].explanation).toBe('условие не извлечено');
+  });
+});
+
+describe('auditBlockCoverage — реальный сетевой путь несёт attempts (Task 37, cost ledger)', () => {
+  function runConfig(): ExtractionRunConfig {
+    return {
+      provider: 'anthropic',
+      model: 'claude-test-primary',
+      promptVersion: 'test-prompt-v1',
+      fallbackPolicy: 'NONE',
+      extractionSchemaVersion: 'test-v1',
+    };
+  }
+
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test-anthropic-key');
+    vi.stubEnv('OPENAI_API_KEY', 'test-openai-key');
+    vi.stubEnv('AI_PROVIDER', 'anthropic');
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    openaiCreate.mockReset();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('результат несёт attempts с реальным usage — иначе cost ledger не может посчитать стоимость этого вызова', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          content: [{ type: 'text', text: JSON.stringify({ findings: [{ verdict: 'COVERED', quote: '' }] }) }],
+          usage: { input_tokens: 321, output_tokens: 12 },
+        }),
+        { status: 200 }
+      )
+    );
+
+    const result = await auditBlockCoverage({
+      blockAnchor: 'b1',
+      blockText: 'Текст блока.',
+      extractedStatements: [],
+      runConfig: runConfig(),
+    });
+
+    expect(result.attempts).toHaveLength(1);
+    expect(result.attempts?.[0].usage).toEqual({ inputTokens: 321, outputTokens: 12 });
   });
 });

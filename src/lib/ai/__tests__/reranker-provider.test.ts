@@ -20,8 +20,11 @@ function runConfig(overrides: Partial<StructuredRunConfig> = {}): StructuredRunC
   };
 }
 
-function anthropicOk(text: string): Response {
-  return new Response(JSON.stringify({ content: [{ type: 'text', text }] }), { status: 200 });
+function anthropicOk(
+  text: string,
+  usage: { input_tokens: number; output_tokens: number } = { input_tokens: 10, output_tokens: 5 }
+): Response {
+  return new Response(JSON.stringify({ content: [{ type: 'text', text }], usage }), { status: 200 });
 }
 
 let fetchMock: ReturnType<typeof vi.fn>;
@@ -93,5 +96,31 @@ describe('LlmRerankerProvider', () => {
   it('modelInfo() отдаёт provider/model из runConfig — для воспроизводимости артефакта', () => {
     const reranker = new LlmRerankerProvider(runConfig({ model: 'claude-specific' }));
     expect(reranker.modelInfo()).toEqual({ provider: 'anthropic', model: 'claude-specific' });
+  });
+
+  describe('drainAttempts() — источник для cost ledger (Task 37)', () => {
+    it('после rerank() несёт attempts с реальным usage, и очищается после чтения', async () => {
+      fetchMock.mockResolvedValue(
+        anthropicOk(JSON.stringify({ scores: [{ id: 'a', score: 0.5 }] }), {
+          input_tokens: 77,
+          output_tokens: 33,
+        })
+      );
+
+      const reranker = new LlmRerankerProvider(runConfig());
+      await reranker.rerank('вопрос', [{ id: 'a', text: 'кандидат A' }]);
+
+      const attempts = reranker.drainAttempts();
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0].usage).toEqual({ inputTokens: 77, outputTokens: 33 });
+
+      expect(reranker.drainAttempts()).toEqual([]);
+    });
+
+    it('пустой список кандидатов -> drainAttempts() пуст, LLM не звался', async () => {
+      const reranker = new LlmRerankerProvider(runConfig());
+      await reranker.rerank('вопрос', []);
+      expect(reranker.drainAttempts()).toEqual([]);
+    });
   });
 });

@@ -48,6 +48,7 @@ import {
   type BlockCoverageAuditResult,
 } from '../src/lib/knowledge/extraction-coverage-auditor';
 import { ChatCompletionError } from '../src/lib/ai/chat-provider';
+import { CostLedger } from '../src/lib/ai/cost-ledger';
 import {
   assignIdentity,
   type PersistedKnowledgeUnit,
@@ -85,6 +86,26 @@ import { loadNegativeCaseOracle } from '../src/lib/eval/negative-case-oracle';
 import { loadSourceRulesFromDocx, type SourceRule } from '../src/lib/eval/source-rule-segmentation';
 import { resolveSourceRuleId } from '../src/lib/eval/source-rule-mapping';
 import { buildOracleTaintDetector, OracleTaintError, type OracleTaintDetector } from '../src/lib/eval/oracle-taint';
+
+/**
+ * Purposes this ledger deliberately does NOT cover yet (Task 37, 2026-08-09).
+ * Both are real spend, excluded here for a concrete reason, not an oversight
+ * — listed explicitly so `ledger.totalUsd()` is never mistaken for the whole
+ * run's cost. Single source of truth for the disclaimer printed to console
+ * AND written into run-summary.json.
+ */
+const UNMETERED_PURPOSES: readonly { purpose: string; reason: string }[] = [
+  {
+    purpose: 'decision-relevance',
+    reason:
+      'LLM classifier fires only per uncertain EXCEPTION_RULE candidate (applyDecisionRelevanceGate); wiring it needs changing DecisionRelevanceClassifier\'s return shape, which ~10 test doubles construct directly — deferred pending real evidence this purpose is cost-significant',
+  },
+  {
+    purpose: 'embeddings',
+    reason:
+      'OpenAIEmbeddingProvider calls generateEmbeddings() (@/lib/openai) directly, not through chat-provider.ts — different token-accounting shape, and at $0.02/1M tokens the smallest cost driver by far',
+  },
+];
 
 // ─────────────────────────────────── CLI ────────────────────────────────────
 
@@ -190,6 +211,7 @@ interface EngineContext {
   readonly answerGenerator: AnswerGenerator;
   readonly decisionRelevanceRunConfig: ReturnType<typeof resolveExtractionRunConfig>;
   readonly taintDetector: OracleTaintDetector;
+  readonly ledger: CostLedger;
 }
 
 interface ExtractionAttemptLog {
@@ -357,7 +379,8 @@ const answerSchema = z.strictObject({
 });
 
 function buildRealAnswerGenerator(
-  runConfig: ReturnType<typeof resolveExtractionRunConfig>
+  runConfig: ReturnType<typeof resolveExtractionRunConfig>,
+  ledger: CostLedger
 ): AnswerGenerator {
   return async (prompt) => {
     const evidenceText = prompt.evidence
@@ -377,6 +400,7 @@ function buildRealAnswerGenerator(
       ],
       runConfig,
     });
+    ledger.record('synthesis', result.attempts);
     return { text: result.data.text, citedUnitIds: result.data.citedUnitIds };
   };
 }
@@ -397,15 +421,17 @@ async function runEngineOnQuestion(
     const message: ConversationMessage = { id: `${input.caseId}-q`, role: 'user', text: input.question };
     ctx.taintDetector.assertClean([message], `engine input (QueryFrame messages, ${input.caseId})`);
 
-    const { queryFrame } = await extractQueryFrame({
+    const { queryFrame, structuredResult: queryFrameResult } = await extractQueryFrame({
       messages: [message],
       runConfig: ctx.queryFrameRunConfig,
     });
+    ctx.ledger.record('query-frame', queryFrameResult.attempts);
 
     const retrieval = await retrieveUnits(input.question, ctx.embeddedCandidates, {
       embeddingProvider: ctx.embeddingProvider,
       rerankerProvider: ctx.rerankerProvider,
     });
+    ctx.ledger.record('reranker', ctx.rerankerProvider.drainAttempts());
 
     const candidateUnits = retrieval.topK
       .map((id) => ctx.unitsById.get(id))
@@ -539,7 +565,8 @@ async function runOneExtractionRun(
   args: CliArgs,
   questions: readonly EngineQuestionInput[],
   sourceRules: readonly SourceRule[],
-  taintDetector: OracleTaintDetector
+  taintDetector: OracleTaintDetector,
+  ledger: CostLedger
 ): Promise<ExtractionRunOutcome> {
   const runId = `run-${runIndex}-${new Date().toISOString().replace(/[:.]/g, '-')}`;
   console.log(`\n=== EXTRACTION RUN ${runIndex} (${runId}) ===`);
@@ -564,6 +591,7 @@ async function runOneExtractionRun(
   const retryingExtractor = async (options: ExtractKnowledgeUnitsOptions): Promise<ExtractKnowledgeUnitsResult> => {
     const { result, attemptLog } = await extractKnowledgeUnitsWithRetry(options, 6);
     allAttemptLogs.push(...attemptLog);
+    ledger.record('extraction', result.structuredResult.attempts);
     return result;
   };
   // Same bounded transport/schema retry as extraction itself — a real run
@@ -573,6 +601,7 @@ async function runOneExtractionRun(
   const retryingAuditor = async (options: AuditBlockCoverageOptions): Promise<BlockCoverageAuditResult> => {
     const { result, attemptLog } = await withStructuredRetry(() => auditBlockCoverage(options), 6, 'coverage audit');
     allAttemptLogs.push(...attemptLog);
+    ledger.record('coverage-audit', result.attempts ?? []);
     return result;
   };
 
@@ -649,7 +678,8 @@ async function runOneExtractionRun(
   );
   const queryFrameRunConfig = resolveExtractionRunConfig({ promptVersion: 'aurora-fixture-query-frame-v1' });
   const answerGenerator = buildRealAnswerGenerator(
-    resolveExtractionRunConfig({ promptVersion: 'aurora-fixture-synthesis-v1' })
+    resolveExtractionRunConfig({ promptVersion: 'aurora-fixture-synthesis-v1' }),
+    ledger
   );
   const decisionRelevanceRunConfig = resolveExtractionRunConfig({
     promptVersion: 'aurora-fixture-decision-relevance-v1',
@@ -666,6 +696,7 @@ async function runOneExtractionRun(
     answerGenerator,
     decisionRelevanceRunConfig,
     taintDetector,
+    ledger,
   };
 
   const results: EngineQuestionResult[] = [];
@@ -722,11 +753,12 @@ async function runOneExtractionRunWithTaintRetry(
   args: CliArgs,
   questions: readonly EngineQuestionInput[],
   sourceRules: readonly SourceRule[],
-  taintDetector: OracleTaintDetector
+  taintDetector: OracleTaintDetector,
+  ledger: CostLedger
 ): Promise<ExtractionRunOutcome> {
   for (let attempt = 1; attempt <= MAX_TAINT_RETRY_ATTEMPTS; attempt++) {
     try {
-      return await runOneExtractionRun(runIndex, args, questions, sourceRules, taintDetector);
+      return await runOneExtractionRun(runIndex, args, questions, sourceRules, taintDetector, ledger);
     } catch (err) {
       if (!(err instanceof OracleTaintError) || attempt === MAX_TAINT_RETRY_ATTEMPTS) throw err;
       console.warn(
@@ -784,9 +816,10 @@ async function main() {
 
   mkdirSync(args.outDir, { recursive: true });
 
+  const ledger = new CostLedger();
   const runs: ExtractionRunOutcome[] = [];
   for (let i = 1; i <= args.extractionRuns; i++) {
-    const outcome = await runOneExtractionRunWithTaintRetry(i, args, questions, sourceRules, taintDetector);
+    const outcome = await runOneExtractionRunWithTaintRetry(i, args, questions, sourceRules, taintDetector, ledger);
     runs.push(outcome);
 
     const runDir = path.join(args.outDir, outcome.runId);
@@ -838,11 +871,34 @@ async function main() {
           HOLD: r.results.filter((x) => x.actualDisposition === 'HOLD').length,
           ERROR: r.results.filter((x) => x.actualDisposition === 'ERROR').length,
         })),
+        cost: {
+          totalUsd: ledger.totalUsd(),
+          totalAttemptCount: ledger.totalAttemptCount(),
+          byPurpose: ledger.summaryByPurpose(),
+          // Честно, а не молчаливым занижением: reranker и extraction/audit/
+          // query-frame/synthesis метрятся, но decision-relevance (LLM-путь
+          // для неопределённых EXCEPTION_RULE-кандидатов) и embeddings — ЕЩЁ
+          // нет (см. UNMETERED_PURPOSES). totalUsd — нижняя граница, не полная
+          // стоимость прогона, пока эти два пути не подключены.
+          unmeteredPurposes: UNMETERED_PURPOSES,
+        },
       },
       null,
       2
     ),
     'utf8'
+  );
+
+  console.log('\n=== COST (Task 37 — нижняя граница, см. unmeteredPurposes ниже) ===');
+  for (const s of ledger.summaryByPurpose()) {
+    console.log(
+      `  ${s.purpose}: ${s.callCount} call(s), ${s.attemptCount} attempt(s), $${s.totalUsd.toFixed(4)}` +
+        (s.unpricedAttemptCount > 0 ? ` (${s.unpricedAttemptCount} attempt(s) unpriced — model has no entry in MODEL_PRICING)` : '')
+    );
+  }
+  console.log(`  TOTAL (metered): $${ledger.totalUsd().toFixed(4)} across ${ledger.totalAttemptCount()} attempt(s)`);
+  console.log(
+    `  NOT YET METERED: ${UNMETERED_PURPOSES.map((p) => `${p.purpose} (${p.reason})`).join('; ')} — real spend is higher than the total above.`
   );
 
   console.log(`\nАртефакты записаны в: ${args.outDir}`);
