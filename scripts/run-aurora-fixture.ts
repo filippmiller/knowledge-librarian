@@ -219,6 +219,14 @@ interface EngineQuestionResult {
    *  ever reaching resolution, and why. `null` only if the pipeline never
    *  reached retrieval (a real engine error before that point). */
   readonly decisionRelevanceTrace: readonly GatedCandidate[] | null;
+  /** unitId исключений, снятых ИСКЛЮЧИТЕЛЬНО вердиктом LLM-классификатора
+   *  (`DecisionRelevanceGateResult.droppedByClassifier`, W1-D). Персистится
+   *  отдельным полем, а не выводится из `decisionRelevanceTrace`: по трейсу
+   *  видно, что вердикт был IRRELEVANT, но не видно, был ли он ЕДИНСТВЕННЫМ
+   *  основанием снятия — а именно это поле и существует ради подсчёта по
+   *  СОХРАНЁННЫМ прогонам, без повторного платного запуска. Не записать его
+   *  здесь значило бы оставить ту гарантию наблюдаемой только в рантайме. */
+  readonly decisionRelevanceDroppedByClassifier: readonly string[] | null;
 }
 
 interface EngineContext {
@@ -663,6 +671,7 @@ async function runEngineOnQuestion(
         errorMessage: null,
         errorRetryable: false,
         decisionRelevanceTrace: decisionRelevance.trace,
+        decisionRelevanceDroppedByClassifier: decisionRelevance.droppedByClassifier,
       };
     }
 
@@ -693,6 +702,7 @@ async function runEngineOnQuestion(
       errorMessage: null,
       errorRetryable: false,
       decisionRelevanceTrace: decisionRelevance.trace,
+      decisionRelevanceDroppedByClassifier: decisionRelevance.droppedByClassifier,
     };
   } catch (err) {
     // A cost-budget trip must never be absorbed into a per-question ERROR
@@ -718,6 +728,7 @@ async function runEngineOnQuestion(
       errorMessage: err instanceof Error ? err.message : String(err),
       errorRetryable: classifyStructuredError(err) !== 'OTHER_ERROR',
       decisionRelevanceTrace: null,
+      decisionRelevanceDroppedByClassifier: null,
     };
   }
 }
