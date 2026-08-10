@@ -142,7 +142,13 @@ const USAGE =
   'Usage: npx tsx scripts/run-aurora-fixture.ts --mode=e2e --extraction-runs=N --out=path/to/dir --max-cost-usd=N [--doc=path/to/source.docx] [--batch-size=N]';
 
 function parseArgs(argv: readonly string[]): CliArgs {
-  const known = [
+  // Опции со значением проверяются по префиксу, голые флаги — ТОЧНЫМ
+  // совпадением. Раньше `--fresh-extraction` был в общем списке префиксов, и
+  // `--fresh-extraction=false` проходил проверку «неизвестных аргументов», но
+  // не совпадал с флагом — то есть молча игнорировался и запускал ПЛАТНЫЙ
+  // свежий прогон. Подтверждено живьём (кросс-аудит 2026-08-10): вызов дошёл
+  // до реального обращения к API.
+  const knownOptions = [
     '--mode=',
     '--extraction-runs=',
     '--out=',
@@ -150,9 +156,11 @@ function parseArgs(argv: readonly string[]): CliArgs {
     '--batch-size=',
     '--max-cost-usd=',
     '--reuse-extraction=',
-    '--fresh-extraction',
   ];
-  const unknown = argv.filter((a) => !known.some((k) => a.startsWith(k)));
+  const knownFlags = ['--fresh-extraction'];
+  const unknown = argv.filter(
+    (a) => !knownOptions.some((k) => a.startsWith(k)) && !knownFlags.includes(a)
+  );
   if (unknown.length > 0) {
     throw new Error(`Неизвестные аргументы: ${unknown.join(', ')}\n${USAGE}`);
   }
@@ -1060,6 +1068,18 @@ async function runOneExtractionRun(
     focusedRetryLogs: audited.focusedRetryLogs,
   });
 
+  // ЧЕКПОЙНТ: пишем артефакт ДО первого вопроса (кросс-аудит 2026-08-10).
+  // Раньше он писался только после возврата из этой функции, то есть падение
+  // на фазе вопросов — исчерпанный бюджет, taint, ошибка движка — теряло уже
+  // оплаченное извлечение целиком. Именно это и воспроизводило ту трату,
+  // ради устранения которой делался --reuse-extraction: последние прогоны
+  // падали как раз на вопросах.
+  const runDir = path.join(args.outDir, runId);
+  mkdirSync(runDir, { recursive: true });
+  const artifactPath = path.join(runDir, 'extraction-artifact.json');
+  writeExtractionArtifact(artifactPath, artifact);
+  console.log(`  артефакт извлечения сохранён ДО вопросов: ${artifactPath} (для --reuse-extraction)`);
+
   const results = await runQuestionsAgainstSnapshot(runId, snapshot, embeddedCandidates, unitsById, {
     args,
     questions,
@@ -1358,14 +1378,9 @@ async function main() {
         JSON.stringify(outcome.focusedRetryLogs, null, 2),
         'utf8'
       );
-      // Свежее извлечение — сохраняем артефакт, иначе переиспользовать нечего.
-      // В режиме --reuse-extraction он null: прогон ничего не извлекал, и
-      // перезапись существующего артефакта его же копией только запутала бы.
-      if (outcome.artifact) {
-        const artifactPath = path.join(runDir, 'extraction-artifact.json');
-        writeExtractionArtifact(artifactPath, outcome.artifact);
-        console.log(`  артефакт извлечения: ${artifactPath} (для --reuse-extraction)`);
-      }
+      // Артефакт извлечения здесь НЕ пишется: `runOneExtractionRun` сохраняет
+      // его чекпойнтом сразу после извлечения, до вопросов — иначе падение на
+      // вопросах теряло бы оплаченное извлечение (кросс-аудит 2026-08-10).
     }
   } catch (err) {
     // Caught here (not left to main().catch()) so run-summary.json and the

@@ -41,15 +41,42 @@ export const MODEL_PRICING: Readonly<Record<string, ModelPricing>> = {
   'text-embedding-3-small': { inputPerMillion: 0.02, outputPerMillion: 0 },
 };
 
+/**
+ * Множители Anthropic к базовой ЦЕНЕ ВХОДА для prompt caching: запись в кэш
+ * дороже обычного входа, чтение — заметно дешевле (5-минутный TTL, тот, что
+ * ставит chat-provider.ts). Источник — официальная документация по
+ * prompt caching, сверено 2026-08-10.
+ */
+const CACHE_WRITE_MULTIPLIER = 1.25;
+const CACHE_READ_MULTIPLIER = 0.1;
+
 /** `null` for an unpriced model — never fabricate a 0, which would read as
- *  "this call was free" rather than "we don't have a price for this yet." */
+ *  "this call was free" rather than "we don't have a price for this yet."
+ *
+ *  Кэш-токены тарифицируются ОТДЕЛЬНО и обязаны учитываться: у Anthropic
+ *  `input_tokens` — это только НЕкэшированный остаток промпта, а не весь вход
+ *  (полный вход = inputTokens + cacheCreation + cacheRead). Без этих двух
+ *  слагаемых и отчёт, и потолок `maxTotalUsd` занижали бы расход ровно в тот
+ *  момент, когда кэширование заработало — то есть отказывали бы ОТКРЫТО,
+ *  как раз тот класс дыры, что закрывался в Task 38 (кросс-аудит 2026-08-10). */
 export function estimateCostUsd(
   model: string,
-  usage: { readonly inputTokens: number; readonly outputTokens: number }
+  usage: {
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+    readonly cacheCreationInputTokens?: number;
+    readonly cacheReadInputTokens?: number;
+  }
 ): number | null {
   const pricing = MODEL_PRICING[model];
   if (!pricing) return null;
-  return (usage.inputTokens / 1_000_000) * pricing.inputPerMillion + (usage.outputTokens / 1_000_000) * pricing.outputPerMillion;
+  const perInputToken = pricing.inputPerMillion / 1_000_000;
+  return (
+    usage.inputTokens * perInputToken +
+    (usage.cacheCreationInputTokens ?? 0) * perInputToken * CACHE_WRITE_MULTIPLIER +
+    (usage.cacheReadInputTokens ?? 0) * perInputToken * CACHE_READ_MULTIPLIER +
+    (usage.outputTokens / 1_000_000) * pricing.outputPerMillion
+  );
 }
 
 export interface AttemptCostSummary {

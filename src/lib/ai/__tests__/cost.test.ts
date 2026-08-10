@@ -25,6 +25,24 @@ describe('estimateCostUsd', () => {
     expect(cost).toBeCloseTo(500 / 1_000_000 * 2.0 + 200 / 1_000_000 * 10.0, 10);
   });
 
+  // Кросс-аудит 2026-08-10: у Anthropic `input_tokens` — только НЕкэшированный
+  // остаток промпта. Считая один его, ledger занижал расход ровно тогда, когда
+  // кэш заработал, и жёсткий потолок снова отказывал бы открыто.
+  it('кэш-запись тарифицируется дороже обычного входа (1.25x), кэш-чтение дешевле (0.1x)', () => {
+    const cost = estimateCostUsd('claude-sonnet-5', {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationInputTokens: 1_000_000,
+      cacheReadInputTokens: 1_000_000,
+    });
+    // $2/1M за вход => запись 2*1.25 = 2.5, чтение 2*0.1 = 0.2
+    expect(cost).toBeCloseTo(2.5 + 0.2, 5);
+  });
+
+  it('без кэш-полей считает как раньше — обратная совместимость', () => {
+    expect(estimateCostUsd('claude-sonnet-5', { inputTokens: 1_000_000, outputTokens: 0 })).toBeCloseTo(2.0, 5);
+  });
+
   it('неизвестная модель -> null, а не 0 или исключение (0 выглядел бы как бесплатный вызов)', () => {
     expect(estimateCostUsd('some-model-nobody-priced-yet', { inputTokens: 100, outputTokens: 50 })).toBeNull();
   });
