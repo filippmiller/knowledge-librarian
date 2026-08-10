@@ -83,6 +83,17 @@ import type { RequestContext } from '../src/lib/knowledge/applicability/eligibil
 
 import { buildEvaluationSnapshot, type EvaluationKnowledgeSnapshot } from '../src/lib/eval/evaluation-snapshot';
 import { resolveAnswerDisposition, type EngineAnswerDisposition } from '../src/lib/eval/answer-disposition';
+import {
+  buildExtractionArtifact,
+  computePipelineProbes,
+  readExtractionArtifact,
+  restoreEmbeddedCandidates,
+  writeExtractionArtifact,
+  EXTRACTION_ARTIFACT_VERSION,
+  type ExtractionArtifact,
+  type ExtractionAttemptLog,
+  type ExtractionFingerprint,
+} from '../src/lib/eval/extraction-artifact';
 import { loadSemanticRuleOracle, ORACLE_PACK_DIR, SOURCE_DOCX_FILENAME } from '../src/lib/eval/semantic-rule-oracle';
 import { loadNegativeCaseOracle } from '../src/lib/eval/negative-case-oracle';
 import { loadSourceRulesFromDocx, type SourceRule } from '../src/lib/eval/source-rule-segmentation';
@@ -121,13 +132,26 @@ interface CliArgs {
   readonly docPath: string;
   readonly batchSize: number;
   readonly maxCostUsd: number;
+  /** Путь к сохранённому артефакту извлечения. Задан — фаза извлечения не
+   *  делает НИ ОДНОГО платного вызова (см. `--reuse-extraction` ниже);
+   *  `undefined` — сегодняшнее поведение, свежее извлечение. */
+  readonly reuseExtraction?: string;
 }
 
 const USAGE =
   'Usage: npx tsx scripts/run-aurora-fixture.ts --mode=e2e --extraction-runs=N --out=path/to/dir --max-cost-usd=N [--doc=path/to/source.docx] [--batch-size=N]';
 
 function parseArgs(argv: readonly string[]): CliArgs {
-  const known = ['--mode=', '--extraction-runs=', '--out=', '--doc=', '--batch-size=', '--max-cost-usd='];
+  const known = [
+    '--mode=',
+    '--extraction-runs=',
+    '--out=',
+    '--doc=',
+    '--batch-size=',
+    '--max-cost-usd=',
+    '--reuse-extraction=',
+    '--fresh-extraction',
+  ];
   const unknown = argv.filter((a) => !known.some((k) => a.startsWith(k)));
   if (unknown.length > 0) {
     throw new Error(`Неизвестные аргументы: ${unknown.join(', ')}\n${USAGE}`);
@@ -139,6 +163,17 @@ function parseArgs(argv: readonly string[]): CliArgs {
   const docArg = argv.find((a) => a.startsWith('--doc='))?.slice('--doc='.length);
   const batchSizeArg = argv.find((a) => a.startsWith('--batch-size='))?.slice('--batch-size='.length);
   const maxCostUsdArg = argv.find((a) => a.startsWith('--max-cost-usd='))?.slice('--max-cost-usd='.length);
+  const reuseArg = argv.find((a) => a.startsWith('--reuse-extraction='))?.slice('--reuse-extraction='.length);
+  const freshFlag = argv.includes('--fresh-extraction');
+
+  // Взаимоисключающие по смыслу — молча предпочесть один другому значило бы
+  // сделать не то, что просили, на платном прогоне.
+  if (reuseArg && freshFlag) {
+    throw new Error(`--reuse-extraction и --fresh-extraction взаимоисключающи.\n${USAGE}`);
+  }
+  if (reuseArg !== undefined && reuseArg.length === 0) {
+    throw new Error(`--reuse-extraction требует путь к артефакту.\n${USAGE}`);
+  }
 
   if (!modeArg || !outArg) {
     throw new Error(`--mode и --out обязательны.\n${USAGE}`);
@@ -181,6 +216,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
     docPath: docArg ?? path.join(ORACLE_PACK_DIR, SOURCE_DOCX_FILENAME),
     batchSize,
     maxCostUsd,
+    ...(reuseArg !== undefined && { reuseExtraction: reuseArg }),
   };
 }
 
@@ -242,12 +278,6 @@ interface EngineContext {
   readonly taintDetector: OracleTaintDetector;
   readonly ledger: CostLedger;
   readonly traceLog: CallTraceLog;
-}
-
-interface ExtractionAttemptLog {
-  readonly attempt: number;
-  readonly outcome: 'SUCCESS' | 'SCHEMA_MISMATCH' | 'TRUNCATED_JSON' | 'NETWORK_ERROR' | 'OTHER_ERROR';
-  readonly message: string | null;
 }
 
 /**
@@ -774,6 +804,74 @@ interface ExtractionRunOutcome {
   readonly batchLogs: readonly BatchExtractionLog[];
   readonly auditResults: readonly BlockCoverageAuditResult[];
   readonly focusedRetryLogs: readonly FocusedRetryLog[];
+  /** Артефакт извлечения. `null` в режиме `--reuse-extraction` — прогон
+   *  ничего нового не извлекал, перезаписывать нечем и незачем. */
+  readonly artifact: ExtractionArtifact | null;
+}
+
+/** Максимум выходных токенов на один вызов извлечения. Участвует в отпечатке
+ *  артефакта: тот же промпт с другим потолком может дать другой набор units
+ *  (обрезанный ответ), значит кэш от него — про другой прогон. */
+const EXTRACTION_MAX_TOKENS = 16000;
+
+/**
+ * Цикл вопросов — ОБЩИЙ для свежего извлечения и для переиспользования
+ * артефакта. Вынесен именно ради этого: движок обязан видеть ровно один и тот
+ * же путь в обоих режимах, иначе `--reuse-extraction` мерил бы не то, что
+ * меряет обычный прогон, и сравнивать их было бы нельзя.
+ */
+async function runQuestionsAgainstSnapshot(
+  runId: string,
+  snapshot: EvaluationKnowledgeSnapshot,
+  embeddedCandidates: readonly EmbeddedCandidate[],
+  unitsById: ReadonlyMap<string, PersistedKnowledgeUnit>,
+  deps: ExtractionRunDeps
+): Promise<EngineQuestionResult[]> {
+  const reviewedAt = new Date().toISOString();
+  const rerankerProvider = new LlmRerankerProvider(
+    resolveExtractionRunConfig({ promptVersion: 'aurora-fixture-reranker-v1' })
+  );
+  const ctx: EngineContext = {
+    embeddedCandidates,
+    unitsById,
+    embeddingProvider: deps.embeddingProvider,
+    rerankerProvider,
+    requestContext: { audience: 'internal', now: reviewedAt },
+    reviewedAt,
+    queryFrameRunConfig: resolveExtractionRunConfig({ promptVersion: 'aurora-fixture-query-frame-v1' }),
+    answerGenerator: buildRealAnswerGenerator(
+      resolveExtractionRunConfig({ promptVersion: 'aurora-fixture-synthesis-v1' }),
+      deps.ledger,
+      deps.traceLog
+    ),
+    decisionRelevanceRunConfig: resolveExtractionRunConfig({
+      promptVersion: 'aurora-fixture-decision-relevance-v1',
+    }),
+    taintDetector: deps.taintDetector,
+    ledger: deps.ledger,
+    traceLog: deps.traceLog,
+  };
+
+  const results: EngineQuestionResult[] = [];
+  for (const question of deps.questions) {
+    console.log(`  [${runId}] ${question.caseId}: "${question.question.slice(0, 60)}..."`);
+    const result = await runEngineOnQuestionWithRetry(question, ctx);
+    console.log(`    -> ${result.actualDisposition}${result.errorMessage ? ` (${result.errorMessage})` : ''}`);
+    results.push(result);
+  }
+  return results;
+}
+
+/** Контекст, общий для обеих веток извлечения (свежей и переиспользующей). */
+interface ExtractionRunDeps {
+  readonly args: CliArgs;
+  readonly questions: readonly EngineQuestionInput[];
+  readonly sourceRules: readonly SourceRule[];
+  readonly taintDetector: OracleTaintDetector;
+  readonly ledger: CostLedger;
+  readonly traceLog: CallTraceLog;
+  readonly embeddingProvider: OpenAIEmbeddingProvider;
+  readonly embeddingModel: ReturnType<OpenAIEmbeddingProvider['modelInfo']>;
 }
 
 async function runOneExtractionRun(
@@ -829,11 +927,58 @@ async function runOneExtractionRun(
     return result;
   };
 
+  const embeddingProvider = new OpenAIEmbeddingProvider();
+  const embeddingModel = embeddingProvider.modelInfo();
+  // Считается ДО любого платного вызова: в режиме переиспользования именно он
+  // решает, законен ли артефакт, и если нет — прогон обязан упасть, не потратив
+  // ни цента. Пять `computePipelineProbes()` — это не строковые версии, а хеши
+  // РЕАЛЬНОГО поведения (промпт аудита, политика ремонта, алгоритм
+  // идентичности, состав retrievalText): их нельзя забыть обновить при правке
+  // кода, потому что их никто не пишет руками.
+  const probes = computePipelineProbes();
+  const fingerprint: ExtractionFingerprint = {
+    artifactVersion: EXTRACTION_ARTIFACT_VERSION,
+    sourceRevisionHash: canonical.sourceRevisionHash,
+    canonicalTextHash: canonical.canonicalTextHash,
+    parserVersion: canonical.parserVersion,
+    blockCount: canonical.blocks.length,
+    extractionProvider: extractionRunConfig.provider,
+    extractionModel: extractionRunConfig.model,
+    extractionPromptVersion: extractionRunConfig.promptVersion,
+    extractionSchemaVersion: extractionRunConfig.extractionSchemaVersion,
+    extractionMaxTokens: EXTRACTION_MAX_TOKENS,
+    extractionBatchSize: args.batchSize,
+    auditProvider: extractionRunConfig.provider,
+    auditModel: extractionRunConfig.model,
+    auditPromptVersion: extractionRunConfig.promptVersion,
+    auditPromptFingerprint: probes.auditPromptFingerprint,
+    auditPolicyFingerprint: probes.auditPolicyFingerprint,
+    focusedRepairPolicyFingerprint: probes.focusedRepairPolicyFingerprint,
+    identityAlgorithmFingerprint: probes.identityAlgorithmFingerprint,
+    retrievalTextFingerprint: probes.retrievalTextFingerprint,
+    embeddingProvider: embeddingModel.provider,
+    embeddingModel: embeddingModel.model,
+    embeddingDimensions: embeddingModel.dimensions ?? 0,
+  };
+
+  if (args.reuseExtraction) {
+    return reuseExtractionRun(runIndex, runId, args.reuseExtraction, fingerprint, {
+      args,
+      questions,
+      sourceRules,
+      taintDetector,
+      ledger,
+      traceLog,
+      embeddingProvider,
+      embeddingModel,
+    });
+  }
+
   console.log(`вызов LLM (extractKnowledgeUnitsWithCompletenessAudit, batchSize=${args.batchSize})...`);
   const audited = await extractKnowledgeUnitsWithCompletenessAudit(
     sourceBlocks,
     args.batchSize,
-    { runConfig: extractionRunConfig, maxTokens: 16000 },
+    { runConfig: extractionRunConfig, maxTokens: EXTRACTION_MAX_TOKENS },
     extractionRunConfig,
     { extractor: retryingExtractor, auditor: retryingAuditor }
   );
@@ -857,7 +1002,7 @@ async function runOneExtractionRun(
     canonical.sourceRevisionHash,
     taintDetector,
     retryingExtractor,
-    { runConfig: extractionRunConfig, maxTokens: 16000 },
+    { runConfig: extractionRunConfig, maxTokens: EXTRACTION_MAX_TOKENS },
     TAINT_RESAMPLE_MAX_ROUNDS
   );
   if (resampled.resampleLogs.length > 0) {
@@ -867,7 +1012,6 @@ async function runOneExtractionRun(
     );
   }
 
-  const reviewedAt = new Date().toISOString();
   const snapshot = buildEvaluationSnapshot(
     {
       sourceRevisionHash: canonical.sourceRevisionHash,
@@ -893,45 +1037,39 @@ async function runOneExtractionRun(
   }));
   taintDetector.assertClean(candidates, `engine input (retrieval candidates, ${runId})`);
 
-  const embeddingProvider = new OpenAIEmbeddingProvider();
   console.log('вычисление embeddings для candidate pool...');
   const embeddedCandidates = await embedCandidates(candidates, embeddingProvider);
 
-  const rerankerProvider = new LlmRerankerProvider(
-    resolveExtractionRunConfig({ promptVersion: 'aurora-fixture-reranker-v1' })
-  );
-  const queryFrameRunConfig = resolveExtractionRunConfig({ promptVersion: 'aurora-fixture-query-frame-v1' });
-  const answerGenerator = buildRealAnswerGenerator(
-    resolveExtractionRunConfig({ promptVersion: 'aurora-fixture-synthesis-v1' }),
-    ledger,
-    traceLog
-  );
-  const decisionRelevanceRunConfig = resolveExtractionRunConfig({
-    promptVersion: 'aurora-fixture-decision-relevance-v1',
+  // Артефакт для `--reuse-extraction`: всё, что фаза извлечения добыла
+  // платными вызовами, вместе с отпечатком конфигурации, которая его
+  // породила. Пишется ВСЕГДА при свежем извлечении — переиспользовать
+  // задним числом нельзя то, что не сохранили.
+  const artifact = buildExtractionArtifact({
+    fingerprint,
+    sourceDocPath: args.docPath,
+    snapshot,
+    embeddingModel,
+    embeddings: candidates.map((c, i) => ({
+      unitId: c.unitId,
+      retrievalText: c.retrievalText,
+      embedding: embeddedCandidates[i].embedding,
+    })),
+    extractionAttemptLog: allAttemptLogs,
+    batchLogs: audited.batchLogs,
+    auditResults: audited.auditResults,
+    focusedRetryLogs: audited.focusedRetryLogs,
   });
 
-  const ctx: EngineContext = {
-    embeddedCandidates,
-    unitsById,
-    embeddingProvider,
-    rerankerProvider,
-    requestContext: { audience: 'internal', now: reviewedAt },
-    reviewedAt,
-    queryFrameRunConfig,
-    answerGenerator,
-    decisionRelevanceRunConfig,
+  const results = await runQuestionsAgainstSnapshot(runId, snapshot, embeddedCandidates, unitsById, {
+    args,
+    questions,
+    sourceRules,
     taintDetector,
     ledger,
     traceLog,
-  };
-
-  const results: EngineQuestionResult[] = [];
-  for (const question of questions) {
-    console.log(`  [${runId}] ${question.caseId}: "${question.question.slice(0, 60)}..."`);
-    const result = await runEngineOnQuestionWithRetry(question, ctx);
-    console.log(`    -> ${result.actualDisposition}${result.errorMessage ? ` (${result.errorMessage})` : ''}`);
-    results.push(result);
-  }
+    embeddingProvider,
+    embeddingModel,
+  });
 
   return {
     runId,
@@ -942,6 +1080,71 @@ async function runOneExtractionRun(
     batchLogs: audited.batchLogs,
     auditResults: audited.auditResults,
     focusedRetryLogs: audited.focusedRetryLogs,
+    artifact,
+  };
+}
+
+/**
+ * Ветка `--reuse-extraction`: фаза извлечения не делает ни одного платного
+ * вызова. Ради этого и всё остальное — $19.79 за день ушли на 12 прогонов,
+ * которые 31 раз переизвлекали ОДИН И ТОТ ЖЕ документ, пока чинилось совсем
+ * другое (поиск и ответы).
+ *
+ * `readExtractionArtifact` сверяет отпечаток и падает при расхождении — молча
+ * переиспользованный устаревший артефакт дал бы уверенно неверные выводы о
+ * качестве, а это хуже сэкономленных денег.
+ *
+ * Taint-проверка кандидатов НЕ пропускается: она бесплатна, а гарантия
+ * «эталон не подтёк в то, что видит движок» не зависит от того, откуда взялись
+ * units.
+ */
+async function reuseExtractionRun(
+  runIndex: number,
+  runId: string,
+  artifactPath: string,
+  fingerprint: ExtractionFingerprint,
+  deps: ExtractionRunDeps
+): Promise<ExtractionRunOutcome> {
+  console.log(`переиспользование извлечения: ${artifactPath} (0 платных вызовов в фазе извлечения)`);
+  const artifact = readExtractionArtifact(artifactPath, fingerprint);
+  console.log(
+    `артефакт принят: ${artifact.snapshot.units.length} unit(s), сохранён ${artifact.savedAt}, отпечаток совпал`
+  );
+
+  const { snapshot } = artifact;
+  if (snapshot.units.length === 0) {
+    throw new Error(`reuseExtractionRun(${runIndex}): артефакт не содержит ни одного unit — прогон недействителен`);
+  }
+
+  const unitsById = new Map(snapshot.units.map((u) => [u.unitId, u]));
+  const sourceRuleIdByUnitId = new Map(
+    snapshot.units.map((u) => [u.unitId, resolveSourceRuleId(u, deps.sourceRules)])
+  );
+  const candidates = snapshot.units.map((u) => ({
+    unitId: u.unitId,
+    retrievalText: buildRetrievalText(u, unitsById),
+  }));
+  deps.taintDetector.assertClean(candidates, `engine input (retrieval candidates, ${runId})`);
+
+  const embeddedCandidates = restoreEmbeddedCandidates(
+    artifact,
+    candidates,
+    deps.embeddingModel,
+    artifactPath
+  );
+
+  const results = await runQuestionsAgainstSnapshot(runId, snapshot, embeddedCandidates, unitsById, deps);
+
+  return {
+    runId,
+    snapshot,
+    sourceRuleIdByUnitId,
+    results,
+    extractionAttemptLog: artifact.extractionAttemptLog,
+    batchLogs: artifact.batchLogs,
+    auditResults: artifact.auditResults,
+    focusedRetryLogs: artifact.focusedRetryLogs,
+    artifact: null,
   };
 }
 
@@ -1155,6 +1358,14 @@ async function main() {
         JSON.stringify(outcome.focusedRetryLogs, null, 2),
         'utf8'
       );
+      // Свежее извлечение — сохраняем артефакт, иначе переиспользовать нечего.
+      // В режиме --reuse-extraction он null: прогон ничего не извлекал, и
+      // перезапись существующего артефакта его же копией только запутала бы.
+      if (outcome.artifact) {
+        const artifactPath = path.join(runDir, 'extraction-artifact.json');
+        writeExtractionArtifact(artifactPath, outcome.artifact);
+        console.log(`  артефакт извлечения: ${artifactPath} (для --reuse-extraction)`);
+      }
     }
   } catch (err) {
     // Caught here (not left to main().catch()) so run-summary.json and the
