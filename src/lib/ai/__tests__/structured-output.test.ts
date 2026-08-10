@@ -171,6 +171,22 @@ describe('structured() — успешный разбор', () => {
     expect(result.data).toEqual(VALID_PAYLOAD);
   });
 
+  // Call-trace log (2026-08-10): structured() не собирает ChatCompletionResult
+  // сама — она передаёт то, что вернул createChatCompletionDetailed, целиком
+  // (StructuredResult<T> = ChatCompletionResult & {data: T}). requestMessages
+  // должно доехать до вызывающего без единого изменения в этом файле.
+  it('requestMessages доезжает до вызывающего вместе с data — без изменений в structured()', async () => {
+    fetchMock.mockResolvedValue(anthropicOk(JSON.stringify(VALID_PAYLOAD)));
+
+    const result = await structured({
+      schema: priceSchema,
+      messages: MESSAGES,
+      runConfig: runConfig(),
+    });
+
+    expect(result.requestMessages).toEqual(MESSAGES);
+  });
+
   it('ответ в markdown-заборе всё равно разбирается: JSON-режим provider-слоя задействован', async () => {
     fetchMock.mockResolvedValue(
       anthropicOk('```json\n' + JSON.stringify(VALID_PAYLOAD) + '\n```')
@@ -299,6 +315,22 @@ describe('structured() — ответ, не соответствующий сх�
     expect(error.reason).toBe('SCHEMA_MISMATCH');
     expect(error.issues.map((issue) => issue.path)).toContain('price');
     expect(error.message).toContain('price');
+  });
+
+  // Call-trace log (2026-08-10): ровно тот случай, который занял целую сессию
+  // отладки (Task 36) — SCHEMA_MISMATCH с реальным, но невалидным ответом
+  // модели. error.result несёт requestMessages/rawText: точный промпт рядом с
+  // точным сырым ответом, без чего этот баг искали вслепую.
+  it('на SCHEMA_MISMATCH result несёт requestMessages рядом с rawText — точный промпт рядом с точным сырым ответом', async () => {
+    const badResponse = JSON.stringify({ ...VALID_PAYLOAD, price: 'дорого' });
+    fetchMock.mockResolvedValue(anthropicOk(badResponse));
+
+    const error = await expectStructuredError(
+      structured({ schema: priceSchema, messages: MESSAGES, runConfig: runConfig() })
+    );
+
+    expect(error.result.requestMessages).toEqual(MESSAGES);
+    expect(error.result.rawText).toBe(badResponse);
   });
 
   it('путь до элемента массива указывается с индексом', async () => {

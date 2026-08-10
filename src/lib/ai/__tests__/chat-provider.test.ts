@@ -332,6 +332,20 @@ describe('createChatCompletionDetailed — primary success', () => {
 
     expect(result.attempts[0].usage).toEqual({ inputTokens: 77, outputTokens: 33 });
   });
+
+  // Call-trace log (2026-08-10): the user has zero visibility into
+  // what was actually SENT to the model, only aggregate cost. requestMessages
+  // is the source for that — the exact prompt behind any given attempt.
+  it('несёт requestMessages — ровно options.messages, для трассировки вызова', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('hello'));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+    });
+
+    expect(result.requestMessages).toEqual(MESSAGES);
+  });
 });
 
 describe('OpenAI JSON-режим требует упоминания JSON в сообщениях', () => {
@@ -404,6 +418,11 @@ describe('createChatCompletionDetailed — фоллбэк', () => {
     expect(openaiCreate).toHaveBeenCalledTimes(1);
     expect(openaiCreate.mock.calls[0][0].model).toBe('gpt-4o-mini');
     expect(anthropicRequestBodies()[0].model).toBe('claude-sonnet-5');
+
+    // Call-trace log: retry/fallback переезжают к другому провайдеру/модели, но НЕ
+    // меняют промпт — requestMessages на результате остаётся тем же, что было
+    // отправлено первичной попытке.
+    expect(result.requestMessages).toEqual(MESSAGES);
   });
 
   it('fail-closed: закреплённая модель без providerModels НЕ уходит другому провайдеру', async () => {
@@ -546,6 +565,10 @@ describe('createChatCompletionDetailed — полный отказ', () => {
       outcome: 'ERROR',
       statusCode: 500,
     });
+
+    // Call-trace log: полный отказ (ни один провайдер не ответил) — ответа нет
+    // вообще, но что именно спрашивали остаётся видимым в трассировке.
+    expect(error.requestMessages).toEqual(MESSAGES);
   });
 });
 
@@ -832,6 +855,8 @@ describe('streaming', () => {
     expect(metadata.fallbackUsed).toBe(false);
     expect(metadata.attempts).toHaveLength(1);
     expect(metadata.attempts[0].outcome).toBe('SUCCESS');
+    // Call-trace log: тот же call-trace источник, что и у не-стримингового пути.
+    expect(metadata.requestMessages).toEqual(MESSAGES);
   });
 
   it('completion разрешается, даже если tokens не читали ВООБЩЕ', async () => {
@@ -912,6 +937,8 @@ describe('streaming', () => {
       errorCode: 'ABORTED_BY_CALLER',
     });
     listeners.expectAllReleased();
+    // Call-trace log: даже при явной отмене видно, что именно спрашивали.
+    expect(error.requestMessages).toEqual(MESSAGES);
 
     // Повторный abort() и abort() после завершения — no-op, не второй attempt.
     operation.abort();

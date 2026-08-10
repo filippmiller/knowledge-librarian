@@ -117,6 +117,23 @@ export interface ChatCompletionResult {
   fallbackUsed: boolean;
   /** Каждая попытка по порядку, включая ABORTED и неудачные retry. */
   attempts: CompletionAttempt[];
+  /**
+   * Точные сообщения, отправленные провайдеру для ЭТОГО вызова — одни и те
+   * же для всех попыток (retry/fallback меняют провайдера или модель, но не
+   * промпт). Источник для call-trace log бенчмарк-раннера (2026-08-10): без
+   * этого поля у пользователя не было способа сопоставить конкретный
+   * "плохой" ответ с тем, что именно у модели спросили — только агрегатная
+   * стоимость.
+   *
+   * Опционально, но НЕ по той же причине, что `rawText?`/`usage?` выше: на
+   * боевом пути оно заполняется ВСЕГДА (`options.messages` есть у любого
+   * вызова структурно, отсутствовать ему неоткуда). Опционально оно ради уже
+   * существующих тестовых моков в других файлах (`structured-output.test.ts`,
+   * `knowledge-extractor-stream.test.ts`), которые собирают `ChatCompletionResult`
+   * вручную и не обязаны знать про это поле — требовать его сделало бы их
+   * недействительными без всякой пользы для того, что они реально проверяют.
+   */
+  requestMessages?: readonly ChatMessage[];
 }
 
 /**
@@ -134,17 +151,31 @@ export class ChatCompletionError extends Error {
   readonly attempts: CompletionAttempt[];
   readonly errorCode?: string;
   readonly statusCode?: number;
+  /** Same call-trace source as `ChatCompletionResult.requestMessages` — a
+   *  total transport failure still had a real prompt behind it, and that
+   *  prompt is exactly what a debugging trace needs even when no response
+   *  ever came back. Optional in the constructor options bag (not a
+   *  positional parameter) so the two pre-existing test call sites that
+   *  construct this error by hand (`extraction-run.test.ts`,
+   *  `knowledge-extractor-stream.test.ts`) stay valid unchanged. */
+  readonly requestMessages?: readonly ChatMessage[];
 
   constructor(
     message: string,
     attempts: CompletionAttempt[],
-    options?: { cause?: unknown; errorCode?: string; statusCode?: number }
+    options?: {
+      cause?: unknown;
+      errorCode?: string;
+      statusCode?: number;
+      requestMessages?: readonly ChatMessage[];
+    }
   ) {
     super(message);
     this.name = 'ChatCompletionError';
     this.attempts = attempts;
     this.errorCode = options?.errorCode;
     this.statusCode = options?.statusCode;
+    this.requestMessages = options?.requestMessages;
     if (options && 'cause' in options) {
       (this as { cause?: unknown }).cause = options.cause;
     }
@@ -1045,6 +1076,7 @@ export async function createChatCompletionDetailed(
         servedByModel: primaryModel,
         fallbackUsed: false,
         attempts,
+        requestMessages: options.messages,
       };
     }
 
@@ -1093,6 +1125,7 @@ export async function createChatCompletionDetailed(
         servedByModel: fallbackTarget.model,
         fallbackUsed: true,
         attempts,
+        requestMessages: options.messages,
       };
     }
     console.error(
@@ -1112,6 +1145,7 @@ export async function createChatCompletionDetailed(
     cause: rootError,
     errorCode: extractErrorCode(rootError),
     statusCode: extractStatusCode(rootError),
+    requestMessages: options.messages,
   });
 }
 
@@ -1399,6 +1433,7 @@ export function createChatCompletionStreamDetailed(
         servedByModel: model,
         fallbackUsed: false,
         attempts,
+        requestMessages: options.messages,
       });
       return;
     }
@@ -1425,7 +1460,7 @@ export function createChatCompletionStreamDetailed(
         ? abortReason
         : rawMessageOf(error),
       attempts,
-      { cause: error, errorCode, statusCode }
+      { cause: error, errorCode, statusCode, requestMessages: options.messages }
     );
     queueFailure = failure;
     queueClosed = true;
