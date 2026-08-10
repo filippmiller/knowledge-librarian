@@ -82,6 +82,7 @@ import { structured, StructuredOutputError } from '../src/lib/ai/structured-outp
 import type { RequestContext } from '../src/lib/knowledge/applicability/eligibility';
 
 import { buildEvaluationSnapshot, type EvaluationKnowledgeSnapshot } from '../src/lib/eval/evaluation-snapshot';
+import { resolveAnswerDisposition, type EngineAnswerDisposition } from '../src/lib/eval/answer-disposition';
 import { loadSemanticRuleOracle, ORACLE_PACK_DIR, SOURCE_DOCX_FILENAME } from '../src/lib/eval/semantic-rule-oracle';
 import { loadNegativeCaseOracle } from '../src/lib/eval/negative-case-oracle';
 import { loadSourceRulesFromDocx, type SourceRule } from '../src/lib/eval/source-rule-segmentation';
@@ -202,7 +203,10 @@ interface EngineQuestionResult {
   readonly evidencePack: EvidencePack | null;
   readonly draft: DraftAnswer | null;
   readonly verification: VerificationResult | null;
-  readonly actualDisposition: 'DIRECT_ANSWER' | 'HOLD' | 'ERROR';
+  /** См. `resolveAnswerDisposition` (src/lib/eval/answer-disposition.ts) —
+   *  в частности, почему провал верификации получает СВОЙ `UNVERIFIED_ANSWER`,
+   *  а не понижается до `HOLD`. */
+  readonly actualDisposition: EngineAnswerDisposition;
   readonly errorMessage: string | null;
   /** True iff `errorMessage` is a transport/schema failure class the caller
    *  may legitimately retry (same classification as batch-extraction's own
@@ -681,7 +685,11 @@ async function runEngineOnQuestion(
       evidencePack,
       draft,
       verification,
-      actualDisposition: 'DIRECT_ANSWER',
+      // НЕ безусловный 'DIRECT_ANSWER' (дыра в гарантии, закрытая W1-A):
+      // ответ, провалившийся собственную проверку заземления, больше не
+      // предъявляется как прямой ответ. Черновик и нарушения остаются в
+      // артефакте целиком — провал должен быть ВИДЕН, а не спрятан.
+      actualDisposition: resolveAnswerDisposition(verification),
       errorMessage: null,
       errorRetryable: false,
       decisionRelevanceTrace: decisionRelevance.trace,
@@ -1161,6 +1169,10 @@ async function main() {
         dispositionCountsByRun: runs.map((r) => ({
           runId: r.runId,
           DIRECT_ANSWER: r.results.filter((x) => x.actualDisposition === 'DIRECT_ANSWER').length,
+          // Отдельной строкой, а не внутри DIRECT_ANSWER: сводка прогона —
+          // первое, на что смотрят, и «сколько ответов доставлено» обязано
+          // отличаться от «сколько ответов не прошли собственную проверку».
+          UNVERIFIED_ANSWER: r.results.filter((x) => x.actualDisposition === 'UNVERIFIED_ANSWER').length,
           HOLD: r.results.filter((x) => x.actualDisposition === 'HOLD').length,
           ERROR: r.results.filter((x) => x.actualDisposition === 'ERROR').length,
         })),
