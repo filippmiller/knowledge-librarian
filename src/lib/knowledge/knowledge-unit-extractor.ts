@@ -9,6 +9,7 @@ import {
 import { validateParentRefs } from './applicability/extraction-parent-refs';
 import { applicableFacetsOf, KNOWLEDGE_UNIT_KINDS } from './applicability/kinds';
 import { facetCatalog, triggerFactCatalog } from './prompt-catalogs';
+import type { CanonicalBlockKind } from './docx-canonical-blocks';
 
 /**
  * LLM-обвязка вокруг структурной экстракции (PR E, Beads translation-ypp).
@@ -28,6 +29,10 @@ import { facetCatalog, triggerFactCatalog } from './prompt-catalogs';
 export interface SourceBlock {
   readonly anchor: string;
   readonly text: string;
+  /** Deterministic provenance from canonicalization. Kept on the extraction
+   *  input so orchestration can distinguish structural headings from
+   *  substantive prose without guessing from wording or length. */
+  readonly kind?: CanonicalBlockKind;
 }
 
 const KIND_DESCRIPTIONS: Record<(typeof KNOWLEDGE_UNIT_KINDS)[number], string> = {

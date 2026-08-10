@@ -70,7 +70,9 @@ import type { EvaluationKnowledgeSnapshot } from './evaluation-snapshot';
 
 /** Bumped whenever the artifact's SHAPE changes. Part of the fingerprint, so
  *  an artifact from an older shape is refused rather than half-read. */
-export const EXTRACTION_ARTIFACT_VERSION = '2026-08-10-extraction-artifact-v2';
+export const EXTRACTION_ARTIFACT_VERSION = '2026-08-10-extraction-artifact-v3';
+
+export type ExtractionArtifactPhase = 'SEMANTIC_CHECKPOINT' | 'COMPLETE';
 
 /** Единственная формулировка выхода из любого отказа — чтобы «что делать»
  *  не пришлось угадывать ни на одном из путей refuse. */
@@ -400,6 +402,7 @@ export interface StoredEmbedding {
 
 export interface ExtractionArtifact {
   readonly artifactVersion: string;
+  readonly phase: ExtractionArtifactPhase;
   readonly savedAt: string;
   readonly sourceDocPath: string;
   readonly fingerprint: ExtractionFingerprint;
@@ -419,6 +422,7 @@ export interface ExtractionArtifact {
 }
 
 export interface BuildExtractionArtifactInput {
+  readonly phase: ExtractionArtifactPhase;
   readonly fingerprint: ExtractionFingerprint;
   readonly sourceDocPath: string;
   readonly snapshot: EvaluationKnowledgeSnapshot;
@@ -503,6 +507,7 @@ export function buildExtractionArtifact(input: BuildExtractionArtifactInput): Ex
   assertTrustedCompleteness(input.batchLogs, input.auditResults, input.fingerprint.blockCount, input.sourceDocPath);
   const artifactWithoutDigest = {
     artifactVersion: EXTRACTION_ARTIFACT_VERSION,
+    phase: input.phase,
     savedAt: new Date().toISOString(),
     sourceDocPath: input.sourceDocPath,
     fingerprint: input.fingerprint,
@@ -515,6 +520,12 @@ export function buildExtractionArtifact(input: BuildExtractionArtifactInput): Ex
     auditResults: input.auditResults,
     focusedRetryLogs: input.focusedRetryLogs,
   };
+  if (input.phase === 'SEMANTIC_CHECKPOINT' && input.embeddings.length !== 0) {
+    throw new ExtractionArtifactError('SEMANTIC_CHECKPOINT не должен содержать частичный набор embeddings.');
+  }
+  if (input.phase === 'COMPLETE' && input.embeddings.length === 0) {
+    throw new ExtractionArtifactError('COMPLETE extraction artifact обязан содержать embeddings.');
+  }
   return { ...artifactWithoutDigest, contentDigest: computeArtifactContentDigest(artifactWithoutDigest) };
 }
 
@@ -686,7 +697,7 @@ export function parseExtractionArtifact(json: string, sourceLabel: string): Extr
   assertExactKeys(
     source,
     [
-      'artifactVersion', 'savedAt', 'sourceDocPath', 'fingerprint', 'fingerprintDigest', 'contentDigest',
+      'artifactVersion', 'phase', 'savedAt', 'sourceDocPath', 'fingerprint', 'fingerprintDigest', 'contentDigest',
       'snapshot', 'embeddingModel', 'embeddings', 'extractionAttemptLog', 'batchLogs', 'auditResults',
       'focusedRetryLogs',
     ],
@@ -699,6 +710,10 @@ export function parseExtractionArtifact(json: string, sourceLabel: string): Extr
     throw new ExtractionArtifactError(
       `Артефакт "${sourceLabel}" версии "${artifactVersion}", текущая — "${EXTRACTION_ARTIFACT_VERSION}". ${REMEDIATION}`
     );
+  }
+  const phase = requireString(source.phase, 'phase', sourceLabel);
+  if (phase !== 'SEMANTIC_CHECKPOINT' && phase !== 'COMPLETE') {
+    throw new ExtractionArtifactError(`Артефакт "${sourceLabel}": неизвестная phase "${phase}". ${REMEDIATION}`);
   }
 
   const fingerprint = parseFingerprint(source.fingerprint, sourceLabel);
@@ -780,6 +795,7 @@ export function parseExtractionArtifact(json: string, sourceLabel: string): Extr
 
   const parsed: ExtractionArtifact = {
     artifactVersion,
+    phase,
     savedAt: requireString(source.savedAt, 'savedAt', sourceLabel),
     sourceDocPath: requireString(source.sourceDocPath, 'sourceDocPath', sourceLabel),
     fingerprint,
@@ -797,6 +813,12 @@ export function parseExtractionArtifact(json: string, sourceLabel: string): Extr
     auditResults: requireArray<BlockCoverageAuditResult>(source.auditResults, 'auditResults'),
     focusedRetryLogs: requireArray<FocusedRetryLog>(source.focusedRetryLogs, 'focusedRetryLogs'),
   };
+  if (parsed.phase === 'SEMANTIC_CHECKPOINT' && parsed.embeddings.length !== 0) {
+    throw new ExtractionArtifactError(`Артефакт "${sourceLabel}": semantic checkpoint содержит частичные embeddings. ${REMEDIATION}`);
+  }
+  if (parsed.phase === 'COMPLETE' && parsed.embeddings.length === 0) {
+    throw new ExtractionArtifactError(`Артефакт "${sourceLabel}": COMPLETE не содержит embeddings. ${REMEDIATION}`);
+  }
   assertTrustedCompleteness(parsed.batchLogs, parsed.auditResults, parsed.fingerprint.blockCount, sourceLabel);
   const actualContentDigest = computeArtifactContentDigest(parsed);
   if (parsed.contentDigest !== actualContentDigest) {
@@ -862,6 +884,11 @@ export function restoreEmbeddedCandidates(
   currentModel: ModelInfo,
   sourceLabel: string
 ): EmbeddedCandidate[] {
+  if (artifact.phase !== 'COMPLETE') {
+    throw new ExtractionArtifactError(
+      `Артефакт "${sourceLabel}" — только semantic checkpoint: retrieval запрещён до завершения embeddings. ${REMEDIATION}`
+    );
+  }
   const saved = artifact.embeddingModel;
   if (
     saved.provider !== currentModel.provider ||

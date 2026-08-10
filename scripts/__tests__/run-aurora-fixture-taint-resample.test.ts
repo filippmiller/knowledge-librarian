@@ -8,6 +8,7 @@ import { OracleTaintError, type OracleTaintDetector } from '../../src/lib/eval/o
 const BLOCK: SourceBlockLocation = {
   anchor: 'block-A',
   text: 'Основное правило. Обязательное исключение.',
+  kind: 'LIST_ITEM',
   sectionPath: 'section.1',
   structuralPath: 'body/p[0]',
   blockStart: 0,
@@ -81,6 +82,7 @@ describe('targeted taint resample completeness gate', () => {
     expect(auditor).toHaveBeenCalledWith(expect.objectContaining({
       blockAnchor: BLOCK.anchor,
       blockText: BLOCK.text,
+      blockKind: 'LIST_ITEM',
       extractedStatements: [{ statement: 'Основное правило', quote: 'Основное правило.' }],
     }));
   });

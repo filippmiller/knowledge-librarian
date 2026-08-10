@@ -1,8 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { extractKnowledgeUnitsWithCompletenessAudit } from '../audited-extraction';
-import type { SourceBlock } from '../knowledge-unit-extractor';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  buildFocusedRepairPromptMessages,
+  extractKnowledgeUnitsWithCompletenessAudit,
+} from '../audited-extraction';
+import { buildExtractionPromptMessages, type SourceBlock } from '../knowledge-unit-extractor';
 import type { ExtractedKnowledgeUnit } from '../applicability/extraction';
-import type { BlockCoverageAuditResult } from '../extraction-coverage-auditor';
+import type { BlockCoverageAuditResult, CoverageFinding } from '../extraction-coverage-auditor';
 
 /**
  * Goal-shift continuation (2026-08-09), Task 19: composes batch-extraction
@@ -29,7 +32,163 @@ function unit(overrides: Partial<ExtractedKnowledgeUnit> = {}): ExtractedKnowled
   };
 }
 
+function repairUsing(extractor: (options: { blocks: readonly SourceBlock[] }) => Promise<{ units: ExtractedKnowledgeUnit[]; structuredResult: never }>) {
+  return ({ block: sourceBlock }: { block: SourceBlock }) => extractor({ blocks: [sourceBlock] });
+}
+
 describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
+  it('focused repair prompt ограничен findings и не включает полный extraction prompt', () => {
+    const source = block('b0', 'Сотрудникам можно войти, посетителям запрещено.');
+    const messages = buildFocusedRepairPromptMessages({
+      block: source,
+      findings: [{
+        verdict: 'UNREPRESENTED_CLAUSE',
+        quote: 'посетителям запрещено',
+        explanation: 'пропущен запрет',
+        quoteVerified: true,
+      }],
+      existingUnits: [unit({ statement: 'Сотрудникам можно войти.', sourceSpan: { anchor: 'b0', quote: 'Сотрудникам можно войти' } })],
+    });
+    const compact = messages.map((message) => message.content).join('\n');
+    const full = buildExtractionPromptMessages([source]).map((message) => message.content).join('\n');
+
+    expect(compact).toContain('посетителям запрещено');
+    expect(compact).toContain('Сотрудникам можно войти.');
+    expect(compact).not.toContain('Каждая единица знания (unit) имеет один из видов');
+    expect(compact.length).toBeLessThan(full.length / 2);
+  });
+
+  it('b2 regression: оговорка не приглашает kind=fact/disclaimer и получает точные enum/object контракты', () => {
+    const messages = buildFocusedRepairPromptMessages({
+      block: {
+        anchor: 'b2',
+        text: 'Информация носит справочный характер и не заменяет консультацию специалиста.',
+      },
+      findings: [{
+        verdict: 'UNREPRESENTED_CLAUSE',
+        quote: 'не заменяет консультацию специалиста',
+        explanation: 'Пропущена существенная оговорка.',
+        quoteVerified: true,
+      }],
+      existingUnits: [],
+    });
+    const prompt = messages.map((message) => message.content).join('\n');
+
+    expect(prompt).toContain('"PROCEDURE_STEP", "EXCEPTION_RULE", "TERM_DEFINITION", "DELIVERY_RULE", "PRICE_RULE"');
+    expect(prompt).toContain('Значения "fact", "disclaimer", "rule", "note" и любые другие ЗАПРЕЩЕНЫ');
+    expect(prompt).toContain('"sourceSpan":{"anchor":"ДАННЫЙ_ANCHOR","quote":"ДОСЛОВНАЯ ЦИТАТА"}');
+    expect(prompt).toContain('uncertainties — всегда массив объектов ТОЧНО формы');
+    expect(prompt).toContain('"UNRECOGNIZED_TRIGGER_CONDITION"');
+    expect(prompt).toContain('Anchor: b2');
+    expect(prompt).toContain('не заменяет консультацию специалиста');
+  });
+
+  it('использует отдельный finding-scoped repair extractor, не полный batch extractor', async () => {
+    let initialExtractorCalls = 0;
+    let repairExtractorCalls = 0;
+    let auditCalls = 0;
+    const extractor = async () => {
+      initialExtractorCalls++;
+      return {
+        units: [unit({ statement: 'Исходное правило.', sourceSpan: { anchor: 'b0', quote: 'Исходное правило' } })],
+        structuredResult: {} as never,
+      };
+    };
+    const repairExtractor = async (options: { findings: readonly CoverageFinding[]; existingUnits: readonly ExtractedKnowledgeUnit[] }) => {
+      repairExtractorCalls++;
+      expect(options.findings.map((finding) => finding.verdict)).toEqual(['UNREPRESENTED_CLAUSE']);
+      expect(options.existingUnits.map((existing) => existing.statement)).toEqual(['Исходное правило.']);
+      return {
+        units: [unit({ statement: 'Пропущенное правило.', extractionRef: 'repair', sourceSpan: { anchor: 'b0', quote: 'Пропущенное правило' } })],
+        structuredResult: {} as never,
+      };
+    };
+    const auditor = async (): Promise<BlockCoverageAuditResult> =>
+      ++auditCalls === 1
+        ? {
+            blockAnchor: 'b0',
+            findings: [{ verdict: 'UNREPRESENTED_CLAUSE', quote: 'Пропущенное правило', explanation: 'gap', quoteVerified: true }],
+            hasGap: true,
+          }
+        : { blockAnchor: 'b0', findings: [{ verdict: 'COVERED', quote: '', explanation: 'ok', quoteVerified: false }], hasGap: false };
+
+    const result = await extractKnowledgeUnitsWithCompletenessAudit(
+      [block('b0', 'Исходное правило. Пропущенное правило.')],
+      5,
+      { runConfig: {} as never },
+      {} as never,
+      { extractor, repairExtractor, auditor }
+    );
+
+    expect(initialExtractorCalls).toBe(1);
+    expect(repairExtractorCalls).toBe(1);
+    expect(auditCalls).toBe(2);
+    expect(result.units.map((item) => item.statement)).toContain('Пропущенное правило.');
+  });
+
+  it.each([
+    {
+      name: 'вложенный запрет в широкой evidence-цитате',
+      text: 'Сотрудникам вход разрешён, но посетителям вход запрещён.',
+      initial: 'Сотрудникам вход разрешён.',
+      recovered: 'Посетителям вход запрещён.',
+      quote: 'посетителям вход запрещён',
+    },
+    {
+      name: 'отдельное числовое ограничение',
+      text: 'Подайте заявление. Срок — не более трёх дней.',
+      initial: 'Необходимо подать заявление.',
+      recovered: 'Срок подачи ограничен тремя днями.',
+      quote: 'не более трёх дней',
+    },
+    {
+      name: 'исключение из общего правила',
+      text: 'Нужен оригинал. Для электронного документа допустима распечатка.',
+      initial: 'Нужен оригинал.',
+      recovered: 'Для электронного документа допустима распечатка.',
+      quote: 'Для электронного документа допустима распечатка',
+    },
+  ])('seeded omission: $name восстанавливается compact repair и проходит merge re-audit', async ({ text, initial, recovered, quote }) => {
+    const initialExtractor = async () => ({
+      units: [unit({ statement: initial, sourceSpan: { anchor: 'b0', quote: text } })],
+      structuredResult: {} as never,
+    });
+    const repairExtractor = async () => ({
+      units: [unit({ statement: recovered, extractionRef: 'repair', sourceSpan: { anchor: 'b0', quote } })],
+      structuredResult: {} as never,
+    });
+    let auditCalls = 0;
+    const auditor = async (input: { extractedStatements: readonly { statement: string }[] }): Promise<BlockCoverageAuditResult> => {
+      auditCalls++;
+      if (auditCalls === 1) {
+        return {
+          blockAnchor: 'b0',
+          findings: [{ verdict: 'UNREPRESENTED_CLAUSE', quote, explanation: 'seeded omission', quoteVerified: true }],
+          hasGap: true,
+        };
+      }
+      expect(input.extractedStatements.map((statement) => statement.statement)).toEqual([initial, recovered]);
+      return {
+        blockAnchor: 'b0',
+        findings: [{ verdict: 'COVERED', quote: '', explanation: 'recovery complete', quoteVerified: false }],
+        hasGap: false,
+      };
+    };
+
+    const result = await extractKnowledgeUnitsWithCompletenessAudit(
+      [block('b0', text)],
+      5,
+      { runConfig: {} as never },
+      {} as never,
+      { extractor: initialExtractor, repairExtractor, auditor }
+    );
+
+    expect(result.units.map((item) => item.statement)).toEqual([initial, recovered]);
+    expect(result.auditResults).toHaveLength(1);
+    expect(result.auditResults[0].findings[0].verdict).toBe('COVERED');
+    expect(auditCalls).toBe(2);
+  });
+
   it('без gap-ов -> initial units как есть, ни одного focused retry не запущено', async () => {
     const blocks = [block('b0', 'текст первого блока')];
     let extractorCalls = 0;
@@ -51,7 +210,7 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
       5,
       { runConfig: {} as never },
       {} as never,
-      { extractor, auditor }
+      { extractor, repairExtractor: repairUsing(extractor), auditor }
     );
 
     expect(extractorCalls).toBe(1); // только основной batch-проход, ни одного focused retry
@@ -97,7 +256,7 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
       5,
       { runConfig: {} as never },
       {} as never,
-      { extractor, auditor }
+      { extractor, repairExtractor: repairUsing(extractor), auditor }
     );
 
     expect(result.focusedRetryLogs).toHaveLength(1);
@@ -132,7 +291,7 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
       2,
       { runConfig: {} as never },
       {} as never,
-      { extractor, auditor }
+      { extractor, repairExtractor: repairUsing(extractor), auditor }
     );
 
     expect(auditedAnchors).toEqual(['b0', 'b1', 'b2']);
@@ -177,7 +336,7 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
       5,
       { runConfig: {} as never },
       {} as never,
-      { extractor, auditor }
+      { extractor, repairExtractor: repairUsing(extractor), auditor }
     );
 
     expect(result.units).toHaveLength(1);
@@ -231,7 +390,7 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
       5,
       { runConfig: {} as never },
       {} as never,
-      { extractor, auditor: auditorWithGap }
+      { extractor, repairExtractor: repairUsing(extractor), auditor: auditorWithGap }
     );
 
     expect(result.units).toHaveLength(1);
@@ -278,7 +437,7 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
       5,
       { runConfig: {} as never },
       {} as never,
-      { extractor, auditor }
+      { extractor, repairExtractor: repairUsing(extractor), auditor }
     );
 
     expect(result.units).toHaveLength(1);
@@ -313,7 +472,11 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
           };
 
     const result = await extractKnowledgeUnitsWithCompletenessAudit(
-      [block('b0', text)], 5, { runConfig: {} as never }, {} as never, { extractor, auditor }
+      [block('b0', text)], 5, { runConfig: {} as never }, {} as never, {
+        extractor,
+        repairExtractor: repairUsing(extractor),
+        auditor,
+      }
     );
 
     expect(result.units.map((u) => u.statement)).toEqual(['Сотрудникам разрешено войти.', 'Посетителям вход запрещён.']);
@@ -351,7 +514,11 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
 
     await expect(
       extractKnowledgeUnitsWithCompletenessAudit(
-        [block('b0', 'правило')], 5, { runConfig: {} as never }, {} as never, { extractor, auditor }
+        [block('b0', 'правило')], 5, { runConfig: {} as never }, {} as never, {
+          extractor,
+          repairExtractor: repairUsing(extractor),
+          auditor,
+        }
       )
     ).rejects.toThrow(/focused repair did not clear block b0/i);
     expect(auditCalls).toBe(2);
@@ -376,5 +543,31 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
     });
 
     expect(auditedWithEmptyStatements).toBe(true);
+  });
+
+  it('передаёт canonical kind аудитору, не исключая HEADING из проверки', async () => {
+    const heading: SourceBlock = {
+      anchor: 'b1',
+      text: 'Порядок безопасного устранения зуда в ягодичной области',
+      kind: 'HEADING',
+    };
+    const extractor = async () => ({ units: [], structuredResult: {} as never });
+    const auditor = vi.fn(async (): Promise<BlockCoverageAuditResult> => ({
+      blockAnchor: 'b1',
+      findings: [{ verdict: 'COVERED', quote: '', explanation: 'тематический заголовок', quoteVerified: false }],
+      hasGap: false,
+    }));
+
+    const result = await extractKnowledgeUnitsWithCompletenessAudit(
+      [heading], 5, { runConfig: {} as never }, {} as never, { extractor, auditor }
+    );
+
+    expect(auditor).toHaveBeenCalledWith(expect.objectContaining({ blockKind: 'HEADING' }));
+    expect(result.auditResults).toHaveLength(1);
+    expect(result.auditResults[0]).toMatchObject({
+      blockAnchor: 'b1',
+      hasGap: false,
+      findings: [{ verdict: 'COVERED' }],
+    });
   });
 });

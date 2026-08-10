@@ -95,6 +95,7 @@ function cleanAudit(blockAnchor = 'anchor-1') {
 
 function artifact(overrides: Partial<Parameters<typeof buildExtractionArtifact>[0]> = {}): ExtractionArtifact {
   return buildExtractionArtifact({
+    phase: 'COMPLETE',
     fingerprint: FINGERPRINT,
     sourceDocPath: 'oracle-pack/source.docx',
     snapshot: {
@@ -326,6 +327,17 @@ describe('readExtractionArtifact', () => {
     expect(readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
   });
 
+  it('atomically upgrades an existing semantic checkpoint to COMPLETE', () => {
+    const file = path.join(dir, 'upgrade.json');
+    writeExtractionArtifact(file, artifact({ phase: 'SEMANTIC_CHECKPOINT', embeddings: [] }));
+    expect(readExtractionArtifact(file, FINGERPRINT).phase).toBe('SEMANTIC_CHECKPOINT');
+    writeExtractionArtifact(file, artifact());
+    const upgraded = readExtractionArtifact(file, FINGERPRINT);
+    expect(upgraded.phase).toBe('COMPLETE');
+    expect(upgraded.embeddings).toHaveLength(2);
+    expect(readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  });
+
   it('refuses a stale artifact rather than returning it', () => {
     const file = path.join(dir, 'stale.json');
     writeExtractionArtifact(file, artifact());
@@ -338,6 +350,28 @@ describe('readExtractionArtifact', () => {
     const file = path.join(dir, 'truncated.json');
     writeFileSync(file, serializeExtractionArtifact(artifact()).slice(0, 120), 'utf8');
     expect(() => readExtractionArtifact(file, FINGERPRINT)).toThrow(ExtractionArtifactError);
+  });
+});
+
+describe('semantic checkpoint phase', () => {
+  it('round-trips trusted semantics without embeddings but cannot feed retrieval', () => {
+    const checkpoint = artifact({ phase: 'SEMANTIC_CHECKPOINT', embeddings: [] });
+    const parsed = parseExtractionArtifact(serializeExtractionArtifact(checkpoint), 'semantic.json');
+    expect(parsed.phase).toBe('SEMANTIC_CHECKPOINT');
+    expect(parsed.snapshot.units).toHaveLength(2);
+    expect(parsed.embeddings).toEqual([]);
+    expect(() =>
+      restoreEmbeddedCandidates(parsed, [candidate('u1'), candidate('u2')], EMBEDDING_MODEL, 'semantic.json')
+    ).toThrow(/retrieval запрещён/);
+  });
+
+  it('rejects partial embeddings in a semantic checkpoint', () => {
+    expect(() =>
+      artifact({
+        phase: 'SEMANTIC_CHECKPOINT',
+        embeddings: [{ unitId: 'u1', retrievalText: 'retrieval text u1', embedding: [0.1, 0.2, 0.3, 0.4] }],
+      })
+    ).toThrow(/частичный набор embeddings/);
   });
 });
 

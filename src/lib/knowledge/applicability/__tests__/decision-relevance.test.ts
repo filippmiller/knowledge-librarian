@@ -379,4 +379,42 @@ describe('applyDecisionRelevanceGate — детерминированный сл
     );
     expect(result.trace.map((t) => t.unitId)).toEqual(['r1', 'e1']);
   });
+
+  it('batch-классифицирует все unresolved исключения вопроса одним вызовом, сохраняя порядок trace', async () => {
+    const first = candidate({ unitId: 'e1', kind: 'EXCEPTION_RULE', parentRuleRef: null, trigger: unknownTrigger() });
+    const deterministic = candidate({ unitId: 'r1', kind: 'PROCEDURE_STEP' });
+    const second = candidate({ unitId: 'e2', kind: 'EXCEPTION_RULE', parentRuleRef: null, trigger: null });
+    let calls = 0;
+    const result = await applyDecisionRelevanceGate(
+      [input({ evaluated: first }), input({ evaluated: deterministic }), input({ evaluated: second })],
+      'Вопрос?',
+      {} as never,
+      async ({ candidates }) => {
+        calls++;
+        expect(candidates.map((candidate) => candidate.unitId)).toEqual(['e1', 'e2']);
+        return [
+          { unitId: 'e2', verdict: 'RELEVANT', reason: 'влияет', potentiallyDecidingFacts: [] },
+          { unitId: 'e1', verdict: 'IRRELEVANT', reason: 'не влияет', potentiallyDecidingFacts: [] },
+        ];
+      }
+    );
+    expect(calls).toBe(1);
+    expect(result.trace.map((entry) => entry.unitId)).toEqual(['e1', 'r1', 'e2']);
+    expect(result.relevant.map((entry) => entry.unitId)).toEqual(['r1', 'e2']);
+    expect(result.droppedByClassifier).toEqual(['e1']);
+    expect(result.answerDependsOnProbabilisticExclusion).toBe(true);
+  });
+
+  it('fail-closed: неполный batch-ответ не позволяет молча потерять unresolved исключение', async () => {
+    const first = candidate({ unitId: 'e1', kind: 'EXCEPTION_RULE', parentRuleRef: null, trigger: unknownTrigger() });
+    const second = candidate({ unitId: 'e2', kind: 'EXCEPTION_RULE', parentRuleRef: null, trigger: unknownTrigger() });
+    await expect(
+      applyDecisionRelevanceGate(
+        [input({ evaluated: first }), input({ evaluated: second })],
+        'Вопрос?',
+        {} as never,
+        async () => [{ unitId: 'e1', verdict: 'IRRELEVANT', reason: 'x', potentiallyDecidingFacts: [] }]
+      )
+    ).rejects.toThrow('omitted unitId: e2');
+  });
 });

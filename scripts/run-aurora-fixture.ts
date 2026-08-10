@@ -24,7 +24,8 @@
  *   npx tsx scripts/run-aurora-fixture.ts --mode=e2e --extraction-runs=2 --out=path/to/dir [--doc=path/to/source.docx]
  */
 import 'dotenv/config';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 
@@ -36,9 +37,13 @@ import {
   extractKnowledgeUnits,
   type ExtractKnowledgeUnitsOptions,
   type ExtractKnowledgeUnitsResult,
+  type SourceBlock,
 } from '../src/lib/knowledge/knowledge-unit-extractor';
+import type { ExtractedKnowledgeUnit } from '../src/lib/knowledge/applicability/extraction';
 import {
+  extractFocusedRepairUnits,
   extractKnowledgeUnitsWithCompletenessAudit,
+  type FocusedRepairOptions,
   type FocusedRetryLog,
 } from '../src/lib/knowledge/audited-extraction';
 import type { BatchExtractionLog, BatchExtractor } from '../src/lib/knowledge/batch-extraction';
@@ -59,7 +64,12 @@ import {
   PaidCallBudgetExceededError,
   UnverifiableCostError,
 } from '../src/lib/ai/cost-ledger';
-import { CallTraceLog, type CallTraceEntry } from '../src/lib/ai/call-trace-log';
+import {
+  attributeAttemptCosts,
+  CallTraceLog,
+  type CallTraceCorrelation,
+  type CallTraceEntry,
+} from '../src/lib/ai/call-trace-log';
 import {
   assignIdentity,
   type IdentityAssignmentResult,
@@ -82,7 +92,7 @@ import { buildEvaluatedCandidate } from '../src/lib/eval/knowledge-unit-adapter'
 import { resolveKnowledgeSet, type ResolutionDecision } from '../src/lib/knowledge/applicability/resolution';
 import {
   applyDecisionRelevanceGate,
-  evaluateDecisionRelevance,
+  evaluateDecisionRelevanceBatch,
   type GateCandidateInput,
   type GatedCandidate,
 } from '../src/lib/knowledge/applicability/decision-relevance';
@@ -110,6 +120,10 @@ import {
   type ExtractionAttemptLog,
   type ExtractionFingerprint,
 } from '../src/lib/eval/extraction-artifact';
+import {
+  buildRawExtractionFingerprint,
+  RawExtractionCheckpointStore,
+} from '../src/lib/eval/raw-extraction-checkpoint';
 import { loadSemanticRuleOracle, ORACLE_PACK_DIR, SOURCE_DOCX_FILENAME } from '../src/lib/eval/semantic-rule-oracle';
 import { loadNegativeCaseOracle } from '../src/lib/eval/negative-case-oracle';
 import { loadSourceRulesFromDocx, type SourceRule } from '../src/lib/eval/source-rule-segmentation';
@@ -304,6 +318,7 @@ interface EngineQuestionResult {
 }
 
 interface EngineContext {
+  readonly runId: string;
   readonly embeddedCandidates: readonly EmbeddedCandidate[];
   readonly unitsById: ReadonlyMap<string, PersistedKnowledgeUnit>;
   readonly embeddingProvider: OpenAIEmbeddingProvider;
@@ -311,7 +326,7 @@ interface EngineContext {
   readonly requestContext: RequestContext;
   readonly reviewedAt: string;
   readonly queryFrameRunConfig: ReturnType<typeof resolveExtractionRunConfig>;
-  readonly answerGenerator: AnswerGenerator;
+  readonly answerGeneratorForCase: (caseId: string) => AnswerGenerator;
   readonly decisionRelevanceRunConfig: ReturnType<typeof resolveExtractionRunConfig>;
   readonly taintDetector: OracleTaintDetector;
   readonly ledger: CostLedger;
@@ -388,15 +403,19 @@ function recordTrace(
   attempts: readonly CompletionAttempt[],
   trace: TraceInfo,
   outcome: 'SUCCESS' | 'ERROR',
-  errorMessage: string | null
+  errorMessage: string | null,
+  correlation: CallTraceCorrelation
 ): void {
   const last = attempts[attempts.length - 1];
   traceLog.record({
+    callId: randomUUID(),
+    correlation,
     timestamp: new Date().toISOString(),
     purpose,
     provider: last?.provider ?? 'unknown',
     model: last?.model ?? 'unknown',
     outcome,
+    attempts: attributeAttemptCosts(attempts),
     requestMessages: trace.requestMessages,
     responseText: trace.responseText,
     errorMessage,
@@ -421,6 +440,7 @@ async function recordOnFailure<T>(
   purpose: string,
   ledger: CostLedger,
   traceLog: CallTraceLog,
+  correlation: CallTraceCorrelation,
   fn: () => Promise<T>
 ): Promise<T> {
   try {
@@ -430,7 +450,7 @@ async function recordOnFailure<T>(
     const failedTrace = traceFromError(error);
     if (failedAttempts && failedTrace) {
       const message = error instanceof Error ? error.message : String(error);
-      recordTrace(traceLog, purpose, failedAttempts, failedTrace, 'ERROR', message);
+      recordTrace(traceLog, purpose, failedAttempts, failedTrace, 'ERROR', message, correlation);
     }
     if (failedAttempts) ledger.record(purpose, failedAttempts);
     throw error;
@@ -480,9 +500,11 @@ export async function withStructuredRetry<T>(
   traceLog: CallTraceLog,
   purpose: string,
   getAttempts: (result: T) => readonly CompletionAttempt[],
-  getTrace: (result: T) => TraceInfo
+  getTrace: (result: T) => TraceInfo,
+  correlation: CallTraceCorrelation
 ): Promise<{ result: T; attemptLog: ExtractionAttemptLog[] }> {
   const attemptLog: ExtractionAttemptLog[] = [];
+  let previousSchemaFailureSignature: string | null = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -493,7 +515,7 @@ export async function withStructuredRetry<T>(
       // can throw (budget ceiling / unverifiable cost) — the call that trips it
       // must still land in call-trace.jsonl, not vanish because the throw cut
       // the function off before the trace line ran.
-      recordTrace(traceLog, purpose, attempts, getTrace(result), 'SUCCESS', null);
+      recordTrace(traceLog, purpose, attempts, getTrace(result), 'SUCCESS', null, correlation);
       ledger.record(purpose, attempts);
       return { result, attemptLog };
     } catch (error) {
@@ -504,10 +526,26 @@ export async function withStructuredRetry<T>(
       const failedAttempts = attemptsFromError(error);
       const failedTrace = traceFromError(error);
       if (failedAttempts && failedTrace) {
-        recordTrace(traceLog, purpose, failedAttempts, failedTrace, 'ERROR', message);
+        recordTrace(traceLog, purpose, failedAttempts, failedTrace, 'ERROR', message, correlation);
       }
       if (failedAttempts) ledger.record(purpose, failedAttempts);
       console.warn(`[${label} attempt ${attempt}/${maxAttempts}] failed (${outcome}): ${message}`);
+      // A second response with the same schema issue shape is evidence of a
+      // deterministic prompt/schema incompatibility, not transport noise.
+      // Give schema repair one fresh sample, then stop paying for identical
+      // failures. Different signatures and transient transport failures keep
+      // the existing bounded retry policy.
+      if (error instanceof StructuredOutputError && error.reason === 'SCHEMA_MISMATCH') {
+        const signature = JSON.stringify(
+          error.issues.map((issue) => ({ path: issue.path, code: issue.code })).sort((a, b) =>
+            `${a.path}:${a.code}`.localeCompare(`${b.path}:${b.code}`)
+          )
+        );
+        if (signature === previousSchemaFailureSignature) throw error;
+        previousSchemaFailureSignature = signature;
+      } else {
+        previousSchemaFailureSignature = null;
+      }
       if (!retryable || attempt === maxAttempts) throw error;
     }
   }
@@ -518,7 +556,8 @@ async function extractKnowledgeUnitsWithRetry(
   options: ExtractKnowledgeUnitsOptions,
   maxAttempts: number,
   ledger: CostLedger,
-  traceLog: CallTraceLog
+  traceLog: CallTraceLog,
+  correlation: CallTraceCorrelation
 ): Promise<{ result: ExtractKnowledgeUnitsResult; attemptLog: ExtractionAttemptLog[] }> {
   return withStructuredRetry(
     () => extractKnowledgeUnits(options),
@@ -531,13 +570,48 @@ async function extractKnowledgeUnitsWithRetry(
     (r) => ({
       requestMessages: r.structuredResult.requestMessages ?? [],
       responseText: r.structuredResult.rawText ?? null,
-    })
+    }),
+    correlation
+  );
+}
+
+/** Observed counterpart of the compact finding-scoped repair call. It uses
+ * the same bounded retry, paid-call reservation (from options.runConfig),
+ * cost ledger and request/response trace contract as normal extraction. */
+export async function extractFocusedRepairUnitsWithRetry(
+  options: FocusedRepairOptions,
+  maxAttempts: number,
+  ledger: CostLedger,
+  traceLog: CallTraceLog,
+  correlation: CallTraceCorrelation,
+  call: (options: FocusedRepairOptions) => Promise<ExtractKnowledgeUnitsResult> = extractFocusedRepairUnits
+): Promise<{ result: ExtractKnowledgeUnitsResult; attemptLog: ExtractionAttemptLog[] }> {
+  return withStructuredRetry(
+    () => call(options),
+    maxAttempts,
+    'focused repair',
+    ledger,
+    traceLog,
+    'focused-repair',
+    (result) => result.structuredResult.attempts,
+    (result) => ({
+      requestMessages: result.structuredResult.requestMessages ?? [],
+      responseText: result.structuredResult.rawText ?? null,
+    }),
+    correlation
   );
 }
 
 export interface TaintResampleLog {
   readonly blockAnchor: string;
   readonly round: number;
+}
+
+interface TaintResampleCheckpoint {
+  loadTaintExtraction(round: number, block: SourceBlock): readonly ExtractedKnowledgeUnit[] | undefined;
+  saveTaintExtraction(round: number, block: SourceBlock, units: readonly ExtractedKnowledgeUnit[]): void;
+  loadTaintAudit(round: number, options: AuditBlockCoverageOptions): BlockCoverageAuditResult | undefined;
+  saveTaintAudit(round: number, options: AuditBlockCoverageOptions, result: BlockCoverageAuditResult): void;
 }
 
 /** Identity assignment may intentionally drop units whose evidence cannot be
@@ -590,7 +664,8 @@ export async function resolveTaintedCandidates(
   extractor: BatchExtractor,
   auditor: (options: AuditBlockCoverageOptions) => Promise<BlockCoverageAuditResult>,
   optionsPerBatch: Omit<ExtractKnowledgeUnitsOptions, 'blocks'>,
-  maxRounds: number
+  maxRounds: number,
+  checkpoint?: TaintResampleCheckpoint
 ): Promise<{
   units: PersistedKnowledgeUnit[];
   resampleLogs: TaintResampleLog[];
@@ -623,10 +698,13 @@ export async function resolveTaintedCandidates(
       const block = blocksByAnchor.get(anchor);
       if (block === undefined) continue;
 
-      const retryResult = await extractor({
+      const sourceBlock = { anchor: block.anchor, text: block.text, ...(block.kind !== undefined && { kind: block.kind }) };
+      const restoredExtraction = checkpoint?.loadTaintExtraction(round, sourceBlock);
+      const retryResult = restoredExtraction === undefined ? await extractor({
         ...optionsPerBatch,
-        blocks: [{ anchor: block.anchor, text: block.text }],
-      });
+        blocks: [sourceBlock],
+      }) : { units: [...restoredExtraction], structuredResult: {} as never };
+      if (restoredExtraction === undefined) checkpoint?.saveTaintExtraction(round, sourceBlock, retryResult.units);
       const namespaced = retryResult.units.map((u) => ({
         ...u,
         extractionRef: `taint-retry-${anchor}-${u.extractionRef}`,
@@ -636,15 +714,19 @@ export async function resolveTaintedCandidates(
       // A taint retry replaces every unit for the block, so the previous
       // coverage verdict no longer says anything about the replacement.
       // Audit the exact replacement before it can enter a trusted snapshot.
-      const audit = await auditor({
+      const taintAuditOptions: AuditBlockCoverageOptions = {
         blockAnchor: block.anchor,
         blockText: block.text,
+        ...(block.kind !== undefined && { blockKind: block.kind }),
         extractedStatements: namespaced.map((u) => ({
           statement: u.statement,
           quote: u.sourceSpan.quote,
         })),
         runConfig: optionsPerBatch.runConfig,
-      });
+      };
+      const restoredAudit = checkpoint?.loadTaintAudit(round, taintAuditOptions);
+      const audit = restoredAudit ?? await auditor(taintAuditOptions);
+      if (restoredAudit === undefined) checkpoint?.saveTaintAudit(round, taintAuditOptions, audit);
       auditResults.push(audit);
       if (coverageAuditNeedsReview(audit)) {
         throw new Error(
@@ -678,13 +760,16 @@ const answerSchema = z.strictObject({
 function buildRealAnswerGenerator(
   runConfig: ReturnType<typeof resolveExtractionRunConfig>,
   ledger: CostLedger,
-  traceLog: CallTraceLog
+  traceLog: CallTraceLog,
+  runId: string,
+  caseId: string
 ): AnswerGenerator {
   return async (prompt) => {
     const evidenceText = prompt.evidence
       .map((e) => `[${e.unitId}] ${e.statement}${e.numericConstraint ? ` (${e.numericConstraint.factKey}: ${e.numericConstraint.value} ${e.numericConstraint.unit})` : ''}`)
       .join('\n');
-    const result = await recordOnFailure('synthesis', ledger, traceLog, () =>
+    const correlation: CallTraceCorrelation = { runId, stage: 'synthesis', caseId };
+    const result = await recordOnFailure('synthesis', ledger, traceLog, correlation, () =>
       structured({
         schema: answerSchema,
         messages: [
@@ -706,7 +791,8 @@ function buildRealAnswerGenerator(
       result.attempts,
       { requestMessages: result.requestMessages ?? [], responseText: result.rawText ?? null },
       'SUCCESS',
-      null
+      null,
+      correlation
     );
     ledger.record('synthesis', result.attempts);
     return { text: result.data.text, citedUnitIds: result.data.citedUnitIds };
@@ -729,10 +815,12 @@ async function runEngineOnQuestion(
     const message: ConversationMessage = { id: `${input.caseId}-q`, role: 'user', text: input.question };
     ctx.taintDetector.assertClean([message], `engine input (QueryFrame messages, ${input.caseId})`);
 
+    const queryCorrelation: CallTraceCorrelation = { runId: ctx.runId, stage: 'query-frame', caseId: input.caseId };
     const { queryFrame, structuredResult: queryFrameResult } = await recordOnFailure(
       'query-frame',
       ctx.ledger,
       ctx.traceLog,
+      queryCorrelation,
       () => extractQueryFrame({ messages: [message], runConfig: ctx.queryFrameRunConfig })
     );
     recordTrace(
@@ -741,18 +829,20 @@ async function runEngineOnQuestion(
       queryFrameResult.attempts,
       { requestMessages: queryFrameResult.requestMessages ?? [], responseText: queryFrameResult.rawText ?? null },
       'SUCCESS',
-      null
+      null,
+      queryCorrelation
     );
     ctx.ledger.record('query-frame', queryFrameResult.attempts);
 
-    const retrieval = await recordOnFailure('reranker', ctx.ledger, ctx.traceLog, () =>
+    const rerankerCorrelation: CallTraceCorrelation = { runId: ctx.runId, stage: 'reranker', caseId: input.caseId };
+    const retrieval = await recordOnFailure('reranker', ctx.ledger, ctx.traceLog, rerankerCorrelation, () =>
       retrieveUnits(input.question, ctx.embeddedCandidates, {
         embeddingProvider: ctx.embeddingProvider,
         rerankerProvider: ctx.rerankerProvider,
       })
     );
     const rerankerAttempts = ctx.rerankerProvider.drainAttempts();
-    recordTrace(ctx.traceLog, 'reranker', rerankerAttempts, ctx.rerankerProvider.drainTrace(), 'SUCCESS', null);
+    recordTrace(ctx.traceLog, 'reranker', rerankerAttempts, ctx.rerankerProvider.drainTrace(), 'SUCCESS', null, rerankerCorrelation);
     ctx.ledger.record('reranker', rerankerAttempts);
 
     const candidateUnits = retrieval.topK
@@ -775,7 +865,7 @@ async function runEngineOnQuestion(
       gateInputs,
       input.question,
       ctx.decisionRelevanceRunConfig,
-      evaluateDecisionRelevance
+      evaluateDecisionRelevanceBatch
     );
 
     const resolution = resolveKnowledgeSet(decisionRelevance.relevant, queryFrame);
@@ -804,7 +894,11 @@ async function runEngineOnQuestion(
     const evidencePack = buildEvidencePack(selectedUnits, resolution);
     ctx.taintDetector.assertClean(evidencePack, `engine input (EvidencePack, ${input.caseId})`);
 
-    const draft = await synthesizeFromSelectedUnits(evidencePack, input.question, ctx.answerGenerator);
+    const draft = await synthesizeFromSelectedUnits(
+      evidencePack,
+      input.question,
+      ctx.answerGeneratorForCase(input.caseId)
+    );
     ctx.taintDetector.assertClean(draft, `engine output (DraftAnswer, ${input.caseId})`);
 
     const verification = verifyAnswerClaims(draft, evidencePack);
@@ -945,6 +1039,7 @@ async function runQuestionsAgainstSnapshot(
     deps.ledger.reservePaidCall('query-embedding')
   );
   const ctx: EngineContext = {
+    runId,
     embeddedCandidates,
     unitsById,
     embeddingProvider: queryEmbeddingProvider,
@@ -952,10 +1047,12 @@ async function runQuestionsAgainstSnapshot(
     requestContext: { audience: 'internal', now: reviewedAt },
     reviewedAt,
     queryFrameRunConfig: budgetedRunConfig(deps.ledger, 'query-frame', 'aurora-fixture-query-frame-v1'),
-    answerGenerator: buildRealAnswerGenerator(
+    answerGeneratorForCase: (caseId) => buildRealAnswerGenerator(
       budgetedRunConfig(deps.ledger, 'synthesis', 'aurora-fixture-synthesis-v1'),
       deps.ledger,
-      deps.traceLog
+      deps.traceLog,
+      runId,
+      caseId
     ),
     decisionRelevanceRunConfig: budgetedRunConfig(
       deps.ledger,
@@ -989,6 +1086,10 @@ interface ExtractionRunDeps {
   readonly embeddingModel: ReturnType<OpenAIEmbeddingProvider['modelInfo']>;
 }
 
+/** Previous invocation's write-through trace, retained only as an offline
+ * recovery source for exact initial-extraction requests. */
+let recoveryTraceEntries: readonly CallTraceEntry[] = [];
+
 async function runOneExtractionRun(
   runIndex: number,
   args: CliArgs,
@@ -1005,7 +1106,7 @@ async function runOneExtractionRun(
   const canonical = await extractCanonicalDocument(buffer);
   console.log(`canonical document: ${canonical.blocks.length} blocks`);
 
-  const sourceBlocks = canonical.blocks.map((b) => ({ anchor: b.anchor, text: b.text }));
+  const sourceBlocks = canonical.blocks.map((b) => ({ anchor: b.anchor, text: b.text, kind: b.kind }));
   const blocksByAnchor = new Map<string, SourceBlockLocation>(
     canonical.blocks.map((b) => [b.anchor, toSourceBlockLocation(b)])
   );
@@ -1013,6 +1114,10 @@ async function runOneExtractionRun(
   const extractionRunConfig = resolveExtractionRunConfig({
     beforeProviderAttempt: () => ledger.reservePaidCall('extraction'),
   });
+  const focusedRepairRunConfig = {
+    ...extractionRunConfig,
+    beforeProviderAttempt: () => ledger.reservePaidCall('focused-repair'),
+  };
   const coverageAuditRunConfig = {
     ...extractionRunConfig,
     beforeProviderAttempt: () => ledger.reservePaidCall('coverage-audit'),
@@ -1024,8 +1129,38 @@ async function runOneExtractionRun(
   // completeness-audit пути (goal-shift continuation, 2026-08-09): один
   // whole-document вызов молча забыл правила 5-10 на реальном прогоне, хотя
   // JSON был схема-валиден и retry на это не сработал бы никогда.
+  let nextExtractionBatchIndex = 0;
   const retryingExtractor = async (options: ExtractKnowledgeUnitsOptions): Promise<ExtractKnowledgeUnitsResult> => {
-    const { result, attemptLog } = await extractKnowledgeUnitsWithRetry(options, 6, ledger, traceLog);
+    const batchIndex = nextExtractionBatchIndex++;
+    const { result, attemptLog } = await extractKnowledgeUnitsWithRetry(
+      options,
+      6,
+      ledger,
+      traceLog,
+      { runId, stage: 'extraction', batchIndex, blockAnchors: options.blocks.map((block) => block.anchor) }
+    );
+    allAttemptLogs.push(...attemptLog);
+    return result;
+  };
+  const retryingTaintExtractor = async (options: ExtractKnowledgeUnitsOptions): Promise<ExtractKnowledgeUnitsResult> => {
+    const { result, attemptLog } = await extractKnowledgeUnitsWithRetry(
+      options,
+      6,
+      ledger,
+      traceLog,
+      { runId, stage: 'taint-resample', blockAnchors: options.blocks.map((block) => block.anchor) }
+    );
+    allAttemptLogs.push(...attemptLog);
+    return result;
+  };
+  const retryingFocusedRepairExtractor = async (options: FocusedRepairOptions): Promise<ExtractKnowledgeUnitsResult> => {
+    const { result, attemptLog } = await extractFocusedRepairUnitsWithRetry(
+      { ...options, runConfig: focusedRepairRunConfig },
+      6,
+      ledger,
+      traceLog,
+      { runId, stage: 'focused-repair', blockAnchor: options.block.anchor }
+    );
     allAttemptLogs.push(...attemptLog);
     return result;
   };
@@ -1042,7 +1177,8 @@ async function runOneExtractionRun(
       traceLog,
       'coverage-audit',
       (r) => r.attempts ?? [],
-      (r) => ({ requestMessages: r.requestMessages ?? [], responseText: r.rawResponseText ?? null })
+      (r) => ({ requestMessages: r.requestMessages ?? [], responseText: r.rawResponseText ?? null }),
+      { runId, stage: 'coverage-audit', blockAnchor: options.blockAnchor }
     );
     allAttemptLogs.push(...attemptLog);
     return result;
@@ -1098,13 +1234,67 @@ async function runOneExtractionRun(
     });
   }
 
+  const rawCheckpointFingerprint = buildRawExtractionFingerprint({
+    sourceRevisionHash: canonical.sourceRevisionHash,
+    canonicalTextHash: canonical.canonicalTextHash,
+    parserVersion: canonical.parserVersion,
+    blocks: sourceBlocks,
+    batchSize: args.batchSize,
+    provider: extractionRunConfig.provider,
+    model: extractionRunConfig.model,
+    config: {
+      promptVersion: extractionRunConfig.promptVersion,
+      extractionSchemaVersion: extractionRunConfig.extractionSchemaVersion,
+      extractionPromptFingerprint: probes.extractionPromptFingerprint,
+      maxTokens: EXTRACTION_MAX_TOKENS,
+      temperature: null,
+      fallbackPolicy: extractionRunConfig.fallbackPolicy,
+      requestTimeoutMs: extractionRunConfig.requestTimeoutMs ?? null,
+      totalDeadlineMs: extractionRunConfig.totalDeadlineMs ?? null,
+    },
+    auditContract: {
+      promptFingerprint: probes.auditPromptFingerprint,
+      policyFingerprint: probes.auditPolicyFingerprint,
+    },
+    repairContract: {
+      policyFingerprint: probes.focusedRepairPolicyFingerprint,
+      maxTokens: 4_000,
+    },
+    legacyCombinedConfig: {
+      promptVersion: extractionRunConfig.promptVersion,
+      extractionSchemaVersion: extractionRunConfig.extractionSchemaVersion,
+      extractionPromptFingerprint: probes.extractionPromptFingerprint,
+      auditPromptFingerprint: probes.auditPromptFingerprint,
+      auditPolicyFingerprint: probes.auditPolicyFingerprint,
+      focusedRepairPolicyFingerprint: probes.focusedRepairPolicyFingerprint,
+      maxTokens: EXTRACTION_MAX_TOKENS,
+      focusedRepairMaxTokens: 4_000,
+      temperature: null,
+      fallbackPolicy: extractionRunConfig.fallbackPolicy,
+      requestTimeoutMs: extractionRunConfig.requestTimeoutMs ?? null,
+      totalDeadlineMs: extractionRunConfig.totalDeadlineMs ?? null,
+    },
+  });
+  const rawCheckpointPath = path.join(args.outDir, `raw-extraction-run-${runIndex}.checkpoint.json`);
+  const rawCheckpoint = new RawExtractionCheckpointStore(rawCheckpointPath, rawCheckpointFingerprint);
+  const importedBatchCount = rawCheckpoint.importTraceEntries(recoveryTraceEntries, sourceBlocks);
+  if (importedBatchCount > 0) {
+    console.log(`recovered ${importedBatchCount} paid extraction batch(es) from prior exact-match call trace`);
+  }
+
   console.log(`вызов LLM (extractKnowledgeUnitsWithCompletenessAudit, batchSize=${args.batchSize})...`);
   const audited = await extractKnowledgeUnitsWithCompletenessAudit(
     sourceBlocks,
     args.batchSize,
     { runConfig: extractionRunConfig, maxTokens: EXTRACTION_MAX_TOKENS },
     extractionRunConfig,
-    { extractor: retryingExtractor, auditor: retryingAuditor }
+    {
+      extractor: retryingExtractor,
+      repairExtractor: retryingFocusedRepairExtractor,
+      auditor: retryingAuditor,
+      initialExtractionCheckpoint: rawCheckpoint,
+      paidStageCheckpoint: rawCheckpoint,
+    }
   );
   const gapsFound = audited.auditResults.filter((a) => a.hasGap).length;
   console.log(
@@ -1126,10 +1316,11 @@ async function runOneExtractionRun(
     blocksByAnchor,
     canonical.sourceRevisionHash,
     taintDetector,
-    retryingExtractor,
+    retryingTaintExtractor,
     retryingAuditor,
     { runConfig: extractionRunConfig, maxTokens: EXTRACTION_MAX_TOKENS },
     TAINT_RESAMPLE_MAX_ROUNDS
+    , rawCheckpoint
   );
   if (resampled.resampleLogs.length > 0) {
     const affectedBlocks = new Set(resampled.resampleLogs.map((l) => l.blockAnchor)).size;
@@ -1163,6 +1354,30 @@ async function runOneExtractionRun(
   }));
   taintDetector.assertClean(candidates, `engine input (retrieval candidates, ${runId})`);
 
+  const finalAuditResults = [...audited.auditResults, ...resampled.auditResults];
+  const runDir = path.join(args.outDir, runId);
+  mkdirSync(runDir, { recursive: true });
+  const artifactPath = path.join(runDir, 'extraction-artifact.json');
+
+  // Durable semantic checkpoint BEFORE the separately billed embedding
+  // provider. A provider/auth failure here must not discard already-paid,
+  // fully audited Anthropic extraction. This phase cannot feed retrieval;
+  // reuseExtractionRun completes and atomically upgrades it first.
+  const semanticCheckpoint = buildExtractionArtifact({
+    phase: 'SEMANTIC_CHECKPOINT',
+    fingerprint,
+    sourceDocPath: args.docPath,
+    snapshot,
+    embeddingModel,
+    embeddings: [],
+    extractionAttemptLog: allAttemptLogs,
+    batchLogs: audited.batchLogs,
+    auditResults: finalAuditResults,
+    focusedRetryLogs: audited.focusedRetryLogs,
+  });
+  writeExtractionArtifact(artifactPath, semanticCheckpoint);
+  console.log(`  trusted semantic checkpoint сохранён ДО embeddings: ${artifactPath}`);
+
   console.log('вычисление embeddings для candidate pool...');
   const embeddedCandidates = await embedCandidates(candidates, embeddingProvider);
 
@@ -1171,6 +1386,7 @@ async function runOneExtractionRun(
   // породила. Пишется ВСЕГДА при свежем извлечении — переиспользовать
   // задним числом нельзя то, что не сохранили.
   const artifact = buildExtractionArtifact({
+    phase: 'COMPLETE',
     fingerprint,
     sourceDocPath: args.docPath,
     snapshot,
@@ -1182,7 +1398,7 @@ async function runOneExtractionRun(
     })),
     extractionAttemptLog: allAttemptLogs,
     batchLogs: audited.batchLogs,
-    auditResults: [...audited.auditResults, ...resampled.auditResults],
+    auditResults: finalAuditResults,
     focusedRetryLogs: audited.focusedRetryLogs,
   });
 
@@ -1192,9 +1408,6 @@ async function runOneExtractionRun(
   // оплаченное извлечение целиком. Именно это и воспроизводило ту трату,
   // ради устранения которой делался --reuse-extraction: последние прогоны
   // падали как раз на вопросах.
-  const runDir = path.join(args.outDir, runId);
-  mkdirSync(runDir, { recursive: true });
-  const artifactPath = path.join(runDir, 'extraction-artifact.json');
   writeExtractionArtifact(artifactPath, artifact);
   console.log(`  артефакт извлечения сохранён ДО вопросов: ${artifactPath} (для --reuse-extraction)`);
 
@@ -1216,7 +1429,7 @@ async function runOneExtractionRun(
     results,
     extractionAttemptLog: allAttemptLogs,
     batchLogs: audited.batchLogs,
-    auditResults: [...audited.auditResults, ...resampled.auditResults],
+    auditResults: finalAuditResults,
     focusedRetryLogs: audited.focusedRetryLogs,
     artifact,
   };
@@ -1243,8 +1456,8 @@ async function reuseExtractionRun(
   fingerprint: ExtractionFingerprint,
   deps: ExtractionRunDeps
 ): Promise<ExtractionRunOutcome> {
-  console.log(`переиспользование извлечения: ${artifactPath} (0 платных вызовов в фазе извлечения)`);
-  const artifact = readExtractionArtifact(artifactPath, fingerprint);
+  console.log(`переиспользование извлечения: ${artifactPath} (без повторных Anthropic extraction/audit вызовов)`);
+  let artifact = readExtractionArtifact(artifactPath, fingerprint);
   console.log(
     `артефакт принят: ${artifact.snapshot.units.length} unit(s), сохранён ${artifact.savedAt}, отпечаток совпал`
   );
@@ -1264,12 +1477,36 @@ async function reuseExtractionRun(
   }));
   deps.taintDetector.assertClean(candidates, `engine input (retrieval candidates, ${runId})`);
 
-  const embeddedCandidates = restoreEmbeddedCandidates(
-    artifact,
-    candidates,
-    deps.embeddingModel,
-    artifactPath
-  );
+  let embeddedCandidates: EmbeddedCandidate[];
+  if (artifact.phase === 'SEMANTIC_CHECKPOINT') {
+    console.log('semantic checkpoint принят; продолжаю только corpus embeddings...');
+    embeddedCandidates = await embedCandidates(candidates, deps.embeddingProvider);
+    artifact = buildExtractionArtifact({
+      phase: 'COMPLETE',
+      fingerprint: artifact.fingerprint,
+      sourceDocPath: artifact.sourceDocPath,
+      snapshot: artifact.snapshot,
+      embeddingModel: deps.embeddingModel,
+      embeddings: candidates.map((candidate, index) => ({
+        unitId: candidate.unitId,
+        retrievalText: candidate.retrievalText,
+        embedding: embeddedCandidates[index].embedding,
+      })),
+      extractionAttemptLog: artifact.extractionAttemptLog,
+      batchLogs: artifact.batchLogs,
+      auditResults: artifact.auditResults,
+      focusedRetryLogs: artifact.focusedRetryLogs,
+    });
+    writeExtractionArtifact(artifactPath, artifact);
+    console.log(`semantic checkpoint атомарно обновлён до COMPLETE: ${artifactPath}`);
+  } else {
+    embeddedCandidates = restoreEmbeddedCandidates(
+      artifact,
+      candidates,
+      deps.embeddingModel,
+      artifactPath
+    );
+  }
 
   const results = await runQuestionsAgainstSnapshot(runId, snapshot, embeddedCandidates, unitsById, deps);
 
@@ -1468,6 +1705,24 @@ async function main() {
   // behind a PRIOR run's, while run-summary.json's runIds only ever describe
   // the latest one — writeFileSync here matches how run-summary.json already
   // behaves (overwritten fresh each invocation), so this file does too.
+  // Before truncation, retain valid lines in memory. The raw checkpoint may
+  // import only exact canonical extraction requests from them; all other
+  // purposes/responses are ignored. This recovers already-funded batches
+  // from runs made before checkpointing existed without trusting the trace as
+  // a final extraction artifact.
+  recoveryTraceEntries = [];
+  if (existsSync(callTracePath)) {
+    recoveryTraceEntries = readFileSync(callTracePath, 'utf8')
+      .split(/\r?\n/u)
+      .filter((line) => line.trim().length > 0)
+      .flatMap((line) => {
+        try {
+          return [JSON.parse(line) as CallTraceEntry];
+        } catch {
+          return [];
+        }
+      });
+  }
   writeFileSync(callTracePath, '', 'utf8');
   const traceLog = new CallTraceLog(callTracePath);
   const runs: ExtractionRunOutcome[] = [];

@@ -5,6 +5,7 @@ import {
   resolveEvidenceOffsets,
 } from './identity';
 import type { ExtractedKnowledgeUnit } from './extraction';
+import type { CanonicalBlockKind } from '../docx-canonical-blocks';
 
 /**
  * Реальное место unit'а в источнике — по нему считается `sourceBlockAnchor`.
@@ -15,6 +16,7 @@ import type { ExtractedKnowledgeUnit } from './extraction';
 export interface SourceBlockLocation {
   readonly anchor: string;
   readonly text: string;
+  readonly kind?: CanonicalBlockKind;
   /** Breadcrumb заголовков — семантические метаданные (человекочитаемый
    *  контекст, review packet), НЕ участвует в `sourceBlockAnchor` (Step 3,
    *  независимое ревью PR #76: см. `computeSourceBlockAnchor`). */

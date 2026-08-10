@@ -2,7 +2,13 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { CallTraceLog, type CallTraceEntry } from '../call-trace-log';
+import {
+  attributeAttemptCosts,
+  CallTraceLog,
+  pricedTraceTotalUsd,
+  type CallTraceEntry,
+} from '../call-trace-log';
+import { CostLedger } from '../cost-ledger';
 
 /**
  * Call-trace log (2026-08-10) — the debugging gap the user named directly:
@@ -14,17 +20,68 @@ import { CallTraceLog, type CallTraceEntry } from '../call-trace-log';
 
 function entry(overrides: Partial<CallTraceEntry> = {}): CallTraceEntry {
   return {
+    callId: 'call-1',
+    correlation: { runId: 'run-1', stage: 'extraction', blockAnchors: ['a'] },
     timestamp: '2026-08-10T00:00:00.000Z',
     purpose: 'extraction',
     provider: 'anthropic',
     model: 'claude-sonnet-5',
     outcome: 'SUCCESS',
+    attempts: [],
     requestMessages: [{ role: 'user', content: 'вопрос про апостиль' }],
     responseText: '{"units":[]}',
     errorMessage: null,
     ...overrides,
   };
 }
+
+describe('attributeAttemptCosts — exact per-provider-attempt attribution', () => {
+  it('preserves cache counters and prices every retry independently', () => {
+    const attributed = attributeAttemptCosts([
+      {
+        provider: 'anthropic', model: 'claude-sonnet-5', startedAt: '2026-08-10T00:00:00.000Z',
+        latencyMs: 100, outcome: 'SUCCESS', statusCode: 200,
+        usage: { inputTokens: 100, outputTokens: 10, cacheCreationInputTokens: 20, cacheReadInputTokens: 30 },
+      },
+      {
+        provider: 'anthropic', model: 'unknown-model', startedAt: '2026-08-10T00:00:01.000Z',
+        latencyMs: 25, outcome: 'ERROR', errorCode: 'fetch_failed',
+      },
+    ]);
+
+    expect(attributed[0]).toMatchObject({
+      attemptIndex: 1,
+      usage: { inputTokens: 100, outputTokens: 10, cacheCreationInputTokens: 20, cacheReadInputTokens: 30 },
+    });
+    expect(attributed[0].estimatedUsd).toBeGreaterThan(0);
+    expect(attributed[1]).toMatchObject({ attemptIndex: 2, usage: null, estimatedUsd: null });
+  });
+
+  it('uses null, not zero, when usage exists but the model has no price', () => {
+    const [attempt] = attributeAttemptCosts([{
+      provider: 'openai', model: 'future-model', startedAt: '2026-08-10T00:00:00.000Z',
+      latencyMs: 5, outcome: 'SUCCESS', usage: { inputTokens: 1, outputTokens: 1 },
+    }]);
+    expect(attempt.usage).toEqual({ inputTokens: 1, outputTokens: 1 });
+    expect(attempt.estimatedUsd).toBeNull();
+  });
+
+  it('reconciles exactly with CostLedger for the same priced attempts', () => {
+    const attempts = [{
+      provider: 'anthropic' as const,
+      model: 'claude-sonnet-5',
+      startedAt: '2026-08-10T00:00:00.000Z',
+      latencyMs: 8,
+      outcome: 'SUCCESS' as const,
+      usage: { inputTokens: 123, outputTokens: 17, cacheCreationInputTokens: 40, cacheReadInputTokens: 80 },
+    }];
+    const ledger = new CostLedger();
+    ledger.record('extraction', attempts);
+    const trace = entry({ attempts: attributeAttemptCosts(attempts) });
+
+    expect(pricedTraceTotalUsd([trace])).toBe(ledger.totalUsd());
+  });
+});
 
 describe('CallTraceLog — накопление в памяти (без filePath)', () => {
   it('пустой log -> all() пуст', () => {

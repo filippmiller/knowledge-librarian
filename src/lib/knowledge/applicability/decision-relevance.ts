@@ -112,6 +112,32 @@ export function buildDecisionRelevancePromptMessages(
   ];
 }
 
+export function buildBatchDecisionRelevancePromptMessages(
+  question: string,
+  candidates: readonly DecisionRelevanceCandidateInfo[]
+): ChatMessage[] {
+  return [
+    {
+      role: 'system',
+      content:
+        SYSTEM_PROMPT +
+        '\n\nДля пакетного запроса верни СТРОГО JSON: {"results":[{"unitId":"...","verdict":"...","reason":"...","potentiallyDecidingFacts":[]}]}. Верни ровно один результат для каждого переданного unitId.',
+    },
+    {
+      role: 'user',
+      content:
+        `Вопрос: "${question}"\n\nПравила-исключения:\n` +
+        candidates
+          .map(
+            (candidate) =>
+              `unitId: ${candidate.unitId}\nУтверждение: ${candidate.statement}\nЦитата: "${candidate.quote}"`
+          )
+          .join('\n\n') +
+        '\n\nОпредели релевантность каждого правила для этого вопроса.',
+    },
+  ];
+}
+
 interface RawDecisionRelevanceResponse {
   readonly verdict: DecisionRelevanceVerdict;
   readonly reason: string;
@@ -136,6 +162,11 @@ export const decisionRelevanceResponseSchema = z.strictObject({
     .transform((v) => v ?? []),
 });
 
+const classifiedDecisionRelevanceSchema = decisionRelevanceResponseSchema.extend({ unitId: z.string().min(1) });
+export const batchDecisionRelevanceResponseSchema = z.strictObject({
+  results: z.array(classifiedDecisionRelevanceSchema),
+});
+
 export interface EvaluateDecisionRelevanceOptions {
   readonly question: string;
   readonly candidate: DecisionRelevanceCandidateInfo;
@@ -153,6 +184,31 @@ export const evaluateDecisionRelevance: DecisionRelevanceClassifier = async (opt
     runConfig: options.runConfig,
   });
   return interpretDecisionRelevanceResponse(result.data);
+};
+
+export interface ClassifiedDecisionRelevance extends DecisionRelevance {
+  readonly unitId: string;
+}
+
+export interface EvaluateDecisionRelevanceBatchOptions {
+  readonly question: string;
+  readonly candidates: readonly DecisionRelevanceCandidateInfo[];
+  readonly runConfig: ExtractionRunConfig;
+}
+
+/** The singular return is retained only for existing one-candidate test
+ * doubles. Production always uses the batched array contract. */
+export type DecisionRelevanceBatchClassifier = (
+  options: EvaluateDecisionRelevanceBatchOptions
+) => Promise<readonly ClassifiedDecisionRelevance[] | DecisionRelevance>;
+
+export const evaluateDecisionRelevanceBatch: DecisionRelevanceBatchClassifier = async (options) => {
+  const result = await structured({
+    schema: batchDecisionRelevanceResponseSchema,
+    messages: buildBatchDecisionRelevancePromptMessages(options.question, options.candidates),
+    runConfig: options.runConfig,
+  });
+  return result.data.results;
 };
 
 // ─────────────────────────── deterministic gate ────────────────────────────
@@ -217,12 +273,54 @@ export async function applyDecisionRelevanceGate(
   candidates: readonly GateCandidateInput[],
   question: string,
   runConfig: ExtractionRunConfig,
-  classifier: DecisionRelevanceClassifier = evaluateDecisionRelevance
+  classifier: DecisionRelevanceBatchClassifier = evaluateDecisionRelevanceBatch
 ): Promise<DecisionRelevanceGateResult> {
   const byUnitId = new Map(candidates.map((c) => [c.evaluated.unitId, c.evaluated]));
   const trace: GatedCandidate[] = [];
   const relevant: EvaluatedCandidate[] = [];
   const droppedByClassifier: string[] = [];
+
+  const unresolved = candidates.filter((candidate) => {
+    const ev = candidate.evaluated;
+    return (
+      ev.kind === 'EXCEPTION_RULE' &&
+      (ev.trigger === null || ev.trigger.verdict === 'UNKNOWN') &&
+      !hasScopeMatchedParent(ev.parentRuleRef, byUnitId)
+    );
+  });
+  const classifiedByUnitId = new Map<string, DecisionRelevance>();
+  if (unresolved.length > 0) {
+    const classified = await classifier({
+      question,
+      candidates: unresolved.map((candidate) => ({
+        unitId: candidate.evaluated.unitId,
+        statement: candidate.statement,
+        quote: candidate.quote,
+      })),
+      runConfig,
+    });
+    const normalized: readonly ClassifiedDecisionRelevance[] = Array.isArray(classified)
+      ? classified
+      : unresolved.length === 1
+        ? [{ unitId: unresolved[0].evaluated.unitId, ...classified }]
+        : (() => {
+            throw new Error('Batched decision-relevance classifier returned a singular result for multiple candidates');
+          })();
+    for (const decision of normalized) {
+      if (classifiedByUnitId.has(decision.unitId)) {
+        throw new Error(`Batched decision-relevance classifier returned duplicate unitId: ${decision.unitId}`);
+      }
+      classifiedByUnitId.set(decision.unitId, decision);
+    }
+    for (const candidate of unresolved) {
+      if (!classifiedByUnitId.has(candidate.evaluated.unitId)) {
+        throw new Error(`Batched decision-relevance classifier omitted unitId: ${candidate.evaluated.unitId}`);
+      }
+    }
+    if (classifiedByUnitId.size !== unresolved.length) {
+      throw new Error('Batched decision-relevance classifier returned an unexpected unitId');
+    }
+  }
 
   for (const candidate of candidates) {
     const ev = candidate.evaluated;
@@ -248,11 +346,7 @@ export async function applyDecisionRelevanceGate(
         potentiallyDecidingFacts: ev.trigger?.missingFacts ?? [],
       };
     } else {
-      relevance = await classifier({
-        question,
-        candidate: { unitId: ev.unitId, statement: candidate.statement, quote: candidate.quote },
-        runConfig,
-      });
+      relevance = classifiedByUnitId.get(ev.unitId)!;
 
       // Вердикт классификатора здесь — ЕДИНСТВЕННОЕ основание отбросить
       // кандидата (см. `droppedByClassifier` и разбор ниже).

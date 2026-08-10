@@ -57,6 +57,57 @@ describe('buildCoverageAuditPromptMessages — pure, no network', () => {
     const system = buildCoverageAuditPromptMessages('Текст.', []).find((m) => m.role === 'system')!;
     expect(system.content).toContain('Пустой список findings');
   });
+
+  it('передаёт HEADING provenance и разрешает COVERED только для тематического структурного заголовка', () => {
+    const messages = buildCoverageAuditPromptMessages('Порядок безопасной работы', [], 'HEADING');
+    const user = messages.find((m) => m.role === 'user')!;
+    const system = messages.find((m) => m.role === 'system')!;
+    expect(user.content).toContain('Канонический тип блока: HEADING');
+    expect(system.content).toContain('только называет раздел или тему');
+
+    const result = interpretCoverageAuditResponse('b-heading', 'Порядок безопасной работы', [
+      { verdict: 'COVERED', quote: '', explanation: 'только название темы' },
+    ]);
+    expect(coverageAuditNeedsReview(result)).toBe(false);
+  });
+
+  it('не освобождает нормативный HEADING от coverage finding', () => {
+    const text = 'Запрещено продолжать процедуру при боли';
+    const messages = buildCoverageAuditPromptMessages(text, [], 'HEADING');
+    const system = messages.find((m) => m.role === 'system')!;
+    expect(system.content).toContain('запретом, обязанностью, исключением');
+
+    const result = interpretCoverageAuditResponse('b-heading-rule', text, [
+      { verdict: 'UNREPRESENTED_CLAUSE', quote: text, explanation: 'самостоятельный запрет не представлен' },
+    ]);
+    expect(result.hasGap).toBe(true);
+    expect(coverageAuditNeedsReview(result)).toBe(true);
+  });
+
+  it('не требует unit для точного fixture disclaimer о вымышленном тестовом документе', () => {
+    const text =
+      'Назначение: вымышленный документ для проверки семантического поиска и извлечения правил. Он не является медицинской рекомендацией.';
+    const messages = buildCoverageAuditPromptMessages(text, [], 'PARAGRAPH');
+    const system = messages.find((m) => m.role === 'system')!;
+    expect(system.content).toContain('пометки о вымышленности/тестовом характере');
+    expect(system.content).toContain('не является медицинской рекомендацией');
+    expect(system.content).toContain('если они не меняют допустимый operational answer');
+
+    const result = interpretCoverageAuditResponse('b2', text, [
+      { verdict: 'COVERED', quote: '', explanation: 'неоперационные provenance/testing metadata и disclaimer' },
+    ]);
+    expect(result.hasGap).toBe(false);
+    expect(coverageAuditNeedsReview(result)).toBe(false);
+  });
+
+  it('disclaimer не скрывает содержащийся в нём операционный запрет', () => {
+    const text = 'Дисклеймер: при боли запрещено продолжать процедуру.';
+    const result = interpretCoverageAuditResponse('b-disclaimer-rule', text, [
+      { verdict: 'UNREPRESENTED_CLAUSE', quote: 'при боли запрещено продолжать процедуру', explanation: 'операционный запрет не представлен' },
+    ]);
+    expect(result.hasGap).toBe(true);
+    expect(coverageAuditNeedsReview(result)).toBe(true);
+  });
 });
 
 describe('interpretCoverageAuditResponse — quote-grounding, не слепое доверие модели', () => {

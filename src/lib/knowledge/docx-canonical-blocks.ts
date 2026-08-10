@@ -611,6 +611,7 @@ export function toSourceBlockLocation(block: CanonicalBlock): SourceBlockLocatio
   return {
     anchor: block.anchor,
     text: block.text,
+    kind: block.kind,
     sectionPath: block.sectionPath.length > 0 ? block.sectionPath.join(' / ') : '(root)',
     structuralPath: block.structuralPath,
     blockStart: block.blockStart,

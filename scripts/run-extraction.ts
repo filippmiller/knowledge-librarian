@@ -464,7 +464,11 @@ async function main() {
       `${canonical.warnings.length} canonicalization warning(s)`
   );
 
-  const sourceBlocks: SourceBlock[] = canonical.blocks.map((b) => ({ anchor: b.anchor, text: b.text }));
+  const sourceBlocks: SourceBlock[] = canonical.blocks.map((b) => ({
+    anchor: b.anchor,
+    text: b.text,
+    kind: b.kind,
+  }));
   const blocksByAnchor = new Map<string, SourceBlockLocation>(
     canonical.blocks.map((b) => [b.anchor, toSourceBlockLocation(b)])
   );

@@ -170,19 +170,29 @@ export type BatchExtractor = (
   options: ExtractKnowledgeUnitsOptions
 ) => Promise<ExtractKnowledgeUnitsResult>;
 
+/** Optional crash-recovery boundary. Stored units are raw, pre-audit output;
+ * this hook must never be treated as evidence that extraction is trusted. */
+export interface BatchExtractionCheckpoint {
+  loadBatch(batchIndex: number, blocks: readonly SourceBlock[]): readonly ExtractedKnowledgeUnit[] | undefined;
+  saveBatch(batchIndex: number, blocks: readonly SourceBlock[], units: readonly ExtractedKnowledgeUnit[]): void;
+}
+
 export async function extractKnowledgeUnitsInBatches(
   blocks: readonly SourceBlock[],
   batchSize: number,
   optionsPerBatch: Omit<ExtractKnowledgeUnitsOptions, 'blocks'>,
-  extractor: BatchExtractor = extractKnowledgeUnits
+  extractor: BatchExtractor = extractKnowledgeUnits,
+  checkpoint?: BatchExtractionCheckpoint
 ): Promise<BatchExtractionResult> {
   const batches = batchSourceBlocks(blocks, batchSize);
   const unitsByBatch: ExtractedKnowledgeUnit[][] = [];
   const batchLogs: BatchExtractionLog[] = [];
 
   for (const [batchIndex, batchBlocks] of batches.entries()) {
-    const result = await extractor({ ...optionsPerBatch, blocks: batchBlocks });
-    const namespaced = result.units.map((u) => namespaceUnit(u, batchIndex));
+    const restored = checkpoint?.loadBatch(batchIndex, batchBlocks);
+    const rawUnits = restored ?? (await extractor({ ...optionsPerBatch, blocks: batchBlocks })).units;
+    if (restored === undefined) checkpoint?.saveBatch(batchIndex, batchBlocks, rawUnits);
+    const namespaced = rawUnits.map((u) => namespaceUnit(u, batchIndex));
     unitsByBatch.push(namespaced);
     batchLogs.push({
       batchIndex,

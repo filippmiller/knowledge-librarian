@@ -1,5 +1,6 @@
 import { appendFileSync } from 'node:fs';
-import type { ChatMessage } from './chat-provider';
+import type { ChatMessage, CompletionAttempt, CompletionUsage } from './chat-provider';
+import { estimateCostUsd } from './cost';
 
 /**
  * Call-trace log (2026-08-10). Built directly off the user's explicit
@@ -20,7 +21,50 @@ import type { ChatMessage } from './chat-provider';
  * instead of taking most of a session to find.
  */
 
+export interface CallTraceAttempt {
+  /** 1-based position within this logical call. */
+  readonly attemptIndex: number;
+  readonly provider: string;
+  readonly model: string;
+  readonly startedAt: string;
+  readonly latencyMs: number;
+  readonly outcome: CompletionAttempt['outcome'];
+  readonly statusCode?: number;
+  readonly errorCode?: string;
+  /** Provider counters verbatim, including cache creation/read when present. */
+  readonly usage: CompletionUsage | null;
+  /** `null` means missing usage or an unpriced model, never a free call. */
+  readonly estimatedUsd: number | null;
+}
+
+export interface CallTraceCorrelation {
+  readonly runId: string;
+  readonly stage: string;
+  readonly batchIndex?: number;
+  readonly blockAnchor?: string;
+  readonly blockAnchors?: readonly string[];
+  readonly caseId?: string;
+}
+
+export function attributeAttemptCosts(attempts: readonly CompletionAttempt[]): CallTraceAttempt[] {
+  return attempts.map((attempt, index) => ({
+    attemptIndex: index + 1,
+    provider: attempt.provider,
+    model: attempt.model,
+    startedAt: attempt.startedAt,
+    latencyMs: attempt.latencyMs,
+    outcome: attempt.outcome,
+    ...(attempt.statusCode !== undefined && { statusCode: attempt.statusCode }),
+    ...(attempt.errorCode !== undefined && { errorCode: attempt.errorCode }),
+    usage: attempt.usage ?? null,
+    estimatedUsd: attempt.usage === undefined ? null : estimateCostUsd(attempt.model, attempt.usage),
+  }));
+}
+
 export interface CallTraceEntry {
+  /** Correlates prompt, response, and every raw provider attempt. */
+  readonly callId: string;
+  readonly correlation: CallTraceCorrelation;
   readonly timestamp: string; // ISO-8601
   /** Same purpose tags as `CostLedger`: 'extraction' | 'coverage-audit' |
    *  'query-frame' | 'synthesis' | 'reranker' | ... — not a closed union
@@ -29,6 +73,7 @@ export interface CallTraceEntry {
   readonly provider: string;
   readonly model: string;
   readonly outcome: 'SUCCESS' | 'ERROR';
+  readonly attempts: readonly CallTraceAttempt[];
   readonly requestMessages: readonly ChatMessage[];
   /** Raw response text. `null` ONLY when the call failed before any
    *  response existed at all (pure transport failure — `ChatCompletionError`
@@ -37,6 +82,17 @@ export interface CallTraceEntry {
    *  it here, not `null`. */
   readonly responseText: string | null;
   readonly errorMessage: string | null;
+}
+
+/** Sum of exactly the priced provider attempts represented by the trace. */
+export function pricedTraceTotalUsd(entries: readonly CallTraceEntry[]): number {
+  return entries.reduce(
+    (total, entry) => total + entry.attempts.reduce(
+      (callTotal, attempt) => callTotal + (attempt.estimatedUsd ?? 0),
+      0
+    ),
+    0
+  );
 }
 
 export class CallTraceLog {

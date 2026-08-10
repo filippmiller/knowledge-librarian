@@ -16,6 +16,7 @@ import type { ChatMessage, CompletionAttempt } from '@/lib/ai/chat-provider';
 import type { ExtractionRunConfig } from '@/lib/ai/extraction-run';
 import { structured } from '@/lib/ai/structured-output';
 import { z } from 'zod';
+import type { CanonicalBlockKind } from './docx-canonical-blocks';
 
 export const COVERAGE_VERDICTS = ['COVERED', 'POSSIBLE_OMISSION', 'UNREPRESENTED_CLAUSE', 'AMBIGUOUS'] as const;
 export type CoverageVerdict = (typeof COVERAGE_VERDICTS)[number];
@@ -93,13 +94,18 @@ const SYSTEM_PROMPT = `Ты проверяешь ПОЛНОТУ извлечен
 
 Не оценивай качество формулировок extracted statements — только полноту покрытия содержания. Не изобретай пропуски, которых нет в тексте.
 
+Канонический тип блока — структурная подсказка, а не готовый вердикт. HEADING, который только называет раздел или тему, является структурным контекстом и не требует отдельного unit: верни COVERED, если иных пропусков нет. Но HEADING с самостоятельным нормативным или решающим утверждением — запретом, обязанностью, исключением, числовым пределом, условием или определением — обязан быть представлен unit; сообщи о пропуске по обычным правилам. Никогда не считай содержание покрытым только из-за типа HEADING.
+
+Не требуют отдельного unit и не являются пропуском сами по себе: неоперационные сведения о происхождении документа, его назначении или цели проверки; пометки о вымышленности/тестовом характере; disclaimers вроде «не является медицинской рекомендацией», если они не меняют допустимый operational answer и не задают действие, запрет, обязанность, исключение, условие, определение либо числовой предел. Это контекст вне закрытой taxonomy extraction, а не правило. Если такой текст всё же содержит нормативную или решающую часть, проверяй покрытие этой части как обычно — слово «disclaimer» не освобождает правило от представления.
+
 Пустой список findings — НЕ валидный ответ. Если ничего не пропущено, верни РОВНО ОДНУ находку с verdict "COVERED": «проверил и не нашёл пропусков» и «не проверил» не должны выглядеть одинаково.
 
 Ответ СТРОГО JSON: {"findings": [...]}`;
 
 export function buildCoverageAuditPromptMessages(
   blockText: string,
-  extractedStatements: readonly ExtractedStatement[]
+  extractedStatements: readonly ExtractedStatement[],
+  blockKind?: CanonicalBlockKind
 ): ChatMessage[] {
   const extractedList =
     extractedStatements.length > 0
@@ -110,7 +116,7 @@ export function buildCoverageAuditPromptMessages(
     { role: 'system', content: SYSTEM_PROMPT },
     {
       role: 'user',
-      content: `Исходный текст блока:\n${blockText}\n\nУже извлечённые утверждения:\n${extractedList}\n\nПроверь полноту покрытия.`,
+      content: `Канонический тип блока: ${blockKind ?? 'UNKNOWN'}\n\nИсходный текст блока:\n${blockText}\n\nУже извлечённые утверждения:\n${extractedList}\n\nПроверь полноту покрытия.`,
     },
   ];
 }
@@ -185,6 +191,7 @@ export const coverageAuditResponseSchema = z.strictObject({
 export interface AuditBlockCoverageOptions {
   readonly blockAnchor: string;
   readonly blockText: string;
+  readonly blockKind?: CanonicalBlockKind;
   readonly extractedStatements: readonly ExtractedStatement[];
   readonly runConfig: ExtractionRunConfig;
 }
@@ -194,7 +201,7 @@ export async function auditBlockCoverage(
 ): Promise<BlockCoverageAuditResult> {
   const result = await structured({
     schema: coverageAuditResponseSchema,
-    messages: buildCoverageAuditPromptMessages(options.blockText, options.extractedStatements),
+    messages: buildCoverageAuditPromptMessages(options.blockText, options.extractedStatements, options.blockKind),
     runConfig: options.runConfig,
   });
   return {
