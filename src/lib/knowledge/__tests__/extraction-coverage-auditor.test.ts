@@ -10,11 +10,14 @@ vi.mock('@/lib/openai', () => ({
 import {
   auditBlockCoverage,
   buildCoverageAuditPromptMessages,
+  coverageAuditNeedsReview,
   coverageAuditResponseSchema,
   interpretCoverageAuditResponse,
+  type BlockCoverageAuditResult,
   type RawCoverageFinding,
 } from '../extraction-coverage-auditor';
 import type { ExtractionRunConfig } from '@/lib/ai/extraction-run';
+import { StructuredOutputError } from '@/lib/ai/structured-output';
 
 /**
  * Goal-shift continuation (2026-08-09): a general, oracle-blind completeness
@@ -44,6 +47,15 @@ describe('buildCoverageAuditPromptMessages — pure, no network', () => {
 
   it('пустой список units — валиден (блок мог не дать ни одного unit\'а, это тоже проверяемый случай)', () => {
     expect(() => buildCoverageAuditPromptMessages('Текст.', [])).not.toThrow();
+  });
+
+  // W1-C (2026-08-10): схема теперь ОТКЛОНЯЕТ `{"findings": []}`, и каждое
+  // такое отклонение стоит повторного вызова аудита. Промпт обязан прямо
+  // требовать непустой список, иначе мы платим за повторы за то, что модели
+  // никогда не сказали.
+  it('системный промпт прямо запрещает пустой findings — иначе новая проверка схемы оплачивается повторами вызова', () => {
+    const system = buildCoverageAuditPromptMessages('Текст.', []).find((m) => m.role === 'system')!;
+    expect(system.content).toContain('Пустой список findings');
   });
 });
 
@@ -97,9 +109,130 @@ describe('interpretCoverageAuditResponse — quote-grounding, не слепое 
     expect(result.hasGap).toBe(false);
     expect(result.findings).toHaveLength(1);
   });
+});
 
-  it('пустой список findings -> hasGap=false (вырожденный случай, не отсутствие проверки)', () => {
+/**
+ * Fail-closed семантика (план docs/plans/2026-08-10-cost-and-reliability-hardening.md,
+ * W1-C). Аудитор — ЕДИНСТВЕННЫЙ механизм, обеспечивающий обещание «ни одно
+ * правило не потеряно молча из исходного документа». До этой правки он
+ * проваливался ОТКРЫТО в двух местах:
+ *
+ * 1. `findings: []` давал `hasGap=false`, то есть блок записывался как
+ *    полностью покрытый — хотя промпт требует явного вердикта COVERED, и
+ *    молчание моделью НЕ предусмотрено ни для одного случая.
+ * 2. AMBIGUOUS не влиял ни на что: «я не уверен, пропущено ли» приводило к
+ *    публикации без единого следа.
+ *
+ * Оба случая — это «аудит НЕ подтвердил, что блок чист», и обращаться с ними
+ * как с подтверждением чистоты нельзя. `hasGap` при этом сохраняет прежний
+ * смысл (подтверждённый пропуск, триггер focused re-extraction в
+ * audited-extraction.ts) — различие вердиктов не схлопывается в один флаг.
+ */
+describe('interpretCoverageAuditResponse — fail closed: молчание и неуверенность аудитора не равны «покрыто»', () => {
+  const BLOCK_TEXT = 'Нельзя чесать чужой участок кожи без явного согласия того человека.';
+
+  it('пустой список findings -> unresolved=true: промпт требует явного COVERED, поэтому «ни одной находки» — аномалия, а не «сообщать нечего»', () => {
+    const result = interpretCoverageAuditResponse('b1', BLOCK_TEXT, []);
+    expect(result.unresolved).toBe(true);
+  });
+
+  it('пустой список findings -> hasGap остаётся false: «аудитор не ответил» и «подтверждён пропуск» — разные утверждения, и повторное извлечение блока тут чинить нечего (нет находки, которая говорила бы что искать)', () => {
     expect(interpretCoverageAuditResponse('b1', BLOCK_TEXT, []).hasGap).toBe(false);
+  });
+
+  it('AMBIGUOUS -> unresolved=true при hasGap=false: нерешённая неуверенность больше не проходит молча', () => {
+    const raw: RawCoverageFinding[] = [
+      { verdict: 'AMBIGUOUS', quote: 'без явного согласия', explanation: 'не уверен' },
+    ];
+    const result = interpretCoverageAuditResponse('b1', BLOCK_TEXT, raw);
+    expect(result.hasGap).toBe(false);
+    expect(result.unresolved).toBe(true);
+  });
+
+  it('все findings COVERED -> unresolved=false: единственный способ признать блок чистым — явный вердикт модели', () => {
+    const raw: RawCoverageFinding[] = [{ verdict: 'COVERED', quote: '', explanation: 'всё покрыто' }];
+    expect(interpretCoverageAuditResponse('b1', BLOCK_TEXT, raw).unresolved).toBe(false);
+  });
+
+  it('подтверждённый пропуск -> unresolved=false: вид вердикта остаётся различим, «пропуск» не подменяется «неуверенностью»', () => {
+    const raw: RawCoverageFinding[] = [
+      { verdict: 'UNREPRESENTED_CLAUSE', quote: 'без явного согласия', explanation: 'условие не извлечено' },
+    ];
+    const result = interpretCoverageAuditResponse('b1', BLOCK_TEXT, raw);
+    expect(result.hasGap).toBe(true);
+    expect(result.unresolved).toBe(false);
+  });
+
+  it('COVERED вместе с AMBIGUOUS -> unresolved=true: одна уверенная находка не отменяет неразрешённую', () => {
+    const raw: RawCoverageFinding[] = [
+      { verdict: 'COVERED', quote: '', explanation: 'x' },
+      { verdict: 'AMBIGUOUS', quote: 'без явного согласия', explanation: 'не уверен' },
+    ];
+    expect(interpretCoverageAuditResponse('b1', BLOCK_TEXT, raw).unresolved).toBe(true);
+  });
+});
+
+/**
+ * `coverageAuditNeedsReview` — ЕДИНСТВЕННОЕ определение «блок чист», которым
+ * обязан пользоваться вызывающий, решающий, можно ли публиковать блок.
+ * Выводится из `findings`, а не читает флаг: результат аудита может прийти
+ * из руками собранной фикстуры (`auditor`-депенденси в
+ * audited-extraction.test.ts) или из сохранённого coverage-audit.json — там
+ * необязательного `unresolved` нет вовсе, и предикат, читающий флаг, принял
+ * бы `undefined` за «чисто». То есть ровно тот fail-open, который эта задача
+ * и закрывает.
+ */
+describe('coverageAuditNeedsReview — политика «что считается чистым блоком» в одном месте', () => {
+  const BLOCK_TEXT = 'Нельзя чесать чужой участок кожи без явного согласия того человека.';
+
+  it('все findings COVERED -> false: блок чист', () => {
+    const result = interpretCoverageAuditResponse('b1', BLOCK_TEXT, [
+      { verdict: 'COVERED', quote: '', explanation: 'всё покрыто' },
+    ]);
+    expect(coverageAuditNeedsReview(result)).toBe(false);
+  });
+
+  it('AMBIGUOUS -> true, хотя hasGap=false: неуверенность аудитора не пропускает блок молча', () => {
+    const result = interpretCoverageAuditResponse('b1', BLOCK_TEXT, [
+      { verdict: 'AMBIGUOUS', quote: 'без явного согласия', explanation: 'не уверен' },
+    ]);
+    expect(result.hasGap).toBe(false);
+    expect(coverageAuditNeedsReview(result)).toBe(true);
+  });
+
+  it('подтверждённый пропуск -> true', () => {
+    const result = interpretCoverageAuditResponse('b1', BLOCK_TEXT, [
+      { verdict: 'POSSIBLE_OMISSION', quote: 'без явного согласия', explanation: 'x' },
+    ]);
+    expect(coverageAuditNeedsReview(result)).toBe(true);
+  });
+
+  it('результат, собранный РУКАМИ без поля unresolved, с пустым findings -> true: отсутствие флага не читается как «чисто»', () => {
+    const handBuilt: BlockCoverageAuditResult = { blockAnchor: 'b1', findings: [], hasGap: false };
+    expect(handBuilt.unresolved).toBeUndefined();
+    expect(coverageAuditNeedsReview(handBuilt)).toBe(true);
+  });
+
+  it('needsReview === hasGap || unresolved для любой комбинации вердиктов — два поля и предикат не могут разойтись', () => {
+    const combos: RawCoverageFinding[][] = [
+      [],
+      [{ verdict: 'COVERED', quote: '', explanation: '' }],
+      [{ verdict: 'AMBIGUOUS', quote: 'без явного согласия', explanation: '' }],
+      [{ verdict: 'POSSIBLE_OMISSION', quote: 'без явного согласия', explanation: '' }],
+      [{ verdict: 'UNREPRESENTED_CLAUSE', quote: 'без явного согласия', explanation: '' }],
+      [
+        { verdict: 'COVERED', quote: '', explanation: '' },
+        { verdict: 'AMBIGUOUS', quote: 'без явного согласия', explanation: '' },
+      ],
+      [
+        { verdict: 'UNREPRESENTED_CLAUSE', quote: 'без явного согласия', explanation: '' },
+        { verdict: 'AMBIGUOUS', quote: 'того человека', explanation: '' },
+      ],
+    ];
+    for (const raw of combos) {
+      const result = interpretCoverageAuditResponse('b1', BLOCK_TEXT, raw);
+      expect(coverageAuditNeedsReview(result)).toBe(result.hasGap || result.unresolved === true);
+    }
   });
 });
 
@@ -130,6 +263,23 @@ describe('coverageAuditResponseSchema — explanation ключ ПРОПУЩЕН 
     });
     expect(parsed.success).toBe(true);
     if (parsed.success) expect(parsed.data.findings[0].explanation).toBe('условие не извлечено');
+  });
+
+  // W1-C (2026-08-10): `{"findings": []}` — это НАРУШЕНИЕ протокола, а не вердикт.
+  // Промпт требует отдельной находки COVERED на весь блок, когда ничего не
+  // пропущено, поэтому «ни одной находки» не означает ничего и не может быть
+  // записано как «покрыто». Отклоняем на уровне схемы: SCHEMA_MISMATCH —
+  // ровно тот класс отказа, ради которого у вызывающего (withStructuredRetry в
+  // run-aurora-fixture.ts, 6 попыток) уже есть ограниченный повтор, и стоит он
+  // одного повторного вызова аудита, а не целого focused re-extraction блока.
+  it('{"findings": []} -> схема ОТКЛОНЯЕТ ответ: молчание модели не является валидным вердиктом', () => {
+    const parsed = coverageAuditResponseSchema.safeParse({ findings: [] });
+    expect(parsed.success).toBe(false);
+  });
+
+  it('одна находка -> схема принимает: отклоняется именно пустота, а не короткий ответ', () => {
+    const parsed = coverageAuditResponseSchema.safeParse({ findings: [{ verdict: 'COVERED', quote: '' }] });
+    expect(parsed.success).toBe(true);
   });
 });
 
@@ -211,5 +361,31 @@ describe('auditBlockCoverage — реальный сетевой путь нес
     expect(result.requestMessages).toBeDefined();
     expect(result.requestMessages?.some((m) => m.content.includes('Текст блока.'))).toBe(true);
     expect(result.rawResponseText).toBe(rawResponse);
+  });
+
+  // W1-C (2026-08-10), сквозная проверка fail-closed пути: единственная
+  // гарантия «правило не потеряно молча» держится на том, что блок НИКОГДА не
+  // попадает в результат как покрытый на основании пустого ответа. Проверка на
+  // уровне схемы (выше) обязана доходить до вызывающего исключением, а не
+  // тихим `hasGap: false`.
+  it('модель вернула {"findings": []} -> вызов падает StructuredOutputError, а не возвращает блок как покрытый', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          content: [{ type: 'text', text: JSON.stringify({ findings: [] }) }],
+          usage: { input_tokens: 100, output_tokens: 5 },
+        }),
+        { status: 200 }
+      )
+    );
+
+    await expect(
+      auditBlockCoverage({
+        blockAnchor: 'b1',
+        blockText: 'Текст блока.',
+        extractedStatements: [],
+        runConfig: runConfig(),
+      })
+    ).rejects.toBeInstanceOf(StructuredOutputError);
   });
 });
