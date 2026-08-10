@@ -49,6 +49,7 @@ import {
 } from '../src/lib/knowledge/extraction-coverage-auditor';
 import { ChatCompletionError, type CompletionAttempt } from '../src/lib/ai/chat-provider';
 import { CostLedger } from '../src/lib/ai/cost-ledger';
+import { CallTraceLog, type CallTraceEntry } from '../src/lib/ai/call-trace-log';
 import {
   assignIdentity,
   type PersistedKnowledgeUnit,
@@ -228,6 +229,7 @@ interface EngineContext {
   readonly decisionRelevanceRunConfig: ReturnType<typeof resolveExtractionRunConfig>;
   readonly taintDetector: OracleTaintDetector;
   readonly ledger: CostLedger;
+  readonly traceLog: CallTraceLog;
 }
 
 interface ExtractionAttemptLog {
@@ -265,6 +267,60 @@ function attemptsFromError(error: unknown): readonly CompletionAttempt[] | null 
   return null;
 }
 
+/** Request/response half of one `CallTraceEntry` — everything except the
+ *  bookkeeping fields (`timestamp`/`purpose`/`provider`/`model`/`outcome`/
+ *  `errorMessage`) that the caller already knows or derives separately. */
+type TraceInfo = Pick<CallTraceEntry, 'requestMessages' | 'responseText'>;
+
+/**
+ * Trace counterpart to `attemptsFromError` — same two failure classes, same
+ * reasoning for why `ChatCompletionError` carries no response text: it means
+ * NEITHER the primary provider NOR the fallback ever answered, so there is
+ * no raw response to show, only the prompt that was sent. A SCHEMA_MISMATCH/
+ * TRUNCATED_JSON (`StructuredOutputError`) is the opposite case and the one
+ * that matters most for debugging — the HTTP call succeeded, so
+ * `error.result.rawText` is a REAL, if invalid, response sitting right next
+ * to `error.result.requestMessages`. This is exactly the pairing that would
+ * have made the Task 36 43/43 SCHEMA_MISMATCH root cause obvious immediately.
+ */
+function traceFromError(error: unknown): TraceInfo | null {
+  if (error instanceof StructuredOutputError) {
+    return {
+      requestMessages: error.result.requestMessages ?? [],
+      responseText: error.result.rawText ?? null,
+    };
+  }
+  if (error instanceof ChatCompletionError) {
+    return { requestMessages: error.requestMessages ?? [], responseText: null };
+  }
+  return null;
+}
+
+/** Single point that shapes a `CallTraceEntry` and hands it to the log —
+ *  provider/model come from the LAST attempt (the one that actually
+ *  produced this outcome), not from a separately-threaded field, so a
+ *  fallback that switched provider/model mid-call is still traced honestly. */
+function recordTrace(
+  traceLog: CallTraceLog,
+  purpose: string,
+  attempts: readonly CompletionAttempt[],
+  trace: TraceInfo,
+  outcome: 'SUCCESS' | 'ERROR',
+  errorMessage: string | null
+): void {
+  const last = attempts[attempts.length - 1];
+  traceLog.record({
+    timestamp: new Date().toISOString(),
+    purpose,
+    provider: last?.provider ?? 'unknown',
+    model: last?.model ?? 'unknown',
+    outcome,
+    requestMessages: trace.requestMessages,
+    responseText: trace.responseText,
+    errorMessage,
+  });
+}
+
 /**
  * Same bounded retry class as scripts/run-extraction.ts's
  * extractKnowledgeUnitsWithRetry — structured() deliberately doesn't retry
@@ -291,14 +347,24 @@ function attemptsFromError(error: unknown): readonly CompletionAttempt[] | null 
  * 43/43 identical schema failures earlier this session — was invisible to
  * the ledger. A dollar ceiling built on that undercount could never
  * actually trip at the real spend.
+ *
+ * OWNS call-trace recording the same way, for the same reason (2026-08-10):
+ * a retried-away SCHEMA_MISMATCH has a real raw response sitting right next
+ * to the prompt that produced it — exactly the pairing that would have
+ * shortened the Task 36 investigation. `getTrace` mirrors `getAttempts`:
+ * caller-supplied because `T` differs per call site (`ExtractKnowledgeUnitsResult`
+ * nests its `StructuredResult` under `.structuredResult`; `BlockCoverageAuditResult`
+ * carries `requestMessages`/`rawResponseText` directly).
  */
 async function withStructuredRetry<T>(
   call: () => Promise<T>,
   maxAttempts: number,
   label: string,
   ledger: CostLedger,
+  traceLog: CallTraceLog,
   purpose: string,
-  getAttempts: (result: T) => readonly CompletionAttempt[]
+  getAttempts: (result: T) => readonly CompletionAttempt[],
+  getTrace: (result: T) => TraceInfo
 ): Promise<{ result: T; attemptLog: ExtractionAttemptLog[] }> {
   const attemptLog: ExtractionAttemptLog[] = [];
 
@@ -306,19 +372,22 @@ async function withStructuredRetry<T>(
     try {
       const result = await call();
       attemptLog.push({ attempt, outcome: 'SUCCESS', message: null });
-      ledger.record(purpose, getAttempts(result));
+      const attempts = getAttempts(result);
+      ledger.record(purpose, attempts);
+      recordTrace(traceLog, purpose, attempts, getTrace(result), 'SUCCESS', null);
       return { result, attemptLog };
     } catch (error) {
       const outcome = classifyStructuredError(error);
       const retryable = outcome !== 'OTHER_ERROR';
-      attemptLog.push({
-        attempt,
-        outcome,
-        message: error instanceof Error ? error.message : String(error),
-      });
+      const message = error instanceof Error ? error.message : String(error);
+      attemptLog.push({ attempt, outcome, message });
       const failedAttempts = attemptsFromError(error);
       if (failedAttempts) ledger.record(purpose, failedAttempts);
-      console.warn(`[${label} attempt ${attempt}/${maxAttempts}] failed (${outcome}): ${attemptLog[attemptLog.length - 1].message}`);
+      const failedTrace = traceFromError(error);
+      if (failedAttempts && failedTrace) {
+        recordTrace(traceLog, purpose, failedAttempts, failedTrace, 'ERROR', message);
+      }
+      console.warn(`[${label} attempt ${attempt}/${maxAttempts}] failed (${outcome}): ${message}`);
       if (!retryable || attempt === maxAttempts) throw error;
     }
   }
@@ -328,15 +397,21 @@ async function withStructuredRetry<T>(
 async function extractKnowledgeUnitsWithRetry(
   options: ExtractKnowledgeUnitsOptions,
   maxAttempts: number,
-  ledger: CostLedger
+  ledger: CostLedger,
+  traceLog: CallTraceLog
 ): Promise<{ result: ExtractKnowledgeUnitsResult; attemptLog: ExtractionAttemptLog[] }> {
   return withStructuredRetry(
     () => extractKnowledgeUnits(options),
     maxAttempts,
     'extraction',
     ledger,
+    traceLog,
     'extraction',
-    (r) => r.structuredResult.attempts
+    (r) => r.structuredResult.attempts,
+    (r) => ({
+      requestMessages: r.structuredResult.requestMessages ?? [],
+      responseText: r.structuredResult.rawText ?? null,
+    })
   );
 }
 
@@ -431,7 +506,8 @@ const answerSchema = z.strictObject({
 
 function buildRealAnswerGenerator(
   runConfig: ReturnType<typeof resolveExtractionRunConfig>,
-  ledger: CostLedger
+  ledger: CostLedger,
+  traceLog: CallTraceLog
 ): AnswerGenerator {
   return async (prompt) => {
     const evidenceText = prompt.evidence
@@ -452,6 +528,14 @@ function buildRealAnswerGenerator(
       runConfig,
     });
     ledger.record('synthesis', result.attempts);
+    recordTrace(
+      traceLog,
+      'synthesis',
+      result.attempts,
+      { requestMessages: result.requestMessages ?? [], responseText: result.rawText ?? null },
+      'SUCCESS',
+      null
+    );
     return { text: result.data.text, citedUnitIds: result.data.citedUnitIds };
   };
 }
@@ -477,12 +561,22 @@ async function runEngineOnQuestion(
       runConfig: ctx.queryFrameRunConfig,
     });
     ctx.ledger.record('query-frame', queryFrameResult.attempts);
+    recordTrace(
+      ctx.traceLog,
+      'query-frame',
+      queryFrameResult.attempts,
+      { requestMessages: queryFrameResult.requestMessages ?? [], responseText: queryFrameResult.rawText ?? null },
+      'SUCCESS',
+      null
+    );
 
     const retrieval = await retrieveUnits(input.question, ctx.embeddedCandidates, {
       embeddingProvider: ctx.embeddingProvider,
       rerankerProvider: ctx.rerankerProvider,
     });
-    ctx.ledger.record('reranker', ctx.rerankerProvider.drainAttempts());
+    const rerankerAttempts = ctx.rerankerProvider.drainAttempts();
+    ctx.ledger.record('reranker', rerankerAttempts);
+    recordTrace(ctx.traceLog, 'reranker', rerankerAttempts, ctx.rerankerProvider.drainTrace(), 'SUCCESS', null);
 
     const candidateUnits = retrieval.topK
       .map((id) => ctx.unitsById.get(id))
@@ -617,7 +711,8 @@ async function runOneExtractionRun(
   questions: readonly EngineQuestionInput[],
   sourceRules: readonly SourceRule[],
   taintDetector: OracleTaintDetector,
-  ledger: CostLedger
+  ledger: CostLedger,
+  traceLog: CallTraceLog
 ): Promise<ExtractionRunOutcome> {
   const runId = `run-${runIndex}-${new Date().toISOString().replace(/[:.]/g, '-')}`;
   console.log(`\n=== EXTRACTION RUN ${runIndex} (${runId}) ===`);
@@ -640,7 +735,7 @@ async function runOneExtractionRun(
   // whole-document вызов молча забыл правила 5-10 на реальном прогоне, хотя
   // JSON был схема-валиден и retry на это не сработал бы никогда.
   const retryingExtractor = async (options: ExtractKnowledgeUnitsOptions): Promise<ExtractKnowledgeUnitsResult> => {
-    const { result, attemptLog } = await extractKnowledgeUnitsWithRetry(options, 6, ledger);
+    const { result, attemptLog } = await extractKnowledgeUnitsWithRetry(options, 6, ledger, traceLog);
     allAttemptLogs.push(...attemptLog);
     return result;
   };
@@ -654,8 +749,10 @@ async function runOneExtractionRun(
       6,
       'coverage audit',
       ledger,
+      traceLog,
       'coverage-audit',
-      (r) => r.attempts ?? []
+      (r) => r.attempts ?? [],
+      (r) => ({ requestMessages: r.requestMessages ?? [], responseText: r.rawResponseText ?? null })
     );
     allAttemptLogs.push(...attemptLog);
     return result;
@@ -735,7 +832,8 @@ async function runOneExtractionRun(
   const queryFrameRunConfig = resolveExtractionRunConfig({ promptVersion: 'aurora-fixture-query-frame-v1' });
   const answerGenerator = buildRealAnswerGenerator(
     resolveExtractionRunConfig({ promptVersion: 'aurora-fixture-synthesis-v1' }),
-    ledger
+    ledger,
+    traceLog
   );
   const decisionRelevanceRunConfig = resolveExtractionRunConfig({
     promptVersion: 'aurora-fixture-decision-relevance-v1',
@@ -753,6 +851,7 @@ async function runOneExtractionRun(
     decisionRelevanceRunConfig,
     taintDetector,
     ledger,
+    traceLog,
   };
 
   const results: EngineQuestionResult[] = [];
@@ -810,11 +909,12 @@ async function runOneExtractionRunWithTaintRetry(
   questions: readonly EngineQuestionInput[],
   sourceRules: readonly SourceRule[],
   taintDetector: OracleTaintDetector,
-  ledger: CostLedger
+  ledger: CostLedger,
+  traceLog: CallTraceLog
 ): Promise<ExtractionRunOutcome> {
   for (let attempt = 1; attempt <= MAX_TAINT_RETRY_ATTEMPTS; attempt++) {
     try {
-      return await runOneExtractionRun(runIndex, args, questions, sourceRules, taintDetector, ledger);
+      return await runOneExtractionRun(runIndex, args, questions, sourceRules, taintDetector, ledger, traceLog);
     } catch (err) {
       if (!(err instanceof OracleTaintError) || attempt === MAX_TAINT_RETRY_ATTEMPTS) throw err;
       console.warn(
@@ -917,12 +1017,19 @@ async function main() {
   mkdirSync(args.outDir, { recursive: true });
 
   const ledger = new CostLedger({ maxTotalUsd: args.maxCostUsd });
+  // Call-trace log (2026-08-10): the exact prompt next to the exact raw
+  // response, per call — the debugging visibility CostLedger's aggregate
+  // number never gave. JSONL, written incrementally like CostLedger's own
+  // artifacts, so a budget/taint abort partway through still leaves every
+  // call traced up to that point on disk.
+  const callTracePath = path.join(args.outDir, 'call-trace.jsonl');
+  const traceLog = new CallTraceLog(callTracePath);
   const runs: ExtractionRunOutcome[] = [];
   let abortedBy: unknown;
 
   try {
     for (let i = 1; i <= args.extractionRuns; i++) {
-      const outcome = await runOneExtractionRunWithTaintRetry(i, args, questions, sourceRules, taintDetector, ledger);
+      const outcome = await runOneExtractionRunWithTaintRetry(i, args, questions, sourceRules, taintDetector, ledger, traceLog);
       runs.push(outcome);
 
       const runDir = path.join(args.outDir, outcome.runId);
@@ -994,6 +1101,7 @@ async function main() {
           // стоимость прогона, пока эти два пути не подключены.
           unmeteredPurposes: UNMETERED_PURPOSES,
         },
+        callTracePath,
         abortedBy: abortedBy instanceof Error ? abortedBy.message : abortedBy ? String(abortedBy) : null,
       },
       null,
@@ -1013,6 +1121,7 @@ async function main() {
   console.log(
     `  NOT YET METERED: ${UNMETERED_PURPOSES.map((p) => `${p.purpose} (${p.reason})`).join('; ')} — real spend is higher than the total above.`
   );
+  console.log(`  full request/response trace (every call, incl. failed retries): ${callTracePath}`);
 
   if (abortedBy) {
     console.log(
