@@ -53,6 +53,15 @@ export interface BlockCoverageAuditResult {
    *  cost ledger (Task 37). Optional: hand-built test fixtures for the
    *  `auditor` dependency (audited-extraction.ts) never made a real call. */
   readonly attempts?: readonly CompletionAttempt[];
+  /** Exact messages sent for the underlying `structured()` call — source
+   *  for the call-trace log (2026-08-10), same optionality reason as
+   *  `attempts` above. */
+  readonly requestMessages?: readonly ChatMessage[];
+  /** Raw (pre-normalization) response text of the underlying call — paired
+   *  with `requestMessages` this is the whole debugging signal a call-trace
+   *  entry needs: exact prompt next to exact raw response. Same optionality
+   *  reason as `attempts` above. */
+  readonly rawResponseText?: string;
 }
 
 const SYSTEM_PROMPT = `Ты проверяешь ПОЛНОТУ извлечения структурированных единиц знания из ОДНОГО блока исходного текста.
@@ -134,5 +143,7 @@ export async function auditBlockCoverage(
   return {
     ...interpretCoverageAuditResponse(options.blockAnchor, options.blockText, result.data.findings),
     attempts: result.attempts,
+    requestMessages: result.requestMessages,
+    rawResponseText: result.rawText,
   };
 }

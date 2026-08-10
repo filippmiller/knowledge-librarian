@@ -184,4 +184,32 @@ describe('auditBlockCoverage — реальный сетевой путь нес
     expect(result.attempts).toHaveLength(1);
     expect(result.attempts?.[0].usage).toEqual({ inputTokens: 321, outputTokens: 12 });
   });
+
+  // Call-trace log (2026-08-10): та же дисциплина, что и attempts выше — без
+  // requestMessages/rawResponseText пользователь не может сопоставить
+  // конкретный вердикт аудита с тем, что именно спросили и что реально
+  // ответила модель.
+  it('результат несёт requestMessages и rawResponseText — источник для call-trace log', async () => {
+    const rawResponse = JSON.stringify({ findings: [{ verdict: 'COVERED', quote: '' }] });
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          content: [{ type: 'text', text: rawResponse }],
+          usage: { input_tokens: 321, output_tokens: 12 },
+        }),
+        { status: 200 }
+      )
+    );
+
+    const result = await auditBlockCoverage({
+      blockAnchor: 'b1',
+      blockText: 'Текст блока.',
+      extractedStatements: [],
+      runConfig: runConfig(),
+    });
+
+    expect(result.requestMessages).toBeDefined();
+    expect(result.requestMessages?.some((m) => m.content.includes('Текст блока.'))).toBe(true);
+    expect(result.rawResponseText).toBe(rawResponse);
+  });
 });

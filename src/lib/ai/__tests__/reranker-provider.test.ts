@@ -123,4 +123,47 @@ describe('LlmRerankerProvider', () => {
       expect(reranker.drainAttempts()).toEqual([]);
     });
   });
+
+  describe('drainTrace() — источник для call-trace log (2026-08-10)', () => {
+    it('после rerank() несёт requestMessages/responseText, и очищается после чтения', async () => {
+      const rawResponse = JSON.stringify({ scores: [{ id: 'a', score: 0.5 }] });
+      fetchMock.mockResolvedValue(anthropicOk(rawResponse));
+
+      const reranker = new LlmRerankerProvider(runConfig());
+      await reranker.rerank('вопрос про апостиль', [{ id: 'a', text: 'кандидат A' }]);
+
+      const trace = reranker.drainTrace();
+      expect(trace.requestMessages.some((m) => m.content.includes('вопрос про апостиль'))).toBe(true);
+      expect(trace.responseText).toBe(rawResponse);
+
+      const drainedAgain = reranker.drainTrace();
+      expect(drainedAgain.requestMessages).toEqual([]);
+      expect(drainedAgain.responseText).toBeNull();
+    });
+
+    it('пустой список кандидатов -> drainTrace() пуст, LLM не звался', async () => {
+      const reranker = new LlmRerankerProvider(runConfig());
+      await reranker.rerank('вопрос', []);
+      const trace = reranker.drainTrace();
+      expect(trace.requestMessages).toEqual([]);
+      expect(trace.responseText).toBeNull();
+    });
+
+    it('не мешает drainAttempts() — оба side-channel читаются независимо', async () => {
+      fetchMock.mockResolvedValue(
+        anthropicOk(JSON.stringify({ scores: [{ id: 'a', score: 0.5 }] }), {
+          input_tokens: 10,
+          output_tokens: 5,
+        })
+      );
+
+      const reranker = new LlmRerankerProvider(runConfig());
+      await reranker.rerank('вопрос', [{ id: 'a', text: 'кандидат A' }]);
+
+      const attempts = reranker.drainAttempts();
+      const trace = reranker.drainTrace();
+      expect(attempts).toHaveLength(1);
+      expect(trace.requestMessages.length).toBeGreaterThan(0);
+    });
+  });
 });

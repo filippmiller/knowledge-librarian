@@ -1,7 +1,15 @@
 import { z } from 'zod';
-import type { CompletionAttempt } from './chat-provider';
+import type { ChatMessage, CompletionAttempt } from './chat-provider';
 import type { ModelInfo } from './embedding-provider';
 import { structured, type StructuredRunConfig } from './structured-output';
+
+/** Snapshot of the most recent `rerank()` call for the call-trace log
+ *  (2026-08-10) — same pairing as `CallTraceEntry`: the exact prompt next
+ *  to the exact raw response, so a bad rerank can be debugged directly. */
+export interface RerankTrace {
+  readonly requestMessages: readonly ChatMessage[];
+  readonly responseText: string | null;
+}
 
 /**
  * Реранкер (PR G, [R4a], план §3) — **новый компонент**: в репозитории его
@@ -42,6 +50,11 @@ export class LlmRerankerProvider implements RerankerProvider {
    *  observability detail of THIS implementation, not a contract other
    *  providers (e.g. test doubles) need to honor. */
   private pendingAttempts: CompletionAttempt[] = [];
+  /** Same side-channel discipline as `pendingAttempts`, for the call-trace
+   *  log (2026-08-10) — parallel, independently drainable state, not a
+   *  replacement for `pendingAttempts`/`drainAttempts()`. */
+  private pendingRequestMessages: readonly ChatMessage[] = [];
+  private pendingResponseText: string | null = null;
 
   constructor(private readonly runConfig: StructuredRunConfig) {}
 
@@ -51,6 +64,8 @@ export class LlmRerankerProvider implements RerankerProvider {
   ): Promise<RankedCandidate[]> {
     if (candidates.length === 0) {
       this.pendingAttempts = [];
+      this.pendingRequestMessages = [];
+      this.pendingResponseText = null;
       return [];
     }
 
@@ -74,6 +89,8 @@ export class LlmRerankerProvider implements RerankerProvider {
       runConfig: this.runConfig,
     });
     this.pendingAttempts = result.attempts;
+    this.pendingRequestMessages = result.requestMessages ?? [];
+    this.pendingResponseText = result.rawText ?? null;
 
     const scoreById = new Map(result.data.scores.map((s) => [s.id, s.score]));
     return candidates
@@ -90,5 +107,19 @@ export class LlmRerankerProvider implements RerankerProvider {
     const attempts = this.pendingAttempts;
     this.pendingAttempts = [];
     return attempts;
+  }
+
+  /** Returns and clears the request/response trace from the most recent
+   *  `rerank()` call — source for the call-trace log (2026-08-10).
+   *  Independent of `drainAttempts()`: draining one does not affect the
+   *  other. */
+  drainTrace(): RerankTrace {
+    const trace: RerankTrace = {
+      requestMessages: this.pendingRequestMessages,
+      responseText: this.pendingResponseText,
+    };
+    this.pendingRequestMessages = [];
+    this.pendingResponseText = null;
+    return trace;
   }
 }
