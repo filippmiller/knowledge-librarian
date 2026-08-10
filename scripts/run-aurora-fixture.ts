@@ -24,7 +24,7 @@
  *   npx tsx scripts/run-aurora-fixture.ts --mode=e2e --extraction-runs=2 --out=path/to/dir [--doc=path/to/source.docx]
  */
 import 'dotenv/config';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 
@@ -118,13 +118,14 @@ interface CliArgs {
   readonly outDir: string;
   readonly docPath: string;
   readonly batchSize: number;
+  readonly maxCostUsd: number;
 }
 
 const USAGE =
-  'Usage: npx tsx scripts/run-aurora-fixture.ts --mode=e2e --extraction-runs=N --out=path/to/dir [--doc=path/to/source.docx] [--batch-size=N]';
+  'Usage: npx tsx scripts/run-aurora-fixture.ts --mode=e2e --extraction-runs=N --out=path/to/dir --max-cost-usd=N [--doc=path/to/source.docx] [--batch-size=N]';
 
 function parseArgs(argv: readonly string[]): CliArgs {
-  const known = ['--mode=', '--extraction-runs=', '--out=', '--doc=', '--batch-size='];
+  const known = ['--mode=', '--extraction-runs=', '--out=', '--doc=', '--batch-size=', '--max-cost-usd='];
   const unknown = argv.filter((a) => !known.some((k) => a.startsWith(k)));
   if (unknown.length > 0) {
     throw new Error(`Неизвестные аргументы: ${unknown.join(', ')}\n${USAGE}`);
@@ -135,12 +136,26 @@ function parseArgs(argv: readonly string[]): CliArgs {
   const outArg = argv.find((a) => a.startsWith('--out='))?.slice('--out='.length);
   const docArg = argv.find((a) => a.startsWith('--doc='))?.slice('--doc='.length);
   const batchSizeArg = argv.find((a) => a.startsWith('--batch-size='))?.slice('--batch-size='.length);
+  const maxCostUsdArg = argv.find((a) => a.startsWith('--max-cost-usd='))?.slice('--max-cost-usd='.length);
 
   if (!modeArg || !outArg) {
     throw new Error(`--mode и --out обязательны.\n${USAGE}`);
   }
   if (!(SUPPORTED_MODES as readonly string[]).includes(modeArg)) {
     throw new Error(`Неподдержанный режим "${modeArg}". Поддержан только: ${SUPPORTED_MODES.join(', ')}.`);
+  }
+
+  // ОБЯЗАТЕЛЕН (Task 38, 2026-08-10) — явное требование после дня с $19.79
+  // непроверенного спенда: "ни один следующий paid benchmark run не
+  // запускается, если система заранее не печатает... dollar ceiling".
+  // Дефолта нет НАМЕРЕННО: дефолт легко забыть переопределить и вернуться к
+  // тому же непроверенному расходу, который и вызвал это требование.
+  if (!maxCostUsdArg) {
+    throw new Error(`--max-cost-usd обязателен — запуск не начнётся без явного потолка расходов.\n${USAGE}`);
+  }
+  const maxCostUsd = Number(maxCostUsdArg);
+  if (!Number.isFinite(maxCostUsd) || maxCostUsd <= 0) {
+    throw new Error(`--max-cost-usd обязан быть положительным числом, получено "${maxCostUsdArg}".\n${USAGE}`);
   }
 
   const extractionRuns = runsArg ? Number(runsArg) : 2;
@@ -163,6 +178,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
     outDir: outArg,
     docPath: docArg ?? path.join(ORACLE_PACK_DIR, SOURCE_DOCX_FILENAME),
     batchSize,
+    maxCostUsd,
   };
 }
 
@@ -810,6 +826,45 @@ async function runOneExtractionRunWithTaintRetry(
   throw new Error('unreachable');
 }
 
+/**
+ * Prints a deliberately PESSIMISTIC worst-case call ceiling BEFORE any paid
+ * call is made (Task 38, 2026-08-10) — the user's explicit hard rule after
+ * an unexplained $19.79/day spend: no benchmark run starts without first
+ * seeing an estimated max-calls/dollar ceiling. Assumes every bounded retry
+ * in the file actually maxes out (extraction/audit: 6 attempts each, taint
+ * whole-run retry: `MAX_TAINT_RETRY_ATTEMPTS`, engine-question retry:
+ * `MAX_ENGINE_QUESTION_RETRY_ATTEMPTS`) — real runs are almost always far
+ * below this. It's a circuit-breaker sanity check to eyeball against
+ * `--max-cost-usd`, not a typical-case forecast — printing a tight "average
+ * case" number would be worse than useless the one time a run actually hits
+ * pathological retries, which is exactly when this estimate matters.
+ */
+function printPreRunCeiling(blockCount: number, args: CliArgs, questionCount: number): void {
+  const RETRY_CEILING = 6; // matches extractKnowledgeUnitsWithRetry / withStructuredRetry maxAttempts
+  const batchCount = Math.ceil(blockCount / args.batchSize);
+  // + blockCount: audited-extraction.ts allows at most ONE focused retry per
+  // block on a confirmed gap — worst case, every block triggers one.
+  const extractionCeilingPerRun = (batchCount + blockCount) * RETRY_CEILING;
+  const auditCeilingPerRun = blockCount * RETRY_CEILING;
+  const perRunCeiling = (extractionCeilingPerRun + auditCeilingPerRun) * MAX_TAINT_RETRY_ATTEMPTS;
+  // query-frame + reranker + synthesis: the three metered per-question purposes.
+  const perQuestionCeiling = 3 * MAX_ENGINE_QUESTION_RETRY_ATTEMPTS;
+  const totalCeiling = perRunCeiling * args.extractionRuns + perQuestionCeiling * questionCount * args.extractionRuns;
+
+  console.log('\n=== PRE-RUN COST CEILING (worst case — see caveats below) ===');
+  console.log(`  document: ${blockCount} block(s), batch-size=${args.batchSize} -> ${batchCount} batch(es)`);
+  console.log(`  extraction-runs: ${args.extractionRuns}, questions: ${questionCount}`);
+  console.log(
+    `  worst-case METERED call ceiling: ${totalCeiling} (assumes every bounded retry maxes out — not a forecast)`
+  );
+  console.log(
+    `  --max-cost-usd=${args.maxCostUsd} — the run aborts the moment cumulative metered spend exceeds this, independent of the ceiling above`
+  );
+  console.log(
+    `  NOT included in this ceiling: ${UNMETERED_PURPOSES.map((p) => p.purpose).join(', ')} (see UNMETERED_PURPOSES) — real worst case is higher.`
+  );
+}
+
 // ────────────────────────────────── main ─────────────────────────────────────
 
 async function main() {
@@ -854,46 +909,63 @@ async function main() {
   });
   console.log(`oracle taint dictionary: ${taintDetector.taintedShingleCount} shingles, ${taintDetector.unguardedSecretCount} unguarded secret(s)`);
 
+  // Free, local, no LLM call — same parse runOneExtractionRun does per run,
+  // done once more here purely to size the pre-run ceiling estimate.
+  const canonicalForEstimate = await extractCanonicalDocument(readFileSync(args.docPath));
+  printPreRunCeiling(canonicalForEstimate.blocks.length, args, questions.length);
+
   mkdirSync(args.outDir, { recursive: true });
 
-  const ledger = new CostLedger();
+  const ledger = new CostLedger({ maxTotalUsd: args.maxCostUsd });
   const runs: ExtractionRunOutcome[] = [];
-  for (let i = 1; i <= args.extractionRuns; i++) {
-    const outcome = await runOneExtractionRunWithTaintRetry(i, args, questions, sourceRules, taintDetector, ledger);
-    runs.push(outcome);
+  let abortedBy: unknown;
 
-    const runDir = path.join(args.outDir, outcome.runId);
-    mkdirSync(runDir, { recursive: true });
-    writeFileSync(path.join(runDir, 'evaluation-snapshot.json'), JSON.stringify(outcome.snapshot, null, 2), 'utf8');
-    writeFileSync(
-      path.join(runDir, 'persisted-units.json'),
-      JSON.stringify(outcome.snapshot.units, null, 2),
-      'utf8'
-    );
-    writeFileSync(
-      path.join(runDir, 'source-rule-id-by-unit.json'),
-      JSON.stringify(Object.fromEntries(outcome.sourceRuleIdByUnitId), null, 2),
-      'utf8'
-    );
-    writeFileSync(path.join(runDir, 'engine-results.json'), JSON.stringify(outcome.results, null, 2), 'utf8');
-    writeFileSync(
-      path.join(runDir, 'extraction-attempt-log.json'),
-      JSON.stringify(outcome.extractionAttemptLog, null, 2),
-      'utf8'
-    );
-    writeFileSync(path.join(runDir, 'batch-logs.json'), JSON.stringify(outcome.batchLogs, null, 2), 'utf8');
-    writeFileSync(
-      path.join(runDir, 'coverage-audit-results.json'),
-      JSON.stringify(outcome.auditResults, null, 2),
-      'utf8'
-    );
-    writeFileSync(
-      path.join(runDir, 'focused-retry-log.json'),
-      JSON.stringify(outcome.focusedRetryLogs, null, 2),
-      'utf8'
-    );
+  try {
+    for (let i = 1; i <= args.extractionRuns; i++) {
+      const outcome = await runOneExtractionRunWithTaintRetry(i, args, questions, sourceRules, taintDetector, ledger);
+      runs.push(outcome);
+
+      const runDir = path.join(args.outDir, outcome.runId);
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(path.join(runDir, 'evaluation-snapshot.json'), JSON.stringify(outcome.snapshot, null, 2), 'utf8');
+      writeFileSync(
+        path.join(runDir, 'persisted-units.json'),
+        JSON.stringify(outcome.snapshot.units, null, 2),
+        'utf8'
+      );
+      writeFileSync(
+        path.join(runDir, 'source-rule-id-by-unit.json'),
+        JSON.stringify(Object.fromEntries(outcome.sourceRuleIdByUnitId), null, 2),
+        'utf8'
+      );
+      writeFileSync(path.join(runDir, 'engine-results.json'), JSON.stringify(outcome.results, null, 2), 'utf8');
+      writeFileSync(
+        path.join(runDir, 'extraction-attempt-log.json'),
+        JSON.stringify(outcome.extractionAttemptLog, null, 2),
+        'utf8'
+      );
+      writeFileSync(path.join(runDir, 'batch-logs.json'), JSON.stringify(outcome.batchLogs, null, 2), 'utf8');
+      writeFileSync(
+        path.join(runDir, 'coverage-audit-results.json'),
+        JSON.stringify(outcome.auditResults, null, 2),
+        'utf8'
+      );
+      writeFileSync(
+        path.join(runDir, 'focused-retry-log.json'),
+        JSON.stringify(outcome.focusedRetryLogs, null, 2),
+        'utf8'
+      );
+    }
+  } catch (err) {
+    // Caught here (not left to main().catch()) so run-summary.json and the
+    // cost report below ALWAYS get written — a budget-triggered or taint
+    // abort is exactly when seeing what was spent and where matters most,
+    // not the moment to lose that trail. Re-thrown at the end, unchanged.
+    abortedBy = err;
   }
 
+  // Always written, whether the run completed or aborted partway (Task 38):
+  // `runs` holds whatever extraction runs finished before an abort.
   writeFileSync(
     path.join(args.outDir, 'run-summary.json'),
     JSON.stringify(
@@ -922,6 +994,7 @@ async function main() {
           // стоимость прогона, пока эти два пути не подключены.
           unmeteredPurposes: UNMETERED_PURPOSES,
         },
+        abortedBy: abortedBy instanceof Error ? abortedBy.message : abortedBy ? String(abortedBy) : null,
       },
       null,
       2
@@ -940,6 +1013,14 @@ async function main() {
   console.log(
     `  NOT YET METERED: ${UNMETERED_PURPOSES.map((p) => `${p.purpose} (${p.reason})`).join('; ')} — real spend is higher than the total above.`
   );
+
+  if (abortedBy) {
+    console.log(
+      `\nПрогон ОСТАНОВЛЕН (${runs.length}/${args.extractionRuns} прогон(ов) завершено): ${abortedBy instanceof Error ? abortedBy.message : String(abortedBy)}`
+    );
+    console.log(`Частичные артефакты записаны в: ${args.outDir}`);
+    throw abortedBy;
+  }
 
   console.log(`\nАртефакты записаны в: ${args.outDir}`);
   console.log('Grading — отдельным проходом (не в этом скрипте), см. scripts/grade-aurora-fixture.ts.');

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CostLedger } from '../cost-ledger';
+import { CostBudgetExceededError, CostLedger } from '../cost-ledger';
 import type { CompletionAttempt } from '../chat-provider';
 
 /**
@@ -111,5 +111,57 @@ describe('CostLedger', () => {
     ledger.record('extraction', [success('claude-sonnet-5', 100, 50), errorAttempt('claude-sonnet-5')]);
     ledger.record('reranker', [success('claude-sonnet-5', 10, 5)]);
     expect(ledger.totalAttemptCount()).toBe(3);
+  });
+});
+
+describe('CostLedger — hard budget (Task 38)', () => {
+  it('без maxTotalUsd (по умолчанию) — record() никогда не бросает, сколько бы ни потратили', () => {
+    const ledger = new CostLedger();
+    expect(() =>
+      ledger.record('extraction', [success('claude-sonnet-5', 10_000_000, 10_000_000)])
+    ).not.toThrow();
+  });
+
+  it('record(), который остаётся В ПРЕДЕЛАХ бюджета, не бросает', () => {
+    const ledger = new CostLedger({ maxTotalUsd: 1.0 });
+    expect(() => ledger.record('extraction', [success('claude-sonnet-5', 100_000, 0)])).not.toThrow(); // $0.20
+  });
+
+  it('record(), который ПРЕВЫШАЕТ бюджет — бросает CostBudgetExceededError, но попытка уже посчитана (деньги реально потрачены)', () => {
+    const ledger = new CostLedger({ maxTotalUsd: 1.0 });
+    let caught: unknown;
+    try {
+      ledger.record('extraction', [success('claude-sonnet-5', 1_000_000, 0)]); // $2, > $1 бюджета
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(CostBudgetExceededError);
+    // Попытка, которая пробила бюджет, ВСЁ РАВНО учтена — деньги уже потрачены,
+    // выбрасывание останавливает ДАЛЬНЕЙШИЕ вызовы, не стирает прошлое.
+    expect(ledger.totalUsd()).toBeCloseTo(2.0, 5);
+  });
+
+  it('CostBudgetExceededError несёт purpose/totalUsd/maxTotalUsd для читаемого сообщения', () => {
+    const ledger = new CostLedger({ maxTotalUsd: 0.5 });
+    try {
+      ledger.record('coverage-audit', [success('claude-sonnet-5', 1_000_000, 0)]);
+      expect.fail('ожидалось исключение');
+    } catch (err) {
+      expect(err).toBeInstanceOf(CostBudgetExceededError);
+      const budgetErr = err as CostBudgetExceededError;
+      expect(budgetErr.purpose).toBe('coverage-audit');
+      expect(budgetErr.totalUsd).toBeCloseTo(2.0, 5);
+      expect(budgetErr.maxTotalUsd).toBe(0.5);
+    }
+  });
+
+  it('после превышения бюджета дальнейшие record() тоже бросают — бюджет не сбрасывается сам', () => {
+    const ledger = new CostLedger({ maxTotalUsd: 0.1 });
+    expect(() => ledger.record('extraction', [success('claude-sonnet-5', 1_000_000, 0)])).toThrow(
+      CostBudgetExceededError
+    );
+    expect(() => ledger.record('extraction', [success('claude-sonnet-5', 1, 1)])).toThrow(
+      CostBudgetExceededError
+    );
   });
 });
