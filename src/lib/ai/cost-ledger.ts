@@ -19,6 +19,7 @@ export interface CostLedgerPurposeSummary {
   readonly totalUsd: number;
   readonly pricedAttemptCount: number;
   readonly unpricedAttemptCount: number;
+  readonly unverifiableSuccessCount: number;
 }
 
 export interface CostLedgerOptions {
@@ -51,6 +52,28 @@ export class CostBudgetExceededError extends Error {
   }
 }
 
+/**
+ * Thrown by `CostLedger.record()`, ONLY when a budget (`maxTotalUsd`) is
+ * set, the moment a record contains a SUCCESS attempt whose real dollar
+ * cost cannot be computed — an unpriced model, or a malformed response with
+ * no usage at all. Found by Codex review (2026-08-10, finding 3): without
+ * this, a "hard" budget failed OPEN for exactly the spend it can't see —
+ * `totalUsd()` silently excludes unpriced/unverifiable attempts, so it
+ * would never cross `maxTotalUsd` no matter how much such calls actually
+ * cost. A budget that can't prove it's under the ceiling has to refuse to
+ * continue, not assume the best.
+ */
+export class UnverifiableCostError extends Error {
+  constructor(readonly purpose: string) {
+    super(
+      `Cost budget active but a "${purpose}" call's real cost cannot be verified ` +
+        `(unpriced model, or a response with no usage at all) — failing closed rather ` +
+        `than risk unbounded spend a --max-cost-usd ceiling could never see.`
+    );
+    this.name = 'UnverifiableCostError';
+  }
+}
+
 export class CostLedger {
   private readonly attemptsByPurpose = new Map<string, CompletionAttempt[]>();
   private readonly callCountByPurpose = new Map<string, number>();
@@ -64,16 +87,25 @@ export class CostLedger {
    *  coverage-audit call — `attempts` may hold more than one entry if that
    *  operation retried internally; all of them count toward attemptCount.
    *
-   *  Throws `CostBudgetExceededError` if this record pushes the ledger's
-   *  cumulative total past `maxTotalUsd` (when a budget is set). The record
-   *  itself always completes first — see `CostBudgetExceededError`'s
-   *  docstring for why. */
+   *  When a budget is set: throws `UnverifiableCostError` first if THIS
+   *  record contains a SUCCESS attempt whose cost can't be priced at all
+   *  (checked before the ceiling comparison — an unverifiable attempt could
+   *  itself be the one that would have tripped the ceiling, silently).
+   *  Otherwise throws `CostBudgetExceededError` if this record pushes the
+   *  ledger's cumulative total past `maxTotalUsd`. Either way the record
+   *  itself always completes first — see each error's docstring for why. */
   record(purpose: string, attempts: readonly CompletionAttempt[]): void {
     const existing = this.attemptsByPurpose.get(purpose) ?? [];
     this.attemptsByPurpose.set(purpose, [...existing, ...attempts]);
     this.callCountByPurpose.set(purpose, (this.callCountByPurpose.get(purpose) ?? 0) + 1);
 
-    if (this.maxTotalUsd !== undefined && this.totalUsd() > this.maxTotalUsd) {
+    if (this.maxTotalUsd === undefined) return;
+
+    const thisRecordCost = estimateCostFromAttempts(attempts);
+    if (thisRecordCost.unpricedAttemptCount > 0 || thisRecordCost.unverifiableSuccessCount > 0) {
+      throw new UnverifiableCostError(purpose);
+    }
+    if (this.totalUsd() > this.maxTotalUsd) {
       throw new CostBudgetExceededError(purpose, this.totalUsd(), this.maxTotalUsd);
     }
   }
@@ -88,6 +120,7 @@ export class CostLedger {
         totalUsd: cost.totalUsd,
         pricedAttemptCount: cost.pricedAttemptCount,
         unpricedAttemptCount: cost.unpricedAttemptCount,
+        unverifiableSuccessCount: cost.unverifiableSuccessCount,
       };
     });
   }

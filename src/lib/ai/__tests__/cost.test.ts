@@ -78,4 +78,29 @@ describe('estimateCostFromAttempts', () => {
     expect(result.pricedAttemptCount).toBe(0);
     expect(result.unpricedAttemptCount).toBe(0);
   });
+
+  // Codex review (2026-08-10) finding 3: a SUCCESS attempt with NO usage at
+  // all (malformed/incomplete provider response) was silently skipped the
+  // same way as an ERROR attempt — real, billed spend with an unknowable
+  // dollar amount, invisible even to unpricedAttemptCount. Distinct from
+  // ERROR/ABORTED (which correctly never carry usage — nothing to count).
+  it('SUCCESS-попытка БЕЗ usage вообще -> unverifiableSuccessCount, не тихо пропущена как ERROR', () => {
+    const attempts: CompletionAttempt[] = [
+      attempt({ model: 'claude-sonnet-5', outcome: 'SUCCESS' }), // usage отсутствует
+    ];
+    const result = estimateCostFromAttempts(attempts);
+    expect(result.totalUsd).toBe(0);
+    expect(result.pricedAttemptCount).toBe(0);
+    expect(result.unpricedAttemptCount).toBe(0);
+    expect(result.unverifiableSuccessCount).toBe(1);
+  });
+
+  it('ERROR/ABORTED без usage -> unverifiableSuccessCount=0 (легитимно нечего считать, не "нельзя проверить")', () => {
+    const attempts: CompletionAttempt[] = [
+      attempt({ model: 'claude-sonnet-5', outcome: 'ERROR' }),
+      attempt({ model: 'claude-sonnet-5', outcome: 'ABORTED' }),
+    ];
+    const result = estimateCostFromAttempts(attempts);
+    expect(result.unverifiableSuccessCount).toBe(0);
+  });
 });

@@ -48,7 +48,7 @@ import {
   type BlockCoverageAuditResult,
 } from '../src/lib/knowledge/extraction-coverage-auditor';
 import { ChatCompletionError, type CompletionAttempt } from '../src/lib/ai/chat-provider';
-import { CostLedger } from '../src/lib/ai/cost-ledger';
+import { CostBudgetExceededError, CostLedger, UnverifiableCostError } from '../src/lib/ai/cost-ledger';
 import { CallTraceLog, type CallTraceEntry } from '../src/lib/ai/call-trace-log';
 import {
   assignIdentity,
@@ -322,6 +322,40 @@ function recordTrace(
 }
 
 /**
+ * Counterpart to `withStructuredRetry`'s catch-path discipline, for the
+ * three call sites that don't go through it: query-frame, reranker, and
+ * synthesis are each a SINGLE un-retried `structured()` call inside
+ * `runEngineOnQuestion` — retried only as a whole QUESTION by
+ * `runEngineOnQuestionWithRetry`, not internally. Without this, a
+ * SCHEMA_MISMATCH here (a real, billed provider attempt) was invisible to
+ * both the ledger and the trace — same bug class `withStructuredRetry`
+ * itself was fixed for in 095feb0, just at three sites that predated this
+ * helper existing (Codex review, 2026-08-10, finding 2). Trace is recorded
+ * before the ledger for the same reason as `withStructuredRetry` (finding 5):
+ * `ledger.record()` can itself throw (budget), and the tripping call must
+ * still land in call-trace.jsonl.
+ */
+async function recordOnFailure<T>(
+  purpose: string,
+  ledger: CostLedger,
+  traceLog: CallTraceLog,
+  fn: () => Promise<T>
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    const failedAttempts = attemptsFromError(error);
+    const failedTrace = traceFromError(error);
+    if (failedAttempts && failedTrace) {
+      const message = error instanceof Error ? error.message : String(error);
+      recordTrace(traceLog, purpose, failedAttempts, failedTrace, 'ERROR', message);
+    }
+    if (failedAttempts) ledger.record(purpose, failedAttempts);
+    throw error;
+  }
+}
+
+/**
  * Same bounded retry class as scripts/run-extraction.ts's
  * extractKnowledgeUnitsWithRetry — structured() deliberately doesn't retry
  * SCHEMA_MISMATCH/TRUNCATED_JSON itself (caller's decision per its own
@@ -373,8 +407,12 @@ async function withStructuredRetry<T>(
       const result = await call();
       attemptLog.push({ attempt, outcome: 'SUCCESS', message: null });
       const attempts = getAttempts(result);
-      ledger.record(purpose, attempts);
+      // Trace BEFORE ledger (Codex review, 2026-08-10, finding 5): ledger.record()
+      // can throw (budget ceiling / unverifiable cost) — the call that trips it
+      // must still land in call-trace.jsonl, not vanish because the throw cut
+      // the function off before the trace line ran.
       recordTrace(traceLog, purpose, attempts, getTrace(result), 'SUCCESS', null);
+      ledger.record(purpose, attempts);
       return { result, attemptLog };
     } catch (error) {
       const outcome = classifyStructuredError(error);
@@ -382,11 +420,11 @@ async function withStructuredRetry<T>(
       const message = error instanceof Error ? error.message : String(error);
       attemptLog.push({ attempt, outcome, message });
       const failedAttempts = attemptsFromError(error);
-      if (failedAttempts) ledger.record(purpose, failedAttempts);
       const failedTrace = traceFromError(error);
       if (failedAttempts && failedTrace) {
         recordTrace(traceLog, purpose, failedAttempts, failedTrace, 'ERROR', message);
       }
+      if (failedAttempts) ledger.record(purpose, failedAttempts);
       console.warn(`[${label} attempt ${attempt}/${maxAttempts}] failed (${outcome}): ${message}`);
       if (!retryable || attempt === maxAttempts) throw error;
     }
@@ -513,21 +551,22 @@ function buildRealAnswerGenerator(
     const evidenceText = prompt.evidence
       .map((e) => `[${e.unitId}] ${e.statement}${e.numericConstraint ? ` (${e.numericConstraint.factKey}: ${e.numericConstraint.value} ${e.numericConstraint.unit})` : ''}`)
       .join('\n');
-    const result = await structured({
-      schema: answerSchema,
-      messages: [
-        {
-          role: 'system',
-          content:
-            'Ты отвечаешь на вопрос СТРОГО на основе перечисленных unit\'ов знания — не добавляй ничего от себя. ' +
-            'citedUnitIds обязан перечислять id ровно тех unit\'ов, на утверждениях которых построен ответ. ' +
-            'Ответ СТРОГО JSON: {"text": "...", "citedUnitIds": ["..."]}',
-        },
-        { role: 'user', content: `Вопрос: "${prompt.question}"\n\nДоступное знание:\n${evidenceText}` },
-      ],
-      runConfig,
-    });
-    ledger.record('synthesis', result.attempts);
+    const result = await recordOnFailure('synthesis', ledger, traceLog, () =>
+      structured({
+        schema: answerSchema,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Ты отвечаешь на вопрос СТРОГО на основе перечисленных unit\'ов знания — не добавляй ничего от себя. ' +
+              'citedUnitIds обязан перечислять id ровно тех unit\'ов, на утверждениях которых построен ответ. ' +
+              'Ответ СТРОГО JSON: {"text": "...", "citedUnitIds": ["..."]}',
+          },
+          { role: 'user', content: `Вопрос: "${prompt.question}"\n\nДоступное знание:\n${evidenceText}` },
+        ],
+        runConfig,
+      })
+    );
     recordTrace(
       traceLog,
       'synthesis',
@@ -536,6 +575,7 @@ function buildRealAnswerGenerator(
       'SUCCESS',
       null
     );
+    ledger.record('synthesis', result.attempts);
     return { text: result.data.text, citedUnitIds: result.data.citedUnitIds };
   };
 }
@@ -556,11 +596,12 @@ async function runEngineOnQuestion(
     const message: ConversationMessage = { id: `${input.caseId}-q`, role: 'user', text: input.question };
     ctx.taintDetector.assertClean([message], `engine input (QueryFrame messages, ${input.caseId})`);
 
-    const { queryFrame, structuredResult: queryFrameResult } = await extractQueryFrame({
-      messages: [message],
-      runConfig: ctx.queryFrameRunConfig,
-    });
-    ctx.ledger.record('query-frame', queryFrameResult.attempts);
+    const { queryFrame, structuredResult: queryFrameResult } = await recordOnFailure(
+      'query-frame',
+      ctx.ledger,
+      ctx.traceLog,
+      () => extractQueryFrame({ messages: [message], runConfig: ctx.queryFrameRunConfig })
+    );
     recordTrace(
       ctx.traceLog,
       'query-frame',
@@ -569,14 +610,17 @@ async function runEngineOnQuestion(
       'SUCCESS',
       null
     );
+    ctx.ledger.record('query-frame', queryFrameResult.attempts);
 
-    const retrieval = await retrieveUnits(input.question, ctx.embeddedCandidates, {
-      embeddingProvider: ctx.embeddingProvider,
-      rerankerProvider: ctx.rerankerProvider,
-    });
+    const retrieval = await recordOnFailure('reranker', ctx.ledger, ctx.traceLog, () =>
+      retrieveUnits(input.question, ctx.embeddedCandidates, {
+        embeddingProvider: ctx.embeddingProvider,
+        rerankerProvider: ctx.rerankerProvider,
+      })
+    );
     const rerankerAttempts = ctx.rerankerProvider.drainAttempts();
-    ctx.ledger.record('reranker', rerankerAttempts);
     recordTrace(ctx.traceLog, 'reranker', rerankerAttempts, ctx.rerankerProvider.drainTrace(), 'SUCCESS', null);
+    ctx.ledger.record('reranker', rerankerAttempts);
 
     const candidateUnits = retrieval.topK
       .map((id) => ctx.unitsById.get(id))
@@ -643,6 +687,14 @@ async function runEngineOnQuestion(
       decisionRelevanceTrace: decisionRelevance.trace,
     };
   } catch (err) {
+    // A cost-budget trip must never be absorbed into a per-question ERROR
+    // result (Codex review, 2026-08-10, finding 1): swallowing it here meant
+    // the run just moved on to the NEXT question — which could make MORE
+    // paid calls — instead of aborting like every other budget trip does.
+    // Re-throw immediately; main()'s try/catch is the one place that's
+    // allowed to turn this into "run stopped."
+    if (err instanceof CostBudgetExceededError || err instanceof UnverifiableCostError) throw err;
+
     // A genuine OracleTaintError (assertClean above) is NEVER retryable here —
     // classifyStructuredError correctly falls through to OTHER_ERROR for it,
     // same as any other real bug. Only transport/schema failure classes are.
@@ -787,7 +839,7 @@ async function runOneExtractionRun(
     taintDetector,
     retryingExtractor,
     { runConfig: extractionRunConfig, maxTokens: 16000 },
-    3
+    TAINT_RESAMPLE_MAX_ROUNDS
   );
   if (resampled.resampleLogs.length > 0) {
     const affectedBlocks = new Set(resampled.resampleLogs.map((l) => l.blockAnchor)).size;
@@ -893,6 +945,12 @@ async function runOneExtractionRun(
  *  просто больше независимых выборок, не тюнинг механизма обнаружения. */
 const MAX_TAINT_RETRY_ATTEMPTS = 6;
 
+/** `resolveTaintedCandidates`'s `maxRounds` — named so `printPreRunCeiling`
+ *  can reference the SAME source of truth instead of a formula that could
+ *  silently drift out of sync if this ever changes (Codex review, 2026-08-10,
+ *  finding 4: the ceiling omitted this multiplier entirely). */
+const TAINT_RESAMPLE_MAX_ROUNDS = 3;
+
 /** Оборачивает `runOneExtractionRun` bounded-ретраем СПЕЦИФИЧНО на
  *  `OracleTaintError` — короткие формулировки в узком юридическом домене
  *  документа иногда случайно совпадают у независимо сгенерированного
@@ -945,8 +1003,16 @@ function printPreRunCeiling(blockCount: number, args: CliArgs, questionCount: nu
   // + blockCount: audited-extraction.ts allows at most ONE focused retry per
   // block on a confirmed gap — worst case, every block triggers one.
   const extractionCeilingPerRun = (batchCount + blockCount) * RETRY_CEILING;
+  // Targeted taint resample (Codex review, 2026-08-10, finding 4): a SEPARATE
+  // re-extraction path from the focused-retry above, triggered by a taint
+  // collision instead of a coverage gap — worst case every block resamples
+  // on every round. Omitting this previously undercounted a real, already-
+  // shipped call path (Task 31) — for a 15-block doc alone that's
+  // 15 × 3 × 6 = 270 extra extraction calls before the whole-run multiplier.
+  const taintResampleCeilingPerRun = blockCount * TAINT_RESAMPLE_MAX_ROUNDS * RETRY_CEILING;
   const auditCeilingPerRun = blockCount * RETRY_CEILING;
-  const perRunCeiling = (extractionCeilingPerRun + auditCeilingPerRun) * MAX_TAINT_RETRY_ATTEMPTS;
+  const perRunCeiling =
+    (extractionCeilingPerRun + taintResampleCeilingPerRun + auditCeilingPerRun) * MAX_TAINT_RETRY_ATTEMPTS;
   // query-frame + reranker + synthesis: the three metered per-question purposes.
   const perQuestionCeiling = 3 * MAX_ENGINE_QUESTION_RETRY_ATTEMPTS;
   const totalCeiling = perRunCeiling * args.extractionRuns + perQuestionCeiling * questionCount * args.extractionRuns;
@@ -955,7 +1021,8 @@ function printPreRunCeiling(blockCount: number, args: CliArgs, questionCount: nu
   console.log(`  document: ${blockCount} block(s), batch-size=${args.batchSize} -> ${batchCount} batch(es)`);
   console.log(`  extraction-runs: ${args.extractionRuns}, questions: ${questionCount}`);
   console.log(
-    `  worst-case METERED call ceiling: ${totalCeiling} (assumes every bounded retry maxes out — not a forecast)`
+    `  worst-case METERED structured() call ceiling: ${totalCeiling} (assumes every bounded retry maxes out — ` +
+      `not a forecast; each of these can itself be up to 4 raw HTTP attempts via chat-provider.ts's own transient-error retry)`
   );
   console.log(
     `  --max-cost-usd=${args.maxCostUsd} — the run aborts the moment cumulative metered spend exceeds this, independent of the ceiling above`
@@ -1023,6 +1090,13 @@ async function main() {
   // artifacts, so a budget/taint abort partway through still leaves every
   // call traced up to that point on disk.
   const callTracePath = path.join(args.outDir, 'call-trace.jsonl');
+  // Truncate/create fresh (Codex review, 2026-08-10, finding 7): CallTraceLog
+  // appends, it never truncates. Re-running with the same --out (an already-
+  // used directory) would otherwise silently concatenate this run's trace
+  // behind a PRIOR run's, while run-summary.json's runIds only ever describe
+  // the latest one — writeFileSync here matches how run-summary.json already
+  // behaves (overwritten fresh each invocation), so this file does too.
+  writeFileSync(callTracePath, '', 'utf8');
   const traceLog = new CallTraceLog(callTracePath);
   const runs: ExtractionRunOutcome[] = [];
   let abortedBy: unknown;

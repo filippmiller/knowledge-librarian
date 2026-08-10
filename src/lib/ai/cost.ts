@@ -59,18 +59,31 @@ export interface AttemptCostSummary {
   /** SUCCESS attempts with usage but an unpriced model — real spend not
    *  reflected in totalUsd. Surface this count, don't silently under-report. */
   readonly unpricedAttemptCount: number;
+  /** SUCCESS attempts with NO usage at all (a malformed/incomplete provider
+   *  response — the call still happened and still cost money). Distinct
+   *  from ERROR/ABORTED attempts, which legitimately never carry usage —
+   *  those are correctly excluded from this count (found by Codex review,
+   *  2026-08-10: a hard cost budget built on `totalUsd` alone fails OPEN
+   *  for exactly this case — real spend it can neither price nor even see). */
+  readonly unverifiableSuccessCount: number;
 }
 
-/** Only SUCCESS attempts carry `usage` at all (chat-provider.ts never
- *  fabricates usage for a failed/aborted attempt with no response), so
- *  filtering on `usage` presence is equivalent to filtering on outcome. */
+/** Only SUCCESS attempts carry `usage` at all on the real path
+ *  (chat-provider.ts never fabricates usage for a failed/aborted attempt
+ *  with no response) — but a malformed real response COULD still be
+ *  SUCCESS with no usage, which is why outcome is checked explicitly below
+ *  rather than assuming "no usage" always means ERROR/ABORTED. */
 export function estimateCostFromAttempts(attempts: readonly CompletionAttempt[]): AttemptCostSummary {
   let totalUsd = 0;
   let pricedAttemptCount = 0;
   let unpricedAttemptCount = 0;
+  let unverifiableSuccessCount = 0;
 
   for (const attempt of attempts) {
-    if (!attempt.usage) continue;
+    if (!attempt.usage) {
+      if (attempt.outcome === 'SUCCESS') unverifiableSuccessCount++;
+      continue;
+    }
     const cost = estimateCostUsd(attempt.model, attempt.usage);
     if (cost === null) {
       unpricedAttemptCount++;
@@ -80,5 +93,5 @@ export function estimateCostFromAttempts(attempts: readonly CompletionAttempt[])
     pricedAttemptCount++;
   }
 
-  return { totalUsd, pricedAttemptCount, unpricedAttemptCount };
+  return { totalUsd, pricedAttemptCount, unpricedAttemptCount, unverifiableSuccessCount };
 }

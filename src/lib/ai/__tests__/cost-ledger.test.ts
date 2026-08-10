@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CostBudgetExceededError, CostLedger } from '../cost-ledger';
+import { CostBudgetExceededError, CostLedger, UnverifiableCostError } from '../cost-ledger';
 import type { CompletionAttempt } from '../chat-provider';
 
 /**
@@ -28,6 +28,18 @@ function errorAttempt(model: string): CompletionAttempt {
     startedAt: '2026-08-09T00:00:00Z',
     latencyMs: 50,
     outcome: 'ERROR',
+  };
+}
+
+/** SUCCESS but no usage at all — a malformed/incomplete real response, not
+ *  the same as an ERROR (see cost.ts's `unverifiableSuccessCount`). */
+function unverifiableSuccess(model: string): CompletionAttempt {
+  return {
+    provider: 'anthropic',
+    model,
+    startedAt: '2026-08-09T00:00:00Z',
+    latencyMs: 100,
+    outcome: 'SUCCESS',
   };
 }
 
@@ -163,5 +175,66 @@ describe('CostLedger — hard budget (Task 38)', () => {
     expect(() => ledger.record('extraction', [success('claude-sonnet-5', 1, 1)])).toThrow(
       CostBudgetExceededError
     );
+  });
+});
+
+describe('CostLedger — fail-closed на непроверяемой стоимости (Codex review, 2026-08-10, finding 3)', () => {
+  // Найдено ревью: бюджет считался по totalUsd(), а unpriced/no-usage
+  // попытки в нём не участвуют вообще — бюджетированный прогон на
+  // непрайсованной модели (например дефолтной claude-3-opus-20240229, у
+  // которой нет записи в MODEL_PRICING) никогда бы не сработал, сколько бы
+  // реально ни потратили. "Жёсткий" бюджет обязан отказывать закрыто
+  // (fail closed), а не молча пропускать то, что не может проверить.
+
+  it('unpriced-модель под бюджетом -> бросает UnverifiableCostError, не тихо проходит', () => {
+    const ledger = new CostLedger({ maxTotalUsd: 100 }); // бюджет заведомо не исчерпан
+    let caught: unknown;
+    try {
+      ledger.record('extraction', [success('mystery-model-2099', 100, 50)]);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(UnverifiableCostError);
+  });
+
+  it('SUCCESS без usage вообще под бюджетом -> тоже бросает UnverifiableCostError', () => {
+    const ledger = new CostLedger({ maxTotalUsd: 100 });
+    expect(() => ledger.record('extraction', [unverifiableSuccess('claude-sonnet-5')])).toThrow(
+      UnverifiableCostError
+    );
+  });
+
+  it('без maxTotalUsd — unpriced/unverifiable попытки НЕ бросают (нечего защищать без бюджета)', () => {
+    const ledger = new CostLedger();
+    expect(() => ledger.record('extraction', [success('mystery-model-2099', 100, 50)])).not.toThrow();
+    expect(() => ledger.record('extraction', [unverifiableSuccess('claude-sonnet-5')])).not.toThrow();
+  });
+
+  it('попытка ВСЁ РАВНО учтена перед выбрасыванием — не стирается из summary', () => {
+    const ledger = new CostLedger({ maxTotalUsd: 100 });
+    try {
+      ledger.record('extraction', [success('mystery-model-2099', 100, 50)]);
+    } catch {
+      // ожидаемо
+    }
+    expect(ledger.summaryByPurpose()[0].unpricedAttemptCount).toBe(1);
+  });
+
+  it('UnverifiableCostError несёт purpose для читаемого сообщения', () => {
+    const ledger = new CostLedger({ maxTotalUsd: 100 });
+    try {
+      ledger.record('coverage-audit', [success('mystery-model-2099', 100, 50)]);
+      expect.fail('ожидалось исключение');
+    } catch (err) {
+      expect(err).toBeInstanceOf(UnverifiableCostError);
+      expect((err as UnverifiableCostError).purpose).toBe('coverage-audit');
+    }
+  });
+
+  it('прайсованный SUCCESS в том же record() рядом с unpriced — бюджет всё равно бросает fail-closed', () => {
+    const ledger = new CostLedger({ maxTotalUsd: 100 });
+    expect(() =>
+      ledger.record('extraction', [success('claude-sonnet-5', 100, 50), success('mystery-model-2099', 100, 50)])
+    ).toThrow(UnverifiableCostError);
   });
 });
