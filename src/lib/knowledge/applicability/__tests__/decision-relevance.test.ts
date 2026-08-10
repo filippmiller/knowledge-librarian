@@ -331,6 +331,7 @@ describe('applyDecisionRelevanceGate — детерминированный сл
       async () => ({ verdict: 'IRRELEVANT', reason: 'другая ситуация', potentiallyDecidingFacts: [] })
     );
     expect(result.droppedByClassifier).toEqual(['exc']);
+    expect(result.answerDependsOnProbabilisticExclusion).toBe(true);
     expect(result.relevant).toEqual([]);
   });
 
@@ -348,6 +349,7 @@ describe('applyDecisionRelevanceGate — детерминированный сл
       async () => ({ verdict: 'RELEVANT', reason: 'по теме', potentiallyDecidingFacts: [] })
     );
     expect(result.droppedByClassifier).toEqual([]);
+    expect(result.answerDependsOnProbabilisticExclusion).toBe(false);
   });
 
   it('детерминированные ветки (LLM не звался) никогда не наполняют droppedByClassifier — там снятия по мнению модели не было по определению', async () => {

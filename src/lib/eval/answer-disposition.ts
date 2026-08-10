@@ -59,6 +59,12 @@ export interface AnswerVerificationLike {
   readonly verified: boolean;
 }
 
+export interface AnswerSafetyProvenance {
+  /** True when an answer exists only because a probabilistic classifier
+   * removed at least one otherwise unresolved candidate before resolution. */
+  readonly answerDependsOnProbabilisticExclusion: boolean;
+}
+
 /**
  * Единственное место, где решается, имеет ли черновик право называться
  * прямым ответом.
@@ -68,7 +74,10 @@ export interface AnswerVerificationLike {
  * подтверждённым, сколько отрицательный, то есть нисколько.
  */
 export function resolveAnswerDisposition(
-  verification: AnswerVerificationLike | null
+  verification: AnswerVerificationLike | null,
+  safety: AnswerSafetyProvenance = { answerDependsOnProbabilisticExclusion: false }
 ): 'DIRECT_ANSWER' | 'UNVERIFIED_ANSWER' {
-  return verification?.verified === true ? 'DIRECT_ANSWER' : 'UNVERIFIED_ANSWER';
+  return verification?.verified === true && !safety.answerDependsOnProbabilisticExclusion
+    ? 'DIRECT_ANSWER'
+    : 'UNVERIFIED_ANSWER';
 }

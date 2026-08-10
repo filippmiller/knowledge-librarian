@@ -5,8 +5,9 @@
  * ГРАНИЦА ОТВЕТСТВЕННОСТИ. `--stage=extraction` — единственная поддержанная
  * стадия. НЕ запускает retrieval, applicability, synthesis или grader. Путь:
  *
- *   DOCX -> CanonicalDocument -> SourceBlock[] -> extractKnowledgeUnits()
- *   -> (parent resolution уже внутри extractKnowledgeUnits, validateParentRefs)
+ *   DOCX -> CanonicalDocument -> SourceBlock[]
+ *   -> extractKnowledgeUnitsWithCompletenessAudit() (bounded batches)
+ *   -> (parent resolution уже внутри audited extraction)
  *   -> assignIdentity() -> evidence offset diagnostics -> артефакты.
  *
  * ORACLE ISOLATION (жёсткое требование): этот файл не имеет права
@@ -43,8 +44,15 @@ import {
   type ExtractKnowledgeUnitsResult,
   type SourceBlock,
 } from '../src/lib/knowledge/knowledge-unit-extractor';
+import { extractKnowledgeUnitsWithCompletenessAudit } from '../src/lib/knowledge/audited-extraction';
+import {
+  auditBlockCoverage,
+  coverageAuditNeedsReview,
+  type AuditBlockCoverageOptions,
+  type BlockCoverageAuditResult,
+} from '../src/lib/knowledge/extraction-coverage-auditor';
 import { StructuredOutputError } from '../src/lib/ai/structured-output';
-import { ChatCompletionError } from '../src/lib/ai/chat-provider';
+import { ChatCompletionError, isRetryableChatCompletionError } from '../src/lib/ai/chat-provider';
 import {
   assignIdentity,
   type IdentityAssignmentResult,
@@ -64,13 +72,14 @@ interface CliArgs {
   stage: Stage;
   docPath: string;
   outDir: string;
+  batchSize: number;
 }
 
 const USAGE =
-  'Usage: npx tsx scripts/run-extraction.ts --stage=extraction --doc=path/to/source.docx --out=path/to/dir';
+  'Usage: npx tsx scripts/run-extraction.ts --stage=extraction --doc=path/to/source.docx --out=path/to/dir [--batch-size=N]';
 
 function parseArgs(argv: readonly string[]): CliArgs {
-  const known = ['--stage=', '--doc=', '--out='];
+  const known = ['--stage=', '--doc=', '--out=', '--batch-size='];
   const unknown = argv.filter((a) => !known.some((k) => a.startsWith(k)));
   if (unknown.length > 0) {
     throw new Error(`Неизвестные аргументы: ${unknown.join(', ')}\n${USAGE}`);
@@ -79,6 +88,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
   const stageArg = argv.find((a) => a.startsWith('--stage='))?.slice('--stage='.length);
   const docArg = argv.find((a) => a.startsWith('--doc='))?.slice('--doc='.length);
   const outArg = argv.find((a) => a.startsWith('--out='))?.slice('--out='.length);
+  const batchSizeArg = argv.find((a) => a.startsWith('--batch-size='))?.slice('--batch-size='.length);
 
   if (!stageArg || !docArg || !outArg) {
     throw new Error(`--stage, --doc и --out обязательны.\n${USAGE}`);
@@ -89,7 +99,12 @@ function parseArgs(argv: readonly string[]): CliArgs {
     );
   }
 
-  return { stage: stageArg as Stage, docPath: docArg, outDir: outArg };
+  const batchSize = batchSizeArg === undefined ? 4 : Number(batchSizeArg);
+  if (!Number.isInteger(batchSize) || batchSize < 1) {
+    throw new Error(`--batch-size обязан быть положительным целым, получено "${batchSizeArg}".\n${USAGE}`);
+  }
+
+  return { stage: stageArg as Stage, docPath: docArg, outDir: outArg, batchSize };
 }
 
 function gitSha(): string | null {
@@ -146,7 +161,7 @@ async function extractKnowledgeUnitsWithRetry(
             : error.reason === 'TRUNCATED_JSON'
               ? 'TRUNCATED_JSON'
               : 'OTHER_ERROR'
-          : error instanceof ChatCompletionError
+          : error instanceof ChatCompletionError && isRetryableChatCompletionError(error)
             ? 'NETWORK_ERROR'
             : 'OTHER_ERROR';
       const retryable = outcome !== 'OTHER_ERROR';
@@ -161,6 +176,42 @@ async function extractKnowledgeUnitsWithRetry(
   }
   // Недостижимо — цикл либо возвращает, либо бросает на последней попытке.
   throw new Error('extractKnowledgeUnitsWithRetry: unreachable');
+}
+
+async function auditBlockCoverageWithRetry(
+  options: AuditBlockCoverageOptions,
+  maxAttempts: number
+): Promise<{ result: BlockCoverageAuditResult; attemptLog: ExtractionAttemptLog[] }> {
+  const attemptLog: ExtractionAttemptLog[] = [];
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const result = await auditBlockCoverage(options);
+      attemptLog.push({ attempt, outcome: 'SUCCESS', message: null });
+      return { result, attemptLog };
+    } catch (error) {
+      const outcome: ExtractionAttemptLog['outcome'] =
+        error instanceof StructuredOutputError
+          ? error.reason === 'SCHEMA_MISMATCH'
+            ? 'SCHEMA_MISMATCH'
+            : error.reason === 'TRUNCATED_JSON'
+              ? 'TRUNCATED_JSON'
+              : 'OTHER_ERROR'
+          : error instanceof ChatCompletionError && isRetryableChatCompletionError(error)
+            ? 'NETWORK_ERROR'
+            : 'OTHER_ERROR';
+      attemptLog.push({
+        attempt,
+        outcome,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      const retryable = outcome !== 'OTHER_ERROR';
+      console.warn(
+        `[coverage audit attempt ${attempt}/${maxAttempts}] failed (${outcome}): ${attemptLog[attemptLog.length - 1].message}`
+      );
+      if (!retryable || attempt === maxAttempts) throw error;
+    }
+  }
+  throw new Error('auditBlockCoverageWithRetry: unreachable');
 }
 
 // ──────────────────────── evidence-resolution diagnostics ───────────────────
@@ -250,11 +301,23 @@ type StageResult = 'EXTRACTION_READY_FOR_REVIEW' | 'EXTRACTION_GATE_FAIL';
  * задача человеческого oracle-blind ревью (review packet) и, позже, retrieval
  * gate (план §0.4), не этой стадии.
  */
+export function coverageAuditGateReasons(
+  auditResults: readonly BlockCoverageAuditResult[]
+): string[] {
+  const unclearedAudits = auditResults.filter(coverageAuditNeedsReview);
+  if (unclearedAudits.length === 0) return [];
+  return [
+    `${unclearedAudits.length} block(ов) не получили окончательный COVERED verdict: ` +
+      unclearedAudits.map((audit) => audit.blockAnchor).join(', '),
+  ];
+}
+
 function computeStageResult(
   identity: IdentityAssignmentResult,
-  rawUnits: readonly ExtractedKnowledgeUnit[]
+  rawUnits: readonly ExtractedKnowledgeUnit[],
+  auditResults: readonly BlockCoverageAuditResult[]
 ): { result: StageResult; reasons: string[] } {
-  const reasons: string[] = [];
+  const reasons = coverageAuditGateReasons(auditResults);
 
   if (identity.unresolvedEvidence.length > 0) {
     reasons.push(`${identity.unresolvedEvidence.length} unit(ов) с unresolved evidence`);
@@ -406,7 +469,9 @@ async function main() {
     canonical.blocks.map((b) => [b.anchor, toSourceBlockLocation(b)])
   );
 
-  console.log('\nВызов LLM (extractKnowledgeUnits) — это платный сетевой вызов...');
+  console.log(
+    `\nВызовы LLM (bounded extraction + coverage audit, batchSize=${args.batchSize}) — это платные сетевые вызовы...`
+  );
   // Дефолт chat-provider.ts (defaultAnthropicMaxTokens) — 2048, рассчитан на
   // другие вызовы; v2-схема extractKnowledgeUnits многословнее v1
   // (ExtractedRuleStream): у каждого unit'а появились extractionRef/
@@ -414,11 +479,29 @@ async function main() {
   // документе оборвался (TRUNCATED_JSON) на дефолте — реальная находка этой
   // сессии, не гипотеза. 16000 — то же значение, что v1
   // (knowledge-extractor-stream.ts) уже использует для той же причины.
-  const { result: extraction, attemptLog } = await extractKnowledgeUnitsWithRetry(
-    { blocks: sourceBlocks, runConfig, maxTokens: 16000 },
-    6
+  const extractionAttempts: ExtractionAttemptLog[] = [];
+  const coverageAuditAttempts: ExtractionAttemptLog[] = [];
+  const retryingExtractor = async (options: ExtractKnowledgeUnitsOptions): Promise<ExtractKnowledgeUnitsResult> => {
+    const { result, attemptLog } = await extractKnowledgeUnitsWithRetry(options, 6);
+    extractionAttempts.push(...attemptLog);
+    return result;
+  };
+  const retryingAuditor = async (options: AuditBlockCoverageOptions): Promise<BlockCoverageAuditResult> => {
+    const { result, attemptLog } = await auditBlockCoverageWithRetry(options, 6);
+    coverageAuditAttempts.push(...attemptLog);
+    return result;
+  };
+  const extraction = await extractKnowledgeUnitsWithCompletenessAudit(
+    sourceBlocks,
+    args.batchSize,
+    { runConfig, maxTokens: 16000 },
+    runConfig,
+    { extractor: retryingExtractor, auditor: retryingAuditor }
   );
-  console.log(`extracted ${extraction.units.length} raw unit(ов) after ${attemptLog.length} attempt(s)`);
+  console.log(
+    `extracted ${extraction.units.length} raw unit(ов) across ${extraction.batchLogs.length} batch(es); ` +
+      `${extractionAttempts.length} extraction and ${coverageAuditAttempts.length} audit attempt(s)`
+  );
 
   const identity = assignIdentity(extraction.units, blocksByAnchor, canonical.sourceRevisionHash);
   console.log(
@@ -429,7 +512,8 @@ async function main() {
   const evidenceResolution = extraction.units.map((u) => resolveEvidenceDiagnostics(u, blocksByAnchor));
   const { result: stageResult, reasons: stageResultReasons } = computeStageResult(
     identity,
-    extraction.units
+    extraction.units,
+    extraction.auditResults
   );
 
   const unitCountByKind: Record<string, number> = {};
@@ -510,6 +594,21 @@ async function main() {
     'utf8'
   );
 
+  writeFileSync(
+    path.join(args.outDir, 'coverage-audit.json'),
+    JSON.stringify(
+      {
+        batchSize: args.batchSize,
+        batchLogs: extraction.batchLogs,
+        auditResults: extraction.auditResults,
+        focusedRetryLogs: extraction.focusedRetryLogs,
+      },
+      null,
+      2
+    ),
+    'utf8'
+  );
+
   const ranAt = new Date().toISOString();
   writeFileSync(
     path.join(args.outDir, 'extraction-summary.json'),
@@ -523,7 +622,12 @@ async function main() {
         canonicalTextHash: canonical.canonicalTextHash,
         parserVersion: canonical.parserVersion,
         runConfig,
-        extractionAttempts: attemptLog,
+        extractionBatchSize: args.batchSize,
+        extractionAttempts,
+        coverageAuditAttempts,
+        batchLogs: extraction.batchLogs,
+        coverageAuditResults: extraction.auditResults,
+        focusedRetryLogs: extraction.focusedRetryLogs,
         rawUnitCount: extraction.units.length,
         persistedUnitCount: identity.units.length,
         unitCountByKind,

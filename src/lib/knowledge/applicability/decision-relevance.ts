@@ -88,9 +88,9 @@ const SYSTEM_PROMPT = `Ты определяешь РЕЛЕВАНТНОСТЬ п
 - "CONDITIONALLY_RELEVANT": правило — законное исключение к тому, что отвечает на вопрос, и его применимость зависит от факта, которого вопрос не сообщает. Укажи этот факт (potentiallyDecidingFacts).
 - "IRRELEVANT": правило говорит о ДРУГОЙ ситуации или условии — даже если использует похожие слова (кожа, прикосновение, участок и т.п.), оно НЕ способно изменить ответ на ЭТОТ конкретный вопрос.
 
-Два примера для калибровки:
-1. Вопрос "Нужно ли мыть руки, если они выглядят чистыми?" + правило об ограниченной подвижности и помощи другого человека -> IRRELEVANT (вопрос не о подвижности).
-2. Вопрос "Можно ли это делать здесь?" + правило-исключение про общественное/приватное место -> CONDITIONALLY_RELEVANT, potentiallyDecidingFacts: ["privacyContext"] (ответ буквально зависит от места, а вопрос его не называет).
+Два предметно-нейтральных примера для калибровки:
+1. Вопрос "Можно ли отправить форму по электронной почте?" + правило об увеличенном сроке для международной доставки -> IRRELEVANT (способ отправки не зависит от срока доставки).
+2. Вопрос "Можно ли применить скидку?" + исключение для некоммерческих организаций -> CONDITIONALLY_RELEVANT, potentiallyDecidingFacts: ["organizationType"] (ответ зависит от типа организации, а вопрос его не называет).
 
 Не оценивай тематическое сходство слов. Оценивай: способно ли это правило изменить ответ на ДАННЫЙ вопрос.
 
@@ -195,6 +195,10 @@ export interface DecisionRelevanceGateResult {
    * которых его можно принять.
    */
   readonly droppedByClassifier: readonly string[];
+  /** Fail-closed provenance bit for answer-delivery policy. This is derived
+   *  rather than inferred later from a human-readable trace so callers cannot
+   *  accidentally treat a classifier-dependent path as deterministic. */
+  readonly answerDependsOnProbabilisticExclusion: boolean;
 }
 
 /** True iff `parentRef` names ANOTHER candidate in this same pool that is
@@ -263,5 +267,10 @@ export async function applyDecisionRelevanceGate(
     }
   }
 
-  return { relevant, trace, droppedByClassifier };
+  return {
+    relevant,
+    trace,
+    droppedByClassifier,
+    answerDependsOnProbabilisticExclusion: droppedByClassifier.length > 0,
+  };
 }

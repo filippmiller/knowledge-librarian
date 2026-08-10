@@ -24,12 +24,15 @@ export async function generateEmbedding(text: string): Promise<number[]> {
   return response.data[0].embedding;
 }
 
-export async function generateEmbeddings(texts: string[]): Promise<number[][]> {
+export async function generateEmbeddings(
+  texts: string[],
+  requestOptions?: { maxRetries?: number }
+): Promise<number[][]> {
   const response = await openai.embeddings.create({
     model: EMBEDDING_MODEL,
     input: texts,
     dimensions: EMBEDDING_DIMENSIONS,
-  });
+  }, requestOptions);
   return response.data.map((d) => d.embedding);
 }
 

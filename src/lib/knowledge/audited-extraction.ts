@@ -28,6 +28,7 @@ import {
 } from './batch-extraction';
 import {
   auditBlockCoverage,
+  coverageAuditNeedsReview,
   type AuditBlockCoverageOptions,
   type BlockCoverageAuditResult,
   type CoverageFinding,
@@ -57,11 +58,26 @@ export interface AuditedExtractionDeps {
   readonly auditor?: CoverageAuditor;
 }
 
-/** True iff `quote`'s span in `blockText` overlaps ANY of `existingQuotes`'
- *  spans — either direction (substring or superset), not just exact match.
- *  Thin wrapper over the shared `quoteSpansOverlap` (quote-locator.ts). */
-function quoteOverlapsAny(blockText: string, quote: string, existingQuotes: readonly string[]): boolean {
-  return existingQuotes.some((existing) => quoteSpansOverlap(blockText, quote, existing));
+/** Stable, deterministic identity component for semantic deduplication.
+ *  Evidence overlap alone is never enough: one broad source span may support
+ *  several distinct rules, including a clause recovered only by repair. */
+function normalizeSemanticStatement(statement: string): string {
+  return statement.normalize('NFKC').toLocaleLowerCase('ru-RU').replace(/\s+/g, ' ').trim();
+}
+
+/** Public pure policy boundary so artifact fingerprints can probe the exact
+ * focused-repair dedup rule rather than one lower-level ingredient of it. */
+export function focusedRepairDuplicatesExistingUnit(
+  blockText: string,
+  candidate: ExtractedKnowledgeUnit,
+  existingUnits: readonly ExtractedKnowledgeUnit[]
+): boolean {
+  const candidateStatement = normalizeSemanticStatement(candidate.statement);
+  return existingUnits.some(
+    (existing) =>
+      normalizeSemanticStatement(existing.statement) === candidateStatement &&
+      quoteSpansOverlap(blockText, candidate.sourceSpan.quote, existing.sourceSpan.quote)
+  );
 }
 
 export async function extractKnowledgeUnitsWithCompletenessAudit(
@@ -100,9 +116,14 @@ export async function extractKnowledgeUnitsWithCompletenessAudit(
       extractedStatements: unitsForBlock.map((u) => ({ statement: u.statement, quote: u.sourceSpan.quote })),
       runConfig: auditRunConfig,
     });
-    auditResults.push(audit);
+    if (!coverageAuditNeedsReview(audit)) {
+      auditResults.push(audit);
+      continue;
+    }
 
-    if (!audit.hasGap) continue;
+    if (!audit.hasGap) {
+      throw new Error(`Coverage audit did not clear block ${block.anchor}: explicit COVERED verdict required`);
+    }
 
     const retryResult: ExtractKnowledgeUnitsResult = await extractor({ ...optionsPerBatch, blocks: [block] });
     // The retry re-extracts the WHOLE block from scratch without seeing the
@@ -111,16 +132,15 @@ export async function extractKnowledgeUnitsWithCompletenessAudit(
     // ALREADY covered, not just the genuinely missing part. Real observed
     // effect (goal-shift continuation, 2026-08-09, full-smoke6 benchmark run):
     // one source rule ended up with 5 near-duplicate root-level units instead
-    // of the 1-2 a human curator would produce, purely from this. A retry
-    // unit whose quote occupies the SAME span of the block's text as an
-    // already-covered quote (either direction — substring or superset) adds
-    // no new information and is dropped; only genuinely new quote-territory
-    // is kept, so a real omission is still filled.
-    const coveredQuotes = unitsForBlock.map((u) => u.sourceSpan.quote);
+    // of the 1-2 a human curator would produce, purely from this. Drop a
+    // retry unit only when BOTH its normalized semantic statement matches
+    // and its evidence overlaps. Overlap by itself is not duplication: one
+    // broad quote can contain multiple independent clauses.
+    const coveredUnits = [...unitsForBlock];
     const keptUnits: ExtractedKnowledgeUnit[] = [];
     for (const candidate of retryResult.units) {
-      if (quoteOverlapsAny(block.text, candidate.sourceSpan.quote, coveredQuotes)) continue;
-      coveredQuotes.push(candidate.sourceSpan.quote);
+      if (focusedRepairDuplicatesExistingUnit(block.text, candidate, coveredUnits)) continue;
+      coveredUnits.push(candidate);
       keptUnits.push(candidate);
     }
 
@@ -137,6 +157,20 @@ export async function extractKnowledgeUnitsWithCompletenessAudit(
       ),
       additionalUnitCount: namespaced.length,
     });
+
+    const finalAudit = await auditor({
+      blockAnchor: block.anchor,
+      blockText: block.text,
+      extractedStatements: [...unitsForBlock, ...namespaced].map((u) => ({
+        statement: u.statement,
+        quote: u.sourceSpan.quote,
+      })),
+      runConfig: auditRunConfig,
+    });
+    if (coverageAuditNeedsReview(finalAudit)) {
+      throw new Error(`Focused repair did not clear block ${block.anchor}: final explicit COVERED verdict required`);
+    }
+    auditResults.push(finalAudit);
   }
 
   const units = validateParentRefs([...initialUnits, ...additionalUnits]);

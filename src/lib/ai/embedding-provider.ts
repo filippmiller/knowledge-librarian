@@ -20,9 +20,15 @@ export interface EmbeddingProvider {
 /** Оборачивает уже существующий `generateEmbeddings` (`@/lib/openai`) — не
  *  второй способ звать OpenAI, тот же клиент/модель, что и остальная система. */
 export class OpenAIEmbeddingProvider implements EmbeddingProvider {
+  constructor(private readonly beforeRequest?: (texts: readonly string[]) => void) {}
+
   async embed(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
-    return generateEmbeddings(texts);
+    this.beforeRequest?.(texts);
+    // A budget hook means the caller owns retry accounting. Disable hidden
+    // SDK retries only for that explicitly budgeted request; ordinary
+    // production callers retain the shared client's default retry policy.
+    return generateEmbeddings(texts, this.beforeRequest ? { maxRetries: 0 } : undefined);
   }
 
   modelInfo(): ModelInfo {

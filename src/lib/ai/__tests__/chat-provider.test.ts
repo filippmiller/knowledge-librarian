@@ -12,11 +12,22 @@ import {
   createChatCompletion,
   createChatCompletionDetailed,
   createChatCompletionStreamDetailed,
+  isRetryableChatCompletionError,
   resolveFallbackPolicy,
   resolveRunConfig,
   streamChatCompletionTokens,
   type ChatCompletionOptions,
 } from '../chat-provider';
+
+describe('outer ChatCompletionError retry policy', () => {
+  it.each([400, 401, 403, 404, 422])('classifies permanent %s as non-retryable', (statusCode) => {
+    expect(isRetryableChatCompletionError(new ChatCompletionError('permanent', [], { statusCode }))).toBe(false);
+  });
+
+  it.each([408, 409, 429, 500, 502, 503])('classifies transient %s as retryable', (statusCode) => {
+    expect(isRetryableChatCompletionError(new ChatCompletionError('transient', [], { statusCode }))).toBe(true);
+  });
+});
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const MESSAGES: ChatCompletionOptions['messages'] = [
@@ -242,6 +253,79 @@ describe('resolveFallbackPolicy', () => {
         providerModels: { anthropic: 'claude-sonnet-5' },
       })
     ).toBe('NONE');
+  });
+});
+
+describe('beforeProviderAttempt hard circuit breaker', () => {
+  it('budgeted OpenAI request disables hidden SDK retries', async () => {
+    openaiCreate.mockResolvedValue(openaiOk('ok'));
+    await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'openai',
+      fallbackPolicy: 'NONE',
+      beforeProviderAttempt: () => {},
+    });
+
+    expect(openaiCreate.mock.calls[0][1]).toMatchObject({ maxRetries: 0 });
+  });
+
+  it('ordinary production OpenAI request preserves the shared client retry policy', async () => {
+    openaiCreate.mockResolvedValue(openaiOk('ok'));
+    await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'openai',
+      fallbackPolicy: 'NONE',
+    });
+
+    expect(openaiCreate.mock.calls[0][1]).not.toHaveProperty('maxRetries');
+  });
+
+  it('ceiling=1 prevents the second primary raw retry', async () => {
+    vi.useFakeTimers();
+    try {
+      fetchMock.mockResolvedValue(anthropicFailure(429, 'rate_limit'));
+      let reservations = 0;
+      const promise = createChatCompletionDetailed({
+        messages: MESSAGES,
+        provider: 'anthropic',
+        fallbackPolicy: 'NONE',
+        beforeProviderAttempt: () => {
+          if (reservations >= 1) throw new Error('paid-call ceiling');
+          reservations += 1;
+        },
+      });
+      const rejection = expect(promise).rejects.toThrow('paid-call ceiling');
+
+      await vi.runAllTimersAsync();
+      await rejection;
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(reservations).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ceiling=1 prevents a fallback raw request after the primary request', async () => {
+    fetchMock.mockResolvedValue(anthropicFailure(500));
+    openaiCreate.mockResolvedValue(openaiOk('must not be reached'));
+    let reservations = 0;
+
+    await expect(
+      createChatCompletionDetailed({
+        messages: MESSAGES,
+        provider: 'anthropic',
+        providerModels: { openai: 'gpt-fallback' },
+        fallbackPolicy: 'CROSS_PROVIDER',
+        beforeProviderAttempt: () => {
+          if (reservations >= 1) throw new Error('paid-call ceiling');
+          reservations += 1;
+        },
+      })
+    ).rejects.toThrow('paid-call ceiling');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(openaiCreate).not.toHaveBeenCalled();
+    expect(reservations).toBe(1);
   });
 });
 

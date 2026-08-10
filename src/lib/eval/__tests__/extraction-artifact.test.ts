@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -14,6 +14,7 @@ import {
   ExtractionArtifactMismatchError,
   assertFingerprintMatches,
   buildExtractionArtifact,
+  computeArtifactContentDigest,
   computeFingerprintDigest,
   computePipelineProbes,
   diffFingerprints,
@@ -39,10 +40,11 @@ const FINGERPRINT: ExtractionFingerprint = {
   sourceRevisionHash: 'source-rev-1',
   canonicalTextHash: 'canonical-text-1',
   parserVersion: '2.0.0',
-  blockCount: 15,
+  blockCount: 1,
   extractionProvider: 'anthropic',
   extractionModel: 'claude-sonnet-5',
   extractionPromptVersion: 'extraction-prompt-v1',
+  extractionPromptFingerprint: 'f'.repeat(64),
   extractionSchemaVersion: 'extraction-schema-v1',
   extractionMaxTokens: 16000,
   extractionBatchSize: 4,
@@ -82,6 +84,15 @@ function candidate(unitId: string): RetrievalCandidate {
   return { unitId, retrievalText: `retrieval text ${unitId}` };
 }
 
+function cleanAudit(blockAnchor = 'anchor-1') {
+  return {
+    blockAnchor,
+    findings: [{ verdict: 'COVERED' as const, quote: '', explanation: 'проверено', quoteVerified: false }],
+    hasGap: false,
+    unresolved: false,
+  };
+}
+
 function artifact(overrides: Partial<Parameters<typeof buildExtractionArtifact>[0]> = {}): ExtractionArtifact {
   return buildExtractionArtifact({
     fingerprint: FINGERPRINT,
@@ -104,8 +115,8 @@ function artifact(overrides: Partial<Parameters<typeof buildExtractionArtifact>[
       { unitId: 'u2', retrievalText: 'retrieval text u2', embedding: [0.5, 0.6, 0.7, 0.8] },
     ],
     extractionAttemptLog: [{ attempt: 1, outcome: 'SUCCESS', message: null }],
-    batchLogs: [],
-    auditResults: [],
+    batchLogs: [{ batchIndex: 0, blockAnchors: ['anchor-1'], unitCount: 2 }],
+    auditResults: [cleanAudit()],
     focusedRetryLogs: [],
     ...overrides,
   });
@@ -217,6 +228,79 @@ describe('serializeExtractionArtifact / parseExtractionArtifact', () => {
     raw.snapshot.units = [];
     expect(() => parseExtractionArtifact(JSON.stringify(raw), 'empty.json')).toThrow(ExtractionArtifactError);
   });
+
+  it('binds snapshot units and embeddings to contentDigest', () => {
+    const changedUnit = JSON.parse(serializeExtractionArtifact(artifact()));
+    changedUnit.snapshot.units[0].statement = 'тихо подменённое утверждение';
+    expect(() => parseExtractionArtifact(JSON.stringify(changedUnit), 'unit-corrupt.json')).toThrow(/contentDigest/);
+
+    const changedVector = JSON.parse(serializeExtractionArtifact(artifact()));
+    changedVector.embeddings[0].embedding[0] = 0.999;
+    expect(() => parseExtractionArtifact(JSON.stringify(changedVector), 'vector-corrupt.json')).toThrow(/contentDigest/);
+  });
+
+  it('content digest excludes timestamp and source path volatility', () => {
+    const base = artifact();
+    const moved = { ...base, savedAt: '2099-01-01T00:00:00.000Z', sourceDocPath: 'D:/moved/source.docx' };
+    expect(computeArtifactContentDigest(moved)).toBe(computeArtifactContentDigest(base));
+  });
+
+  it('rejects unknown top-level and snapshot fields', () => {
+    const top = JSON.parse(serializeExtractionArtifact(artifact()));
+    top.unexpected = true;
+    expect(() => parseExtractionArtifact(JSON.stringify(top), 'extra.json')).toThrow(/строгой схеме/);
+
+    const nested = JSON.parse(serializeExtractionArtifact(artifact()));
+    nested.snapshot.unexpected = true;
+    expect(() => parseExtractionArtifact(JSON.stringify(nested), 'extra.json')).toThrow(/строгой схеме/);
+  });
+
+  it('rejects a persisted audit that needs review even when its digest used to be valid', () => {
+    const raw = JSON.parse(serializeExtractionArtifact(artifact()));
+    raw.auditResults[0] = {
+      blockAnchor: 'anchor-1',
+      findings: [{ verdict: 'AMBIGUOUS', quote: 'цитата', explanation: 'не уверен', quoteVerified: true }],
+      hasGap: false,
+      unresolved: true,
+    };
+    expect(() => parseExtractionArtifact(JSON.stringify(raw), 'ambiguous.json')).toThrow(/trusted artifact запрещён/);
+  });
+});
+
+describe('trusted completeness publication gate', () => {
+  it('refuses a self-consistent truncated log/audit universe smaller than fingerprint.blockCount', () => {
+    expect(() => artifact({ fingerprint: { ...FINGERPRINT, blockCount: 2 } })).toThrow(
+      /fingerprint\.blockCount requires 2|fingerprint\.blockCount требует 2/
+    );
+  });
+
+  it('refuses to build when a batched block has no final audit', () => {
+    expect(() => artifact({ auditResults: [] })).toThrow(/нет финального чистого аудита/);
+  });
+
+  it('refuses an audit for a block absent from batch logs', () => {
+    expect(() => artifact({ auditResults: [cleanAudit('unknown')] })).toThrow(/неизвестный блок/);
+  });
+
+  it('accepts multiple clean audits for a taint re-audit of the same block', () => {
+    expect(() => artifact({ auditResults: [cleanAudit(), cleanAudit()] })).not.toThrow();
+  });
+
+  it('does not let a prior clean audit mask a later taint re-audit gap', () => {
+    expect(() =>
+      artifact({
+        auditResults: [
+          cleanAudit(),
+          {
+            blockAnchor: 'anchor-1',
+            findings: [{ verdict: 'UNREPRESENTED_CLAUSE', quote: 'цитата', explanation: 'gap', quoteVerified: true }],
+            hasGap: true,
+            unresolved: false,
+          },
+        ],
+      })
+    ).toThrow(/trusted artifact запрещён/);
+  });
 });
 
 describe('readExtractionArtifact', () => {
@@ -239,6 +323,7 @@ describe('readExtractionArtifact', () => {
     const file = path.join(dir, 'good.json');
     writeExtractionArtifact(file, artifact());
     expect(readExtractionArtifact(file, { ...FINGERPRINT }).snapshot.units).toHaveLength(2);
+    expect(readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
   });
 
   it('refuses a stale artifact rather than returning it', () => {
@@ -324,10 +409,11 @@ describe('computePipelineProbes', () => {
     expect(new Set(values).size).toBe(values.length);
   });
 
-  it('covers the five behaviours a saved extraction silently depends on', () => {
+  it('covers the behaviours a saved extraction silently depends on', () => {
     expect(Object.keys(computePipelineProbes()).sort()).toEqual([
       'auditPolicyFingerprint',
       'auditPromptFingerprint',
+      'extractionPromptFingerprint',
       'focusedRepairPolicyFingerprint',
       'identityAlgorithmFingerprint',
       'retrievalTextFingerprint',

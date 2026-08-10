@@ -39,20 +39,24 @@
  * benchmark number that looks real and is not.
  */
 
-import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 
 import type { ModelInfo } from '@/lib/ai/embedding-provider';
 import type { BatchExtractionLog } from '@/lib/knowledge/batch-extraction';
-import type { FocusedRetryLog } from '@/lib/knowledge/audited-extraction';
+import {
+  focusedRepairDuplicatesExistingUnit,
+  type FocusedRetryLog,
+} from '@/lib/knowledge/audited-extraction';
 import {
   buildCoverageAuditPromptMessages,
+  coverageAuditNeedsReview,
   interpretCoverageAuditResponse,
   type BlockCoverageAuditResult,
   type CoverageVerdict,
   type RawCoverageFinding,
 } from '@/lib/knowledge/extraction-coverage-auditor';
-import { quoteSpansOverlap } from '@/lib/knowledge/quote-locator';
+import { buildExtractionPromptMessages } from '@/lib/knowledge/knowledge-unit-extractor';
 import type { ExtractedKnowledgeUnit } from '@/lib/knowledge/applicability/extraction';
 import {
   assignIdentity,
@@ -66,7 +70,7 @@ import type { EvaluationKnowledgeSnapshot } from './evaluation-snapshot';
 
 /** Bumped whenever the artifact's SHAPE changes. Part of the fingerprint, so
  *  an artifact from an older shape is refused rather than half-read. */
-export const EXTRACTION_ARTIFACT_VERSION = '2026-08-10-extraction-artifact-v1';
+export const EXTRACTION_ARTIFACT_VERSION = '2026-08-10-extraction-artifact-v2';
 
 /** Единственная формулировка выхода из любого отказа — чтобы «что делать»
  *  не пришлось угадывать ни на одном из путей refuse. */
@@ -123,6 +127,14 @@ function probeAuditPrompt(): string {
   return sha256(JSON.stringify(messages));
 }
 
+/** Binds reuse to the actual extraction prompt text and generated catalogs,
+ * not merely to a manually maintained prompt-version label. */
+function probeExtractionPrompt(): string {
+  return sha256(
+    JSON.stringify(buildExtractionPromptMessages([{ anchor: 'probe-anchor', text: PROBE_BLOCK_TEXT }]))
+  );
+}
+
 /**
  * Прогоняет ПОЛИТИКУ аудитора (`interpretCoverageAuditResponse`) по матрице
  * вердиктов и хеширует полученные `hasGap`/`unresolved`/`quoteVerified`.
@@ -159,14 +171,20 @@ function probeAuditPolicy(): string {
  *  живёт в `quoteSpansOverlap`. План (Wave 2+) прямо намечает его изменение —
  *  units, снятые при старом правиле, тогда перестанут быть воспроизводимыми. */
 function probeFocusedRepairPolicy(): string {
-  const pairs: readonly (readonly [string, string])[] = [
-    ['Документ подаётся в оригинале', 'Документ подаётся в оригинале'],
-    ['Документ подаётся', 'Документ подаётся в оригинале'],
-    ['Документ подаётся в оригинале', 'допускается нотариальная копия'],
-    ['не более 5 рабочих дней', 'Срок оформления — не более 5 рабочих дней'],
-    ['такой цитаты в блоке нет', 'Документ подаётся в оригинале'],
+  const existing = probeExtractedUnit();
+  const candidates = [
+    probeExtractedUnit({ extractionRef: 'same', statement: '  ДОКУМЕНТ подаётся в оригинале.  ' }),
+    probeExtractedUnit({ extractionRef: 'different-statement', statement: 'Допускается нотариальная копия.' }),
+    probeExtractedUnit({
+      extractionRef: 'same-no-overlap',
+      sourceSpan: { anchor: 'probe-anchor', quote: 'не более 5 рабочих дней' },
+    }),
   ];
-  return sha256(JSON.stringify(pairs.map(([a, b]) => quoteSpansOverlap(PROBE_BLOCK_TEXT, a, b))));
+  return sha256(
+    JSON.stringify(
+      candidates.map((candidate) => focusedRepairDuplicatesExistingUnit(PROBE_BLOCK_TEXT, candidate, [existing]))
+    )
+  );
 }
 
 const PROBE_BLOCK: SourceBlockLocation = {
@@ -254,6 +272,7 @@ function probeRetrievalText(): string {
 }
 
 export interface PipelineProbeFingerprints {
+  readonly extractionPromptFingerprint: string;
   readonly auditPromptFingerprint: string;
   readonly auditPolicyFingerprint: string;
   readonly focusedRepairPolicyFingerprint: string;
@@ -265,6 +284,7 @@ export interface PipelineProbeFingerprints {
  *  из пяти. Чистая, без сети; безопасно звать до любого платного вызова. */
 export function computePipelineProbes(): PipelineProbeFingerprints {
   return {
+    extractionPromptFingerprint: probeExtractionPrompt(),
     auditPromptFingerprint: probeAuditPrompt(),
     auditPolicyFingerprint: probeAuditPolicy(),
     focusedRepairPolicyFingerprint: probeFocusedRepairPolicy(),
@@ -292,6 +312,7 @@ export interface ExtractionFingerprint {
   readonly extractionProvider: string;
   readonly extractionModel: string;
   readonly extractionPromptVersion: string;
+  readonly extractionPromptFingerprint: string;
   readonly extractionSchemaVersion: string;
   readonly extractionMaxTokens: number;
   readonly extractionBatchSize: number;
@@ -385,6 +406,9 @@ export interface ExtractionArtifact {
   /** Дайджест СОБСТВЕННОГО `fingerprint` — ловит артефакт, у которого поля
    *  отпечатка поправили руками, чтобы «подошло». */
   readonly fingerprintDigest: string;
+  /** Digest of all semantically relevant persisted content. Volatile location
+   * and timestamp fields are deliberately excluded. */
+  readonly contentDigest: string;
   readonly snapshot: EvaluationKnowledgeSnapshot;
   readonly embeddingModel: ModelInfo;
   readonly embeddings: readonly StoredEmbedding[];
@@ -406,8 +430,78 @@ export interface BuildExtractionArtifactInput {
   readonly focusedRetryLogs: readonly FocusedRetryLog[];
 }
 
+/** Artifact publication boundary: each source block must be represented once
+ * in the extraction batches and have at least one audit. Re-audits (for
+ * taint replacement) are allowed, but every persisted audit — including the
+ * final one — must be explicitly clean. This prevents an earlier clean audit
+ * from masking a later regression. */
+export function assertTrustedCompleteness(
+  batchLogs: readonly BatchExtractionLog[],
+  auditResults: readonly BlockCoverageAuditResult[],
+  expectedBlockCount: number,
+  label: string
+): void {
+  if (!Number.isInteger(expectedBlockCount) || expectedBlockCount < 1) {
+    throw new ExtractionArtifactError(
+      `Артефакт "${label}": fingerprint.blockCount обязан быть целым >= 1. ${REMEDIATION}`
+    );
+  }
+  const expectedAnchors = new Set<string>();
+  for (const [batchIndex, log] of batchLogs.entries()) {
+    if (!Number.isInteger(log.batchIndex) || !Array.isArray(log.blockAnchors) || log.blockAnchors.length === 0) {
+      throw new ExtractionArtifactError(`Артефакт "${label}": batchLogs[${batchIndex}] повреждён. ${REMEDIATION}`);
+    }
+    for (const anchor of log.blockAnchors) {
+      if (typeof anchor !== 'string' || anchor.length === 0 || expectedAnchors.has(anchor)) {
+        throw new ExtractionArtifactError(
+          `Артефакт "${label}": anchor блока "${String(anchor)}" пуст или встречается в batchLogs больше одного раза. ${REMEDIATION}`
+        );
+      }
+      expectedAnchors.add(anchor);
+    }
+  }
+  if (expectedAnchors.size === 0) {
+    throw new ExtractionArtifactError(`Артефакт "${label}": batchLogs не содержит ни одного блока. ${REMEDIATION}`);
+  }
+  if (expectedAnchors.size !== expectedBlockCount) {
+    throw new ExtractionArtifactError(
+      `Артефакт "${label}": batchLogs покрывает ${expectedAnchors.size} уникальных блоков, ` +
+        `но fingerprint.blockCount требует ${expectedBlockCount}; trusted artifact неполон. ${REMEDIATION}`
+    );
+  }
+
+  const auditCountByAnchor = new Map<string, number>();
+  for (const [index, audit] of auditResults.entries()) {
+    if (
+      typeof audit !== 'object' || audit === null || typeof audit.blockAnchor !== 'string' ||
+      !Array.isArray(audit.findings) || typeof audit.hasGap !== 'boolean'
+    ) {
+      throw new ExtractionArtifactError(`Артефакт "${label}": auditResults[${index}] повреждён. ${REMEDIATION}`);
+    }
+    if (!expectedAnchors.has(audit.blockAnchor)) {
+      throw new ExtractionArtifactError(
+        `Артефакт "${label}": аудит ссылается на неизвестный блок "${audit.blockAnchor}". ${REMEDIATION}`
+      );
+    }
+    if (audit.hasGap || audit.unresolved === true || coverageAuditNeedsReview(audit)) {
+      throw new ExtractionArtifactError(
+        `Артефакт "${label}": блок "${audit.blockAnchor}" не имеет чистого COVERED-аудита; trusted artifact запрещён. ${REMEDIATION}`
+      );
+    }
+    auditCountByAnchor.set(audit.blockAnchor, (auditCountByAnchor.get(audit.blockAnchor) ?? 0) + 1);
+  }
+
+  const missing = [...expectedAnchors].filter((anchor) => !auditCountByAnchor.has(anchor));
+  if (missing.length > 0) {
+    throw new ExtractionArtifactError(
+      `Артефакт "${label}": нет финального чистого аудита блоков: ${missing.join(', ')}. ${REMEDIATION}`
+    );
+  }
+}
+
 export function buildExtractionArtifact(input: BuildExtractionArtifactInput): ExtractionArtifact {
-  return {
+  assertTrustedCompleteness(input.batchLogs, input.auditResults, input.fingerprint.blockCount, input.sourceDocPath);
+  const artifactWithoutDigest = {
     artifactVersion: EXTRACTION_ARTIFACT_VERSION,
     savedAt: new Date().toISOString(),
     sourceDocPath: input.sourceDocPath,
@@ -421,6 +515,29 @@ export function buildExtractionArtifact(input: BuildExtractionArtifactInput): Ex
     auditResults: input.auditResults,
     focusedRetryLogs: input.focusedRetryLogs,
   };
+  return { ...artifactWithoutDigest, contentDigest: computeArtifactContentDigest(artifactWithoutDigest) };
+}
+
+/** Stable recursive JSON representation: object keys sort, array order stays
+ * significant (unit and embedding order is part of the artifact contract). */
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (typeof value === 'object' && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([key, child]) => [key, canonicalize(child)])
+    );
+  }
+  return value;
+}
+
+type DigestibleArtifact = Omit<ExtractionArtifact, 'contentDigest'>;
+
+export function computeArtifactContentDigest(artifact: DigestibleArtifact | ExtractionArtifact): string {
+  const { savedAt: _savedAt, sourceDocPath: _sourceDocPath, contentDigest: _contentDigest, ...content } =
+    artifact as ExtractionArtifact;
+  return sha256(JSON.stringify(canonicalize(content)));
 }
 
 export function serializeExtractionArtifact(artifact: ExtractionArtifact): string {
@@ -441,6 +558,18 @@ function requireNumber(value: unknown, field: string, label: string): number {
   return value;
 }
 
+function assertExactKeys(value: Record<string, unknown>, expected: readonly string[], field: string, label: string): void {
+  const expectedSet = new Set(expected);
+  const missing = expected.filter((key) => !(key in value));
+  const extra = Object.keys(value).filter((key) => !expectedSet.has(key));
+  if (missing.length > 0 || extra.length > 0) {
+    throw new ExtractionArtifactError(
+      `Артефакт "${label}": ${field} не соответствует строгой схеме ` +
+        `(нет: ${missing.join(', ') || '—'}; неизвестны: ${extra.join(', ') || '—'}). ${REMEDIATION}`
+    );
+  }
+}
+
 /** Поля отпечатка перечислены ЯВНО (а не «всё, что нашлось в JSON»): артефакт
  *  с лишним или недостающим полем — из другой версии схемы отпечатка, и
  *  сравнивать его с текущей конфигурацией нельзя. */
@@ -452,6 +581,7 @@ const FINGERPRINT_STRING_FIELDS = [
   'extractionProvider',
   'extractionModel',
   'extractionPromptVersion',
+  'extractionPromptFingerprint',
   'extractionSchemaVersion',
   'auditProvider',
   'auditModel',
@@ -553,6 +683,16 @@ export function parseExtractionArtifact(json: string, sourceLabel: string): Extr
     throw new ExtractionArtifactError(`Артефакт "${sourceLabel}": ожидался JSON-объект. ${REMEDIATION}`);
   }
   const source = raw as Record<string, unknown>;
+  assertExactKeys(
+    source,
+    [
+      'artifactVersion', 'savedAt', 'sourceDocPath', 'fingerprint', 'fingerprintDigest', 'contentDigest',
+      'snapshot', 'embeddingModel', 'embeddings', 'extractionAttemptLog', 'batchLogs', 'auditResults',
+      'focusedRetryLogs',
+    ],
+    'корень',
+    sourceLabel
+  );
 
   const artifactVersion = requireString(source.artifactVersion, 'artifactVersion', sourceLabel);
   if (artifactVersion !== EXTRACTION_ARTIFACT_VERSION) {
@@ -576,6 +716,15 @@ export function parseExtractionArtifact(json: string, sourceLabel: string): Extr
     throw new ExtractionArtifactError(`Артефакт "${sourceLabel}": отсутствует snapshot. ${REMEDIATION}`);
   }
   const snapshotSource = snapshotRaw as Record<string, unknown>;
+  assertExactKeys(
+    snapshotSource,
+    [
+      'sourceRevisionHash', 'canonicalTextHash', 'parserVersion', 'extractionRunId', 'extractionProvider',
+      'extractionModel', 'extractionPromptVersion', 'extractionSchemaVersion', 'humanReviewed', 'units',
+    ],
+    'snapshot',
+    sourceLabel
+  );
   if (snapshotSource.humanReviewed !== false) {
     throw new ExtractionArtifactError(
       `Артефакт "${sourceLabel}": snapshot.humanReviewed обязан быть false — EvaluationKnowledgeSnapshot по определению неотревьюен. ${REMEDIATION}`
@@ -608,6 +757,12 @@ export function parseExtractionArtifact(json: string, sourceLabel: string): Extr
     throw new ExtractionArtifactError(`Артефакт "${sourceLabel}": отсутствует embeddingModel. ${REMEDIATION}`);
   }
   const embeddingModelSource = embeddingModelRaw as Record<string, unknown>;
+  assertExactKeys(
+    embeddingModelSource,
+    embeddingModelSource.dimensions === undefined ? ['provider', 'model'] : ['provider', 'model', 'dimensions'],
+    'embeddingModel',
+    sourceLabel
+  );
   const embeddingModel: ModelInfo = {
     provider: requireString(embeddingModelSource.provider, 'embeddingModel.provider', sourceLabel),
     model: requireString(embeddingModelSource.model, 'embeddingModel.model', sourceLabel),
@@ -616,14 +771,20 @@ export function parseExtractionArtifact(json: string, sourceLabel: string): Extr
       : { dimensions: requireNumber(embeddingModelSource.dimensions, 'embeddingModel.dimensions', sourceLabel) }),
   };
 
-  const asArray = <T>(value: unknown): readonly T[] => (Array.isArray(value) ? (value as T[]) : []);
+  const requireArray = <T>(value: unknown, field: string): readonly T[] => {
+    if (!Array.isArray(value)) {
+      throw new ExtractionArtifactError(`Артефакт "${sourceLabel}": ${field} обязан быть массивом. ${REMEDIATION}`);
+    }
+    return value as T[];
+  };
 
-  return {
+  const parsed: ExtractionArtifact = {
     artifactVersion,
     savedAt: requireString(source.savedAt, 'savedAt', sourceLabel),
     sourceDocPath: requireString(source.sourceDocPath, 'sourceDocPath', sourceLabel),
     fingerprint,
     fingerprintDigest: storedDigest,
+    contentDigest: requireString(source.contentDigest, 'contentDigest', sourceLabel),
     snapshot,
     embeddingModel,
     embeddings: parseEmbeddings(source.embeddings, sourceLabel),
@@ -631,15 +792,40 @@ export function parseExtractionArtifact(json: string, sourceLabel: string): Extr
     // артефакты прогона для сопоставимости отчётов и НИКОГДА не подаются в
     // CostLedger повторно — те токены оплачены в исходном прогоне, и
     // засчитать их снова значило бы завысить стоимость переиспользующего.
-    extractionAttemptLog: asArray<ExtractionAttemptLog>(source.extractionAttemptLog),
-    batchLogs: asArray<BatchExtractionLog>(source.batchLogs),
-    auditResults: asArray<BlockCoverageAuditResult>(source.auditResults),
-    focusedRetryLogs: asArray<FocusedRetryLog>(source.focusedRetryLogs),
+    extractionAttemptLog: requireArray<ExtractionAttemptLog>(source.extractionAttemptLog, 'extractionAttemptLog'),
+    batchLogs: requireArray<BatchExtractionLog>(source.batchLogs, 'batchLogs'),
+    auditResults: requireArray<BlockCoverageAuditResult>(source.auditResults, 'auditResults'),
+    focusedRetryLogs: requireArray<FocusedRetryLog>(source.focusedRetryLogs, 'focusedRetryLogs'),
   };
+  assertTrustedCompleteness(parsed.batchLogs, parsed.auditResults, parsed.fingerprint.blockCount, sourceLabel);
+  const actualContentDigest = computeArtifactContentDigest(parsed);
+  if (parsed.contentDigest !== actualContentDigest) {
+    throw new ExtractionArtifactError(
+      `Артефакт "${sourceLabel}": contentDigest не сходится с содержимым ` +
+        `(записан ${parsed.contentDigest}, посчитан ${actualContentDigest}) — snapshot, units, embeddings или журналы повреждены. ${REMEDIATION}`
+    );
+  }
+  return parsed;
 }
 
 export function writeExtractionArtifact(filePath: string, artifact: ExtractionArtifact): void {
-  writeFileSync(filePath, serializeExtractionArtifact(artifact), 'utf8');
+  const serialized = serializeExtractionArtifact(artifact);
+  // Validate exactly what will reach disk before replacing a known-good file.
+  parseExtractionArtifact(serialized, `${filePath} (предзапись)`);
+  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tempPath, serialized, { encoding: 'utf8', flag: 'wx' });
+    // Catch truncation/storage surprises before the atomic checkpoint.
+    parseExtractionArtifact(readFileSync(tempPath, 'utf8'), tempPath);
+    renameSync(tempPath, filePath);
+  } catch (err) {
+    try {
+      unlinkSync(tempPath);
+    } catch {
+      // Temp may not have been created or rename already consumed it.
+    }
+    throw err;
+  }
 }
 
 /**

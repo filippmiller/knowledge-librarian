@@ -10,15 +10,12 @@
  * Generalizes to any document — no assumption about numbered rules,
  * fixed rule count, or this fixture's structure anywhere in this module.
  *
- * Cross-batch `parentExtractionRef` is impossible BY CONSTRUCTION, not by
- * a rule this module enforces: the model only ever sees one batch's blocks
- * per call, so it cannot reference a unit it never saw. Real fragment
- * relationships (numeric sub-clauses, exception-to-parent) survive as long
- * as the fragments' source text lives within one batch — true for every
- * case observed on the real training document (each fragmented rule's
- * units all share one canonical block). Batching by several ADJACENT
- * blocks, not strictly one block at a time, gives headroom for documents
- * where related content spans more than one block.
+ * A model cannot emit a `parentExtractionRef` to a unit from a previous
+ * response. After namespacing, this module therefore restores only a narrow,
+ * deterministic class of cross-boundary relationships: an orphan exception
+ * or numeric qualification may link to the immediately preceding batch when
+ * there is exactly one structurally compatible base unit. Ambiguous cases
+ * remain unlinked; there are no pairwise LLM calls or semantic guesses.
  */
 
 import {
@@ -53,6 +50,108 @@ function namespaceUnit(unit: ExtractedKnowledgeUnit, batchIndex: number): Extrac
   };
 }
 
+function facetsAreCompatible(
+  left: ExtractedKnowledgeUnit['facets'],
+  right: ExtractedKnowledgeUnit['facets']
+): boolean {
+  for (const key of Object.keys(left) as (keyof ExtractedKnowledgeUnit['facets'])[]) {
+    if (key in right && left[key] !== right[key]) return false;
+  }
+  return true;
+}
+
+function isOrphanQualification(unit: ExtractedKnowledgeUnit): boolean {
+  return (
+    unit.parentExtractionRef === null &&
+    (unit.kind === 'EXCEPTION_RULE' || unit.numericConstraint !== null)
+  );
+}
+
+function isCompatibleBase(
+  child: ExtractedKnowledgeUnit,
+  candidate: ExtractedKnowledgeUnit
+): boolean {
+  if (!facetsAreCompatible(child.facets, candidate.facets)) return false;
+
+  if (child.kind === 'EXCEPTION_RULE') {
+    return candidate.kind === 'PROCEDURE_STEP';
+  }
+
+  return (
+    child.numericConstraint !== null &&
+    candidate.kind === child.kind &&
+    candidate.numericConstraint === null
+  );
+}
+
+const EXPLICIT_PREVIOUS_RULE_REFERENCE =
+  /(?:к|для)\s+(?:предыдущ(?:ему|его)|предшествующ(?:ему|его)|указанн(?:ому|ого)\s+выше)\s+(?:правил(?:у|а)|пункт(?:у|а)|абзац(?:у|а)|требовани(?:ю|я)|шаг(?:у|а))|(?:previous|preceding|above)\s+(?:rule|clause|paragraph|requirement|step)/iu;
+
+function hasStructuralBoundaryEvidence(
+  child: ExtractedKnowledgeUnit,
+  candidate: ExtractedKnowledgeUnit,
+  previousBatch: readonly SourceBlock[],
+  currentBatch: readonly SourceBlock[]
+): boolean {
+  const previousBoundary = previousBatch.at(-1);
+  const currentBoundary = currentBatch[0];
+  if (
+    previousBoundary === undefined ||
+    currentBoundary === undefined ||
+    candidate.sourceSpan.anchor !== previousBoundary.anchor ||
+    child.sourceSpan.anchor !== currentBoundary.anchor
+  ) {
+    return false;
+  }
+
+  // SourceBlock currently carries no section/outline metadata. In its
+  // absence, only an explicit textual reference to the preceding structural
+  // item is evidence enough. Mere adjacency (even with one candidate) is not.
+  return EXPLICIT_PREVIOUS_RULE_REFERENCE.test(currentBoundary.text);
+}
+
+/**
+ * Reconnect relationships that a batch boundary made impossible for the
+ * extractor to express. The immediately previous batch is the full search
+ * window, both units must sit on the batch boundary, the source must
+ * explicitly refer to the preceding structural item, and uniqueness is
+ * mandatory. Missing or ambiguous evidence fails closed.
+ */
+function linkAdjacentBatchRelationships(
+  unitsByBatch: readonly (readonly ExtractedKnowledgeUnit[])[],
+  sourceBatches: readonly (readonly SourceBlock[])[]
+): ExtractedKnowledgeUnit[] {
+  const linked: ExtractedKnowledgeUnit[] = [];
+
+  for (const [batchIndex, units] of unitsByBatch.entries()) {
+    const previous = batchIndex === 0 ? [] : unitsByBatch[batchIndex - 1];
+    for (const unit of units) {
+      if (!isOrphanQualification(unit)) {
+        linked.push(unit);
+        continue;
+      }
+
+      const candidates = previous.filter(
+        (candidate) =>
+          isCompatibleBase(unit, candidate) &&
+          hasStructuralBoundaryEvidence(
+            unit,
+            candidate,
+            sourceBatches[batchIndex - 1] ?? [],
+            sourceBatches[batchIndex] ?? []
+          )
+      );
+      linked.push(
+        candidates.length === 1
+          ? { ...unit, parentExtractionRef: candidates[0].extractionRef }
+          : unit
+      );
+    }
+  }
+
+  return linked;
+}
+
 export interface BatchExtractionLog {
   readonly batchIndex: number;
   readonly blockAnchors: readonly string[];
@@ -78,13 +177,13 @@ export async function extractKnowledgeUnitsInBatches(
   extractor: BatchExtractor = extractKnowledgeUnits
 ): Promise<BatchExtractionResult> {
   const batches = batchSourceBlocks(blocks, batchSize);
-  const allUnits: ExtractedKnowledgeUnit[] = [];
+  const unitsByBatch: ExtractedKnowledgeUnit[][] = [];
   const batchLogs: BatchExtractionLog[] = [];
 
   for (const [batchIndex, batchBlocks] of batches.entries()) {
     const result = await extractor({ ...optionsPerBatch, blocks: batchBlocks });
     const namespaced = result.units.map((u) => namespaceUnit(u, batchIndex));
-    allUnits.push(...namespaced);
+    unitsByBatch.push(namespaced);
     batchLogs.push({
       batchIndex,
       blockAnchors: batchBlocks.map((b) => b.anchor),
@@ -98,7 +197,7 @@ export async function extractKnowledgeUnitsInBatches(
   // etc.). Namespacing already makes every extractionRef globally unique
   // and every parentExtractionRef batch-local, so this is defense in depth,
   // not expected to find anything new.
-  const units = validateParentRefs(allUnits);
+  const units = validateParentRefs(linkAdjacentBatchRelationships(unitsByBatch, batches));
 
   return { units, batchLogs };
 }

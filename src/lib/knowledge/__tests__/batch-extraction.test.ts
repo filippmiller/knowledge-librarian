@@ -112,6 +112,80 @@ describe('extractKnowledgeUnitsInBatches — merge + namespacing', () => {
     expect(result.units.every((u) => u.parentExtractionRef === null)).toBe(true);
   });
 
+  it('базовое правило в batch N и единственное совместимое исключение в N+1 сохраняют parent relationship после merge', async () => {
+    const blocks = [
+      block('base-block', 'Подайте оригинал документа.'),
+      block('exception-block', 'Исключение к предыдущему правилу: если доступен только электронный документ, приложите распечатку.'),
+    ];
+    const extractor: BatchExtractor = async (options) => {
+      if (options.blocks[0].anchor === 'base-block') {
+        return {
+          units: [unit({
+            extractionRef: 'base',
+            statement: 'Нужно подать оригинал документа.',
+            facets: { documentForm: 'ORIGINAL' },
+            sourceSpan: { anchor: 'base-block', quote: 'Подайте оригинал документа.' },
+          })],
+          structuredResult: {} as never,
+        };
+      }
+      return {
+        units: [unit({
+          kind: 'EXCEPTION_RULE',
+          extractionRef: 'exception',
+          parentExtractionRef: null,
+          statement: 'Для электронного документа приложите распечатку.',
+          facets: { documentForm: 'ORIGINAL' },
+          triggerCondition: { all: [{ fact: 'digitalOnly', equals: true }] } as never,
+          sourceSpan: { anchor: 'exception-block', quote: 'Исключение к предыдущему правилу: если доступен только электронный документ, приложите распечатку.' },
+        })],
+        structuredResult: {} as never,
+      };
+    };
+
+    const result = await extractKnowledgeUnitsInBatches(blocks, 1, { runConfig: {} as never }, extractor);
+    const parent = result.units.find((candidate) => candidate.extractionRef === 'b0-base')!;
+    const exception = result.units.find((candidate) => candidate.extractionRef === 'b1-exception')!;
+    expect(exception.parentExtractionRef).toBe(parent.extractionRef);
+    expect(exception.uncertainties.some((u) => u.kind === 'DANGLING_PARENT_REF')).toBe(false);
+  });
+
+  it('не связывает единственное соседнее правило с тематически посторонним исключением без явной структурной ссылки', async () => {
+    const blocks = [
+      block('delivery', 'Передайте оригинал документа курьеру.'),
+      block('payment-exception', 'При оплате наличными сдача не предоставляется.'),
+    ];
+    const extractor: BatchExtractor = async (options) => ({
+      units: options.blocks[0].anchor === 'delivery'
+        ? [unit({
+            extractionRef: 'delivery-rule',
+            sourceSpan: { anchor: 'delivery', quote: 'Передайте оригинал документа курьеру.' },
+          })]
+        : [unit({
+            kind: 'EXCEPTION_RULE',
+            extractionRef: 'payment-exception',
+            sourceSpan: { anchor: 'payment-exception', quote: 'При оплате наличными сдача не предоставляется.' },
+          })],
+      structuredResult: {} as never,
+    });
+
+    const result = await extractKnowledgeUnitsInBatches(blocks, 1, { runConfig: {} as never }, extractor);
+    expect(result.units.find((candidate) => candidate.extractionRef === 'b1-payment-exception')?.parentExtractionRef).toBeNull();
+  });
+
+  it('не связывает исключение через границу, если в предыдущем batch два совместимых родителя', async () => {
+    const blocks = [block('base-block', 'Два правила.'), block('exception-block', 'Исключение.')];
+    const extractor: BatchExtractor = async (options) => ({
+      units: options.blocks[0].anchor === 'base-block'
+        ? [unit({ extractionRef: 'base-1' }), unit({ extractionRef: 'base-2' })]
+        : [unit({ kind: 'EXCEPTION_RULE', extractionRef: 'exception' })],
+      structuredResult: {} as never,
+    });
+
+    const result = await extractKnowledgeUnitsInBatches(blocks, 1, { runConfig: {} as never }, extractor);
+    expect(result.units.find((candidate) => candidate.extractionRef === 'b1-exception')?.parentExtractionRef).toBeNull();
+  });
+
   it('пустой список блоков -> пустой merged результат, extractor не вызывается', async () => {
     let called = false;
     const extractor: BatchExtractor = async () => {

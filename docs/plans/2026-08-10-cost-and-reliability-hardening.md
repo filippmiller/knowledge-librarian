@@ -2,6 +2,32 @@
 
 **Status:** active. Supersedes the ad-hoc "Tasks 39–42" list.
 
+## Release objective and acceptance gates (Codex takeover)
+
+The immediate objective is not another full paid benchmark. It is a trusted,
+reusable extraction boundary shared by evaluation and production ingestion.
+
+The next release checkpoint is reached only when all of the following are true:
+
+1. Only a final explicit `COVERED` verdict can pass completeness; repaired or
+   replaced blocks are re-audited before an artifact is marked trusted.
+2. Focused repair deduplicates semantic units, not merely overlapping evidence.
+3. The reusable artifact binds source, effective extraction configuration,
+   ordered persisted content, and embeddings; writes are atomic and reuse is
+   refused on corruption or mismatch.
+4. A probabilistic relevance exclusion is visible in provenance and cannot
+   silently turn a clarification/hold into a direct answer.
+5. Benchmark and production ingestion use one bounded audited extraction path,
+   including relationships that cross batch boundaries.
+6. Unit tests, full tests, typecheck, lint, build, and secret scan (when a repo
+   scanner exists) pass without application-provider network calls.
+7. Only then may one controlled live fixture run execute, with an explicit
+   paid-call ceiling and a total external-spend ceiling of USD 0.50.
+
+Non-goals for this checkpoint: bulk ingestion of 100 documents, schema rollout,
+deployment, and unmeasured removal of quality stages. The following checkpoint
+is an oracle-blind pilot over 3-5 real bureau documents.
+
 ## Why this plan exists
 
 An owner audit of a single day's spend ($19.79 on Sonnet 5) triggered a cost review.

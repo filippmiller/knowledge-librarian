@@ -26,7 +26,7 @@ describe('OpenAIEmbeddingProvider', () => {
     const result = await provider.embed(['текст 1', 'текст 2']);
 
     expect(result).toEqual([[0.1, 0.2], [0.3, 0.4]]);
-    expect(generateEmbeddingsMock).toHaveBeenCalledWith(['текст 1', 'текст 2']);
+    expect(generateEmbeddingsMock).toHaveBeenCalledWith(['текст 1', 'текст 2'], undefined);
   });
 
   it('modelInfo() отдаёт provider/model/dimensions — нужно для воспроизводимости артефакта (acceptance criterion PR G)', () => {
@@ -42,5 +42,21 @@ describe('OpenAIEmbeddingProvider', () => {
     const result = await provider.embed([]);
     expect(result).toEqual([]);
     expect(generateEmbeddingsMock).not.toHaveBeenCalled();
+  });
+
+  it('ceiling=1 blocks the second embedding request before generateEmbeddings()', async () => {
+    generateEmbeddingsMock.mockResolvedValue([[0.1, 0.2]]);
+    let reservations = 0;
+    const provider = new OpenAIEmbeddingProvider(() => {
+      if (reservations >= 1) throw new Error('paid-call ceiling');
+      reservations += 1;
+    });
+
+    await provider.embed(['corpus']);
+    await expect(provider.embed(['query'])).rejects.toThrow('paid-call ceiling');
+
+    expect(generateEmbeddingsMock).toHaveBeenCalledTimes(1);
+    expect(generateEmbeddingsMock).toHaveBeenCalledWith(['corpus'], { maxRetries: 0 });
+    expect(reservations).toBe(1);
   });
 });

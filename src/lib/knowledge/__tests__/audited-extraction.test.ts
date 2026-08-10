@@ -76,14 +76,21 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
         structuredResult: {} as never,
       };
     };
-    const auditor = async (opts: { blockAnchor: string }): Promise<BlockCoverageAuditResult> => ({
-      blockAnchor: opts.blockAnchor,
-      findings:
-        opts.blockAnchor === 'b1'
-          ? [{ verdict: 'UNREPRESENTED_CLAUSE', quote: 'найденный пропуск', explanation: 'пропущено', quoteVerified: true }]
-          : [{ verdict: 'COVERED', quote: '', explanation: 'x', quoteVerified: false }],
-      hasGap: opts.blockAnchor === 'b1',
-    });
+    let b1Audits = 0;
+    const auditor = async (opts: { blockAnchor: string }): Promise<BlockCoverageAuditResult> => {
+      if (opts.blockAnchor !== 'b1' || ++b1Audits > 1) {
+        return {
+          blockAnchor: opts.blockAnchor,
+          findings: [{ verdict: 'COVERED', quote: '', explanation: 'x', quoteVerified: false }],
+          hasGap: false,
+        };
+      }
+      return {
+        blockAnchor: opts.blockAnchor,
+        findings: [{ verdict: 'UNREPRESENTED_CLAUSE', quote: 'найденный пропуск', explanation: 'пропущено', quoteVerified: true }],
+        hasGap: true,
+      };
+    };
 
     const result = await extractKnowledgeUnitsWithCompletenessAudit(
       blocks,
@@ -100,6 +107,8 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
     const focusedUnit = result.units.find((u) => u.sourceSpan.quote === 'найденный пропуск')!;
     expect(focusedUnit.extractionRef).toContain('focused');
     expect(focusedUnit.parentExtractionRef).toBeNull();
+    expect(b1Audits).toBe(2);
+    expect(result.auditResults[1].findings[0].verdict).toBe('COVERED');
   });
 
   it('auditResults покрывает КАЖДЫЙ блок ровно один раз, независимо от количества батчей', async () => {
@@ -111,7 +120,11 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
     const auditedAnchors: string[] = [];
     const auditor = async (opts: { blockAnchor: string }): Promise<BlockCoverageAuditResult> => {
       auditedAnchors.push(opts.blockAnchor);
-      return { blockAnchor: opts.blockAnchor, findings: [], hasGap: false };
+      return {
+        blockAnchor: opts.blockAnchor,
+        findings: [{ verdict: 'COVERED', quote: '', explanation: 'покрыто', quoteVerified: false }],
+        hasGap: false,
+      };
     };
 
     const result = await extractKnowledgeUnitsWithCompletenessAudit(
@@ -149,11 +162,15 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
         structuredResult: {} as never,
       };
     };
-    const auditor = async (): Promise<BlockCoverageAuditResult> => ({
-      blockAnchor: 'b0',
-      findings: [{ verdict: 'POSSIBLE_OMISSION', quote: 'не более чем на три секунды', explanation: 'x', quoteVerified: true }],
-      hasGap: true,
-    });
+    let auditCalls = 0;
+    const auditor = async (): Promise<BlockCoverageAuditResult> =>
+      ++auditCalls === 1
+        ? {
+            blockAnchor: 'b0',
+            findings: [{ verdict: 'POSSIBLE_OMISSION', quote: 'не более чем на три секунды', explanation: 'x', quoteVerified: true }],
+            hasGap: true,
+          }
+        : { blockAnchor: 'b0', findings: [{ verdict: 'COVERED', quote: '', explanation: 'x', quoteVerified: false }], hasGap: false };
 
     const result = await extractKnowledgeUnitsWithCompletenessAudit(
       blocks,
@@ -199,11 +216,15 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
         structuredResult: {} as never,
       };
     };
-    const auditorWithGap = async (): Promise<BlockCoverageAuditResult> => ({
-      blockAnchor: 'b0',
-      findings: [{ verdict: 'UNREPRESENTED_CLAUSE', quote: 'разрешено', explanation: 'x', quoteVerified: true }],
-      hasGap: true,
-    });
+    let auditCalls = 0;
+    const auditorWithGap = async (): Promise<BlockCoverageAuditResult> =>
+      ++auditCalls === 1
+        ? {
+            blockAnchor: 'b0',
+            findings: [{ verdict: 'UNREPRESENTED_CLAUSE', quote: 'разрешено', explanation: 'x', quoteVerified: true }],
+            hasGap: true,
+          }
+        : { blockAnchor: 'b0', findings: [{ verdict: 'COVERED', quote: '', explanation: 'x', quoteVerified: false }], hasGap: false };
 
     const result = await extractKnowledgeUnitsWithCompletenessAudit(
       blocks,
@@ -242,11 +263,15 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
         structuredResult: {} as never,
       };
     };
-    const auditor = async (): Promise<BlockCoverageAuditResult> => ({
-      blockAnchor: 'b0',
-      findings: [{ verdict: 'UNREPRESENTED_CLAUSE', quote: 'повторно нельзя', explanation: 'x', quoteVerified: true }],
-      hasGap: true,
-    });
+    let auditCalls = 0;
+    const auditor = async (): Promise<BlockCoverageAuditResult> =>
+      ++auditCalls === 1
+        ? {
+            blockAnchor: 'b0',
+            findings: [{ verdict: 'UNREPRESENTED_CLAUSE', quote: 'повторно нельзя', explanation: 'x', quoteVerified: true }],
+            hasGap: true,
+          }
+        : { blockAnchor: 'b0', findings: [{ verdict: 'COVERED', quote: '', explanation: 'x', quoteVerified: false }], hasGap: false };
 
     const result = await extractKnowledgeUnitsWithCompletenessAudit(
       blocks,
@@ -260,13 +285,89 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
     expect(result.units[0].extractionRef).toBe('b0-orig');
   });
 
+  it('сохраняет repair-unit с новой семантикой, даже если его evidence вложен в уже покрытую широкую цитату', async () => {
+    const text = 'Разрешено войти сотрудникам, но посетителям вход запрещён.';
+    let extractorCalls = 0;
+    const extractor = async () => {
+      extractorCalls++;
+      return {
+        units:
+          extractorCalls === 1
+            ? [unit({ statement: 'Сотрудникам разрешено войти.', extractionRef: 'allow', sourceSpan: { anchor: 'b0', quote: text } })]
+            : [unit({ statement: 'Посетителям вход запрещён.', extractionRef: 'deny', sourceSpan: { anchor: 'b0', quote: 'посетителям вход запрещён' } })],
+        structuredResult: {} as never,
+      };
+    };
+    let auditCalls = 0;
+    const auditor = async (): Promise<BlockCoverageAuditResult> =>
+      ++auditCalls === 1
+        ? {
+            blockAnchor: 'b0',
+            findings: [{ verdict: 'UNREPRESENTED_CLAUSE', quote: 'посетителям вход запрещён', explanation: 'запрет пропущен', quoteVerified: true }],
+            hasGap: true,
+          }
+        : {
+            blockAnchor: 'b0',
+            findings: [{ verdict: 'COVERED', quote: '', explanation: 'всё покрыто', quoteVerified: false }],
+            hasGap: false,
+          };
+
+    const result = await extractKnowledgeUnitsWithCompletenessAudit(
+      [block('b0', text)], 5, { runConfig: {} as never }, {} as never, { extractor, auditor }
+    );
+
+    expect(result.units.map((u) => u.statement)).toEqual(['Сотрудникам разрешено войти.', 'Посетителям вход запрещён.']);
+    expect(result.focusedRetryLogs[0].additionalUnitCount).toBe(1);
+  });
+
+  it.each([
+    [[{ verdict: 'AMBIGUOUS' as const, quote: 'спорный текст', explanation: 'не уверен', quoteVerified: true }]],
+    [[]],
+  ])('не выпускает блок без явного COVERED: findings=%j', async (findings) => {
+    const extractor = async () => ({ units: [], structuredResult: {} as never });
+    const auditor = async (): Promise<BlockCoverageAuditResult> => ({ blockAnchor: 'b0', findings, hasGap: false });
+
+    await expect(
+      extractKnowledgeUnitsWithCompletenessAudit(
+        [block('b0', 'спорный текст')], 5, { runConfig: {} as never }, {} as never, { extractor, auditor }
+      )
+    ).rejects.toThrow(/coverage audit did not clear block b0/i);
+  });
+
+  it('не выпускает блок, если focused repair не прошёл повторный аудит', async () => {
+    let auditCalls = 0;
+    const extractor = async () => ({
+      units: [unit({ sourceSpan: { anchor: 'b0', quote: 'правило' } })],
+      structuredResult: {} as never,
+    });
+    const auditor = async (): Promise<BlockCoverageAuditResult> => {
+      auditCalls++;
+      return {
+        blockAnchor: 'b0',
+        findings: [{ verdict: 'UNREPRESENTED_CLAUSE', quote: 'правило', explanation: 'всё ещё пропущено', quoteVerified: true }],
+        hasGap: true,
+      };
+    };
+
+    await expect(
+      extractKnowledgeUnitsWithCompletenessAudit(
+        [block('b0', 'правило')], 5, { runConfig: {} as never }, {} as never, { extractor, auditor }
+      )
+    ).rejects.toThrow(/focused repair did not clear block b0/i);
+    expect(auditCalls).toBe(2);
+  });
+
   it('блок без ни одного extracted unit\'а всё равно проходит аудит (пустой extractedStatements)', async () => {
     const blocks = [block('b0', 'преамбула без содержательных правил')];
     const extractor = async () => ({ units: [], structuredResult: {} as never });
     let auditedWithEmptyStatements = false;
     const auditor = async (opts: { extractedStatements: readonly unknown[] }): Promise<BlockCoverageAuditResult> => {
       if (opts.extractedStatements.length === 0) auditedWithEmptyStatements = true;
-      return { blockAnchor: 'b0', findings: [], hasGap: false };
+      return {
+        blockAnchor: 'b0',
+        findings: [{ verdict: 'COVERED', quote: '', explanation: 'покрыто', quoteVerified: false }],
+        hasGap: false,
+      };
     };
 
     await extractKnowledgeUnitsWithCompletenessAudit(blocks, 5, { runConfig: {} as never }, {} as never, {

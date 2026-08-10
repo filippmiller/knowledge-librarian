@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { CostBudgetExceededError, CostLedger, UnverifiableCostError } from '../cost-ledger';
+import {
+  CostBudgetExceededError,
+  CostLedger,
+  PaidCallBudgetExceededError,
+  UnverifiableCostError,
+} from '../cost-ledger';
 import type { CompletionAttempt } from '../chat-provider';
 
 /**
@@ -123,6 +128,44 @@ describe('CostLedger', () => {
     ledger.record('extraction', [success('claude-sonnet-5', 100, 50), errorAttempt('claude-sonnet-5')]);
     ledger.record('reranker', [success('claude-sonnet-5', 10, 5)]);
     expect(ledger.totalAttemptCount()).toBe(3);
+  });
+});
+
+describe('CostLedger — hard paid-call ceiling', () => {
+  it('reserves up to the ceiling and fails before consuming another slot', () => {
+    const ledger = new CostLedger({ maxPaidCalls: 2 });
+    ledger.reservePaidCall('extraction');
+    ledger.reservePaidCall('coverage-audit');
+
+    expect(() => ledger.reservePaidCall('synthesis')).toThrow(PaidCallBudgetExceededError);
+    expect(ledger.totalReservedPaidCalls()).toBe(2);
+  });
+
+  it('error identifies the blocked purpose and proves the provider call was not reserved', () => {
+    const ledger = new CostLedger({ maxPaidCalls: 1 });
+    ledger.reservePaidCall('query-frame');
+
+    try {
+      ledger.reservePaidCall('reranker');
+      expect.fail('expected paid-call ceiling');
+    } catch (error) {
+      expect(error).toBeInstanceOf(PaidCallBudgetExceededError);
+      expect(error).toMatchObject({ purpose: 'reranker', reservedPaidCalls: 1, maxPaidCalls: 1 });
+    }
+    expect(ledger.totalReservedPaidCalls()).toBe(1);
+  });
+
+  it('does not refund a reservation when the eventual provider attempt fails', () => {
+    const ledger = new CostLedger({ maxPaidCalls: 1 });
+    ledger.reservePaidCall('extraction');
+    ledger.record('extraction', [errorAttempt('claude-sonnet-5')]);
+    expect(() => ledger.reservePaidCall('extraction-retry')).toThrow(PaidCallBudgetExceededError);
+  });
+
+  it('without a ceiling remains backwards-compatible', () => {
+    const ledger = new CostLedger();
+    for (let i = 0; i < 100; i++) ledger.reservePaidCall('test');
+    expect(ledger.totalReservedPaidCalls()).toBe(100);
   });
 });
 

@@ -44,14 +44,25 @@ import {
 import type { BatchExtractionLog, BatchExtractor } from '../src/lib/knowledge/batch-extraction';
 import {
   auditBlockCoverage,
+  coverageAuditNeedsReview,
   type AuditBlockCoverageOptions,
   type BlockCoverageAuditResult,
 } from '../src/lib/knowledge/extraction-coverage-auditor';
-import { ChatCompletionError, type CompletionAttempt } from '../src/lib/ai/chat-provider';
-import { CostBudgetExceededError, CostLedger, UnverifiableCostError } from '../src/lib/ai/cost-ledger';
+import {
+  ChatCompletionError,
+  isRetryableChatCompletionError,
+  type CompletionAttempt,
+} from '../src/lib/ai/chat-provider';
+import {
+  CostBudgetExceededError,
+  CostLedger,
+  PaidCallBudgetExceededError,
+  UnverifiableCostError,
+} from '../src/lib/ai/cost-ledger';
 import { CallTraceLog, type CallTraceEntry } from '../src/lib/ai/call-trace-log';
 import {
   assignIdentity,
+  type IdentityAssignmentResult,
   type PersistedKnowledgeUnit,
   type SourceBlockLocation,
 } from '../src/lib/knowledge/applicability/identity-assignment';
@@ -69,7 +80,12 @@ import type { ConversationMessage } from '../src/lib/knowledge/applicability/que
 import type { QueryFrame } from '../src/lib/knowledge/applicability/query-frame';
 import { buildEvaluatedCandidate } from '../src/lib/eval/knowledge-unit-adapter';
 import { resolveKnowledgeSet, type ResolutionDecision } from '../src/lib/knowledge/applicability/resolution';
-import { applyDecisionRelevanceGate, type GateCandidateInput, type GatedCandidate } from '../src/lib/knowledge/applicability/decision-relevance';
+import {
+  applyDecisionRelevanceGate,
+  evaluateDecisionRelevance,
+  type GateCandidateInput,
+  type GatedCandidate,
+} from '../src/lib/knowledge/applicability/decision-relevance';
 import { buildEvidencePack, type EvidencePack } from '../src/lib/knowledge/synthesis/evidence-pack';
 import {
   synthesizeFromSelectedUnits,
@@ -111,7 +127,7 @@ const UNMETERED_PURPOSES: readonly { purpose: string; reason: string }[] = [
   {
     purpose: 'decision-relevance',
     reason:
-      'LLM classifier fires only per uncertain EXCEPTION_RULE candidate (applyDecisionRelevanceGate); wiring it needs changing DecisionRelevanceClassifier\'s return shape, which ~10 test doubles construct directly — deferred pending real evidence this purpose is cost-significant',
+      'LLM classifier calls reserve --max-paid-calls slots before starting, but their result shape does not expose attempts/usage, so dollar cost remains absent from CostLedger totals',
   },
   {
     purpose: 'embeddings',
@@ -132,6 +148,7 @@ interface CliArgs {
   readonly docPath: string;
   readonly batchSize: number;
   readonly maxCostUsd: number;
+  readonly maxPaidCalls: number;
   /** Путь к сохранённому артефакту извлечения. Задан — фаза извлечения не
    *  делает НИ ОДНОГО платного вызова (см. `--reuse-extraction` ниже);
    *  `undefined` — сегодняшнее поведение, свежее извлечение. */
@@ -139,9 +156,9 @@ interface CliArgs {
 }
 
 const USAGE =
-  'Usage: npx tsx scripts/run-aurora-fixture.ts --mode=e2e --extraction-runs=N --out=path/to/dir --max-cost-usd=N [--doc=path/to/source.docx] [--batch-size=N]';
+  'Usage: npx tsx scripts/run-aurora-fixture.ts --mode=e2e --extraction-runs=N --out=path/to/dir --max-cost-usd=N --max-paid-calls=N [--doc=path/to/source.docx] [--batch-size=N]';
 
-function parseArgs(argv: readonly string[]): CliArgs {
+export function parseArgs(argv: readonly string[]): CliArgs {
   // Опции со значением проверяются по префиксу, голые флаги — ТОЧНЫМ
   // совпадением. Раньше `--fresh-extraction` был в общем списке префиксов, и
   // `--fresh-extraction=false` проходил проверку «неизвестных аргументов», но
@@ -155,6 +172,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
     '--doc=',
     '--batch-size=',
     '--max-cost-usd=',
+    '--max-paid-calls=',
     '--reuse-extraction=',
   ];
   const knownFlags = ['--fresh-extraction'];
@@ -171,6 +189,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
   const docArg = argv.find((a) => a.startsWith('--doc='))?.slice('--doc='.length);
   const batchSizeArg = argv.find((a) => a.startsWith('--batch-size='))?.slice('--batch-size='.length);
   const maxCostUsdArg = argv.find((a) => a.startsWith('--max-cost-usd='))?.slice('--max-cost-usd='.length);
+  const maxPaidCallsArg = argv.find((a) => a.startsWith('--max-paid-calls='))?.slice('--max-paid-calls='.length);
   const reuseArg = argv.find((a) => a.startsWith('--reuse-extraction='))?.slice('--reuse-extraction='.length);
   const freshFlag = argv.includes('--fresh-extraction');
 
@@ -202,6 +221,13 @@ function parseArgs(argv: readonly string[]): CliArgs {
   if (!Number.isFinite(maxCostUsd) || maxCostUsd <= 0) {
     throw new Error(`--max-cost-usd обязан быть положительным числом, получено "${maxCostUsdArg}".\n${USAGE}`);
   }
+  if (!maxPaidCallsArg) {
+    throw new Error(`--max-paid-calls обязателен — запуск не начнётся без жёсткого потолка платных вызовов.\n${USAGE}`);
+  }
+  const maxPaidCalls = Number(maxPaidCallsArg);
+  if (!Number.isInteger(maxPaidCalls) || maxPaidCalls < 1) {
+    throw new Error(`--max-paid-calls обязан быть положительным целым, получено "${maxPaidCallsArg}".\n${USAGE}`);
+  }
 
   const extractionRuns = runsArg ? Number(runsArg) : 2;
   if (!Number.isInteger(extractionRuns) || extractionRuns < 1) {
@@ -224,6 +250,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
     docPath: docArg ?? path.join(ORACLE_PACK_DIR, SOURCE_DOCX_FILENAME),
     batchSize,
     maxCostUsd,
+    maxPaidCalls,
     ...(reuseArg !== undefined && { reuseExtraction: reuseArg }),
   };
 }
@@ -271,6 +298,9 @@ interface EngineQuestionResult {
    *  СОХРАНЁННЫМ прогонам, без повторного платного запуска. Не записать его
    *  здесь значило бы оставить ту гарантию наблюдаемой только в рантайме. */
   readonly decisionRelevanceDroppedByClassifier: readonly string[] | null;
+  /** True means the answer path depended on an LLM-only IRRELEVANT verdict
+   * and therefore may not be delivered as DIRECT_ANSWER. */
+  readonly answerDependsOnProbabilisticExclusion: boolean | null;
 }
 
 interface EngineContext {
@@ -293,7 +323,7 @@ interface EngineContext {
  * file: transport/schema failure classes are retryable, anything else is a
  * real bug and must surface immediately, never silently retried away.
  */
-function classifyStructuredError(error: unknown): ExtractionAttemptLog['outcome'] {
+export function classifyStructuredError(error: unknown): ExtractionAttemptLog['outcome'] {
   if (error instanceof StructuredOutputError) {
     return error.reason === 'SCHEMA_MISMATCH'
       ? 'SCHEMA_MISMATCH'
@@ -301,7 +331,9 @@ function classifyStructuredError(error: unknown): ExtractionAttemptLog['outcome'
         ? 'TRUNCATED_JSON'
         : 'OTHER_ERROR';
   }
-  return error instanceof ChatCompletionError ? 'NETWORK_ERROR' : 'OTHER_ERROR';
+  return error instanceof ChatCompletionError && isRetryableChatCompletionError(error)
+    ? 'NETWORK_ERROR'
+    : 'OTHER_ERROR';
 }
 
 /**
@@ -440,7 +472,7 @@ async function recordOnFailure<T>(
  * nests its `StructuredResult` under `.structuredResult`; `BlockCoverageAuditResult`
  * carries `requestMessages`/`rawResponseText` directly).
  */
-async function withStructuredRetry<T>(
+export async function withStructuredRetry<T>(
   call: () => Promise<T>,
   maxAttempts: number,
   label: string,
@@ -503,9 +535,25 @@ async function extractKnowledgeUnitsWithRetry(
   );
 }
 
-interface TaintResampleLog {
+export interface TaintResampleLog {
   readonly blockAnchor: string;
   readonly round: number;
+}
+
+/** Identity assignment may intentionally drop units whose evidence cannot be
+ * resolved or whose stable id is ambiguous. That is useful diagnostic
+ * behaviour, but a trusted extraction must never silently persist the
+ * reduced set after coverage was audited against the pre-identity units. */
+export function assertTrustedIdentity(
+  identity: IdentityAssignmentResult,
+  context: string
+): void {
+  if (identity.unresolvedEvidence.length === 0 && identity.ambiguousDuplicates.length === 0) return;
+  throw new Error(
+    `${context}: identity assignment is not trusted (` +
+      `${identity.unresolvedEvidence.length} unresolved evidence, ` +
+      `${identity.ambiguousDuplicates.length} ambiguous duplicate group(s))`
+  );
 }
 
 /**
@@ -534,17 +582,23 @@ interface TaintResampleLog {
  * and will throw if this didn't fully converge, falling back to the
  * existing whole-run retry exactly as before this function existed.
  */
-async function resolveTaintedCandidates(
+export async function resolveTaintedCandidates(
   initialUnits: readonly PersistedKnowledgeUnit[],
   blocksByAnchor: ReadonlyMap<string, SourceBlockLocation>,
   sourceRevisionHash: string,
   taintDetector: OracleTaintDetector,
   extractor: BatchExtractor,
+  auditor: (options: AuditBlockCoverageOptions) => Promise<BlockCoverageAuditResult>,
   optionsPerBatch: Omit<ExtractKnowledgeUnitsOptions, 'blocks'>,
   maxRounds: number
-): Promise<{ units: PersistedKnowledgeUnit[]; resampleLogs: TaintResampleLog[] }> {
+): Promise<{
+  units: PersistedKnowledgeUnit[];
+  resampleLogs: TaintResampleLog[];
+  auditResults: BlockCoverageAuditResult[];
+}> {
   let units = [...initialUnits];
   const resampleLogs: TaintResampleLog[] = [];
+  const auditResults: BlockCoverageAuditResult[] = [];
 
   for (let round = 1; round <= maxRounds; round++) {
     const unitsById = new Map(units.map((u) => [u.unitId, u]));
@@ -559,7 +613,7 @@ async function resolveTaintedCandidates(
         taintedUnitIds.add(candidate.unitId);
       }
     }
-    if (taintedUnitIds.size === 0) return { units, resampleLogs };
+    if (taintedUnitIds.size === 0) return { units, resampleLogs, auditResults };
 
     const affectedAnchors = new Set(
       units.filter((u) => taintedUnitIds.has(u.unitId)).map((u) => u.sourceSpan.anchor)
@@ -578,13 +632,42 @@ async function resolveTaintedCandidates(
         extractionRef: `taint-retry-${anchor}-${u.extractionRef}`,
         parentExtractionRef: null,
       }));
+
+      // A taint retry replaces every unit for the block, so the previous
+      // coverage verdict no longer says anything about the replacement.
+      // Audit the exact replacement before it can enter a trusted snapshot.
+      const audit = await auditor({
+        blockAnchor: block.anchor,
+        blockText: block.text,
+        extractedStatements: namespaced.map((u) => ({
+          statement: u.statement,
+          quote: u.sourceSpan.quote,
+        })),
+        runConfig: optionsPerBatch.runConfig,
+      });
+      auditResults.push(audit);
+      if (coverageAuditNeedsReview(audit)) {
+        throw new Error(
+          `targeted taint resample: replacement for block "${anchor}" did not pass coverage audit`
+        );
+      }
+
       const identity = assignIdentity(namespaced, blocksByAnchor, sourceRevisionHash);
+      assertTrustedIdentity(identity, `targeted taint resample for block "${anchor}"`);
       units = [...units.filter((u) => u.sourceSpan.anchor !== anchor), ...identity.units];
+      // Parent ids are derived data. Replacing a block may remove a parent
+      // that an unaffected unit referenced; never retain that stale edge.
+      const liveIds = new Set(units.map((u) => u.unitId));
+      units = units.map((u) =>
+        u.parentRuleRef !== null && !liveIds.has(u.parentRuleRef)
+          ? { ...u, parentRuleRef: null }
+          : u
+      );
       resampleLogs.push({ blockAnchor: anchor, round });
     }
   }
 
-  return { units, resampleLogs };
+  return { units, resampleLogs, auditResults };
 }
 
 const answerSchema = z.strictObject({
@@ -691,7 +774,8 @@ async function runEngineOnQuestion(
     const decisionRelevance = await applyDecisionRelevanceGate(
       gateInputs,
       input.question,
-      ctx.decisionRelevanceRunConfig
+      ctx.decisionRelevanceRunConfig,
+      evaluateDecisionRelevance
     );
 
     const resolution = resolveKnowledgeSet(decisionRelevance.relevant, queryFrame);
@@ -710,6 +794,7 @@ async function runEngineOnQuestion(
         errorRetryable: false,
         decisionRelevanceTrace: decisionRelevance.trace,
         decisionRelevanceDroppedByClassifier: decisionRelevance.droppedByClassifier,
+        answerDependsOnProbabilisticExclusion: decisionRelevance.answerDependsOnProbabilisticExclusion,
       };
     }
 
@@ -736,11 +821,12 @@ async function runEngineOnQuestion(
       // ответ, провалившийся собственную проверку заземления, больше не
       // предъявляется как прямой ответ. Черновик и нарушения остаются в
       // артефакте целиком — провал должен быть ВИДЕН, а не спрятан.
-      actualDisposition: resolveAnswerDisposition(verification),
+      actualDisposition: resolveAnswerDisposition(verification, decisionRelevance),
       errorMessage: null,
       errorRetryable: false,
       decisionRelevanceTrace: decisionRelevance.trace,
       decisionRelevanceDroppedByClassifier: decisionRelevance.droppedByClassifier,
+      answerDependsOnProbabilisticExclusion: decisionRelevance.answerDependsOnProbabilisticExclusion,
     };
   } catch (err) {
     // A cost-budget trip must never be absorbed into a per-question ERROR
@@ -749,7 +835,11 @@ async function runEngineOnQuestion(
     // paid calls — instead of aborting like every other budget trip does.
     // Re-throw immediately; main()'s try/catch is the one place that's
     // allowed to turn this into "run stopped."
-    if (err instanceof CostBudgetExceededError || err instanceof UnverifiableCostError) throw err;
+    if (
+      err instanceof CostBudgetExceededError ||
+      err instanceof PaidCallBudgetExceededError ||
+      err instanceof UnverifiableCostError
+    ) throw err;
 
     // A genuine OracleTaintError (assertClean above) is NEVER retryable here —
     // classifyStructuredError correctly falls through to OTHER_ERROR for it,
@@ -767,6 +857,7 @@ async function runEngineOnQuestion(
       errorRetryable: classifyStructuredError(err) !== 'OTHER_ERROR',
       decisionRelevanceTrace: null,
       decisionRelevanceDroppedByClassifier: null,
+      answerDependsOnProbabilisticExclusion: null,
     };
   }
 }
@@ -822,6 +913,17 @@ interface ExtractionRunOutcome {
  *  (обрезанный ответ), значит кэш от него — про другой прогон. */
 const EXTRACTION_MAX_TOKENS = 16000;
 
+function budgetedRunConfig(
+  ledger: CostLedger,
+  purpose: string,
+  promptVersion: string
+): ReturnType<typeof resolveExtractionRunConfig> {
+  return resolveExtractionRunConfig({
+    promptVersion,
+    beforeProviderAttempt: () => ledger.reservePaidCall(purpose),
+  });
+}
+
 /**
  * Цикл вопросов — ОБЩИЙ для свежего извлечения и для переиспользования
  * артефакта. Вынесен именно ради этого: движок обязан видеть ровно один и тот
@@ -837,24 +939,29 @@ async function runQuestionsAgainstSnapshot(
 ): Promise<EngineQuestionResult[]> {
   const reviewedAt = new Date().toISOString();
   const rerankerProvider = new LlmRerankerProvider(
-    resolveExtractionRunConfig({ promptVersion: 'aurora-fixture-reranker-v1' })
+    budgetedRunConfig(deps.ledger, 'reranker', 'aurora-fixture-reranker-v1')
+  );
+  const queryEmbeddingProvider = new OpenAIEmbeddingProvider(() =>
+    deps.ledger.reservePaidCall('query-embedding')
   );
   const ctx: EngineContext = {
     embeddedCandidates,
     unitsById,
-    embeddingProvider: deps.embeddingProvider,
+    embeddingProvider: queryEmbeddingProvider,
     rerankerProvider,
     requestContext: { audience: 'internal', now: reviewedAt },
     reviewedAt,
-    queryFrameRunConfig: resolveExtractionRunConfig({ promptVersion: 'aurora-fixture-query-frame-v1' }),
+    queryFrameRunConfig: budgetedRunConfig(deps.ledger, 'query-frame', 'aurora-fixture-query-frame-v1'),
     answerGenerator: buildRealAnswerGenerator(
-      resolveExtractionRunConfig({ promptVersion: 'aurora-fixture-synthesis-v1' }),
+      budgetedRunConfig(deps.ledger, 'synthesis', 'aurora-fixture-synthesis-v1'),
       deps.ledger,
       deps.traceLog
     ),
-    decisionRelevanceRunConfig: resolveExtractionRunConfig({
-      promptVersion: 'aurora-fixture-decision-relevance-v1',
-    }),
+    decisionRelevanceRunConfig: budgetedRunConfig(
+      deps.ledger,
+      'decision-relevance',
+      'aurora-fixture-decision-relevance-v1'
+    ),
     taintDetector: deps.taintDetector,
     ledger: deps.ledger,
     traceLog: deps.traceLog,
@@ -903,7 +1010,13 @@ async function runOneExtractionRun(
     canonical.blocks.map((b) => [b.anchor, toSourceBlockLocation(b)])
   );
 
-  const extractionRunConfig = resolveExtractionRunConfig();
+  const extractionRunConfig = resolveExtractionRunConfig({
+    beforeProviderAttempt: () => ledger.reservePaidCall('extraction'),
+  });
+  const coverageAuditRunConfig = {
+    ...extractionRunConfig,
+    beforeProviderAttempt: () => ledger.reservePaidCall('coverage-audit'),
+  };
   const allAttemptLogs: ExtractionAttemptLog[] = [];
   // Каждый batch проходит СВОЙ transport/schema retry (extractKnowledgeUnitsWithRetry,
   // до 6 попыток) -- та же дисциплина, что раньше применялась ко всему
@@ -922,7 +1035,7 @@ async function runOneExtractionRun(
   // retry wrapper at all.
   const retryingAuditor = async (options: AuditBlockCoverageOptions): Promise<BlockCoverageAuditResult> => {
     const { result, attemptLog } = await withStructuredRetry(
-      () => auditBlockCoverage(options),
+      () => auditBlockCoverage({ ...options, runConfig: coverageAuditRunConfig }),
       6,
       'coverage audit',
       ledger,
@@ -935,7 +1048,9 @@ async function runOneExtractionRun(
     return result;
   };
 
-  const embeddingProvider = new OpenAIEmbeddingProvider();
+  const embeddingProvider = new OpenAIEmbeddingProvider(() =>
+    ledger.reservePaidCall('corpus-embedding')
+  );
   const embeddingModel = embeddingProvider.modelInfo();
   // Считается ДО любого платного вызова: в режиме переиспользования именно он
   // решает, законен ли артефакт, и если нет — прогон обязан упасть, не потратив
@@ -953,6 +1068,7 @@ async function runOneExtractionRun(
     extractionProvider: extractionRunConfig.provider,
     extractionModel: extractionRunConfig.model,
     extractionPromptVersion: extractionRunConfig.promptVersion,
+    extractionPromptFingerprint: probes.extractionPromptFingerprint,
     extractionSchemaVersion: extractionRunConfig.extractionSchemaVersion,
     extractionMaxTokens: EXTRACTION_MAX_TOKENS,
     extractionBatchSize: args.batchSize,
@@ -999,6 +1115,7 @@ async function runOneExtractionRun(
 
   const identity = assignIdentity(audited.units, blocksByAnchor, canonical.sourceRevisionHash);
   console.log(`assignIdentity: ${identity.units.length} persisted, ${identity.ambiguousDuplicates.length} ambiguous`);
+  assertTrustedIdentity(identity, `runOneExtractionRun(${runIndex})`);
 
   if (identity.units.length === 0) {
     throw new Error(`runOneExtractionRun(${runIndex}): экстракция не выдала ни одного unit — прогон недействителен`);
@@ -1010,6 +1127,7 @@ async function runOneExtractionRun(
     canonical.sourceRevisionHash,
     taintDetector,
     retryingExtractor,
+    retryingAuditor,
     { runConfig: extractionRunConfig, maxTokens: EXTRACTION_MAX_TOKENS },
     TAINT_RESAMPLE_MAX_ROUNDS
   );
@@ -1064,7 +1182,7 @@ async function runOneExtractionRun(
     })),
     extractionAttemptLog: allAttemptLogs,
     batchLogs: audited.batchLogs,
-    auditResults: audited.auditResults,
+    auditResults: [...audited.auditResults, ...resampled.auditResults],
     focusedRetryLogs: audited.focusedRetryLogs,
   });
 
@@ -1098,7 +1216,7 @@ async function runOneExtractionRun(
     results,
     extractionAttemptLog: allAttemptLogs,
     batchLogs: audited.batchLogs,
-    auditResults: audited.auditResults,
+    auditResults: [...audited.auditResults, ...resampled.auditResults],
     focusedRetryLogs: audited.focusedRetryLogs,
     artifact,
   };
@@ -1240,37 +1358,49 @@ async function runOneExtractionRunWithTaintRetry(
  * pathological retries, which is exactly when this estimate matters.
  */
 function printPreRunCeiling(blockCount: number, args: CliArgs, questionCount: number): void {
-  const RETRY_CEILING = 6; // matches extractKnowledgeUnitsWithRetry / withStructuredRetry maxAttempts
+  const STRUCTURED_RETRY_CEILING = 6; // caller-level schema/transport retries
+  const RAW_CHAT_ATTEMPTS_PER_STRUCTURED_CALL = 4; // primary + MAX_RETRIES=3; runner configs disable fallback
+  const MAX_DECISION_RELEVANCE_CALLS_PER_QUESTION = 5; // retrieval finalLimit
   const batchCount = Math.ceil(blockCount / args.batchSize);
-  // + blockCount: audited-extraction.ts allows at most ONE focused retry per
-  // block on a confirmed gap — worst case, every block triggers one.
-  const extractionCeilingPerRun = (batchCount + blockCount) * RETRY_CEILING;
-  // Targeted taint resample (Codex review, 2026-08-10, finding 4): a SEPARATE
-  // re-extraction path from the focused-retry above, triggered by a taint
-  // collision instead of a coverage gap — worst case every block resamples
-  // on every round. Omitting this previously undercounted a real, already-
-  // shipped call path (Task 31) — for a 15-block doc alone that's
-  // 15 × 3 × 6 = 270 extra extraction calls before the whole-run multiplier.
-  const taintResampleCeilingPerRun = blockCount * TAINT_RESAMPLE_MAX_ROUNDS * RETRY_CEILING;
-  const auditCeilingPerRun = blockCount * RETRY_CEILING;
-  const perRunCeiling =
-    (extractionCeilingPerRun + taintResampleCeilingPerRun + auditCeilingPerRun) * MAX_TAINT_RETRY_ATTEMPTS;
-  // query-frame + reranker + synthesis: the three metered per-question purposes.
-  const perQuestionCeiling = 3 * MAX_ENGINE_QUESTION_RETRY_ATTEMPTS;
-  const totalCeiling = perRunCeiling * args.extractionRuns + perQuestionCeiling * questionCount * args.extractionRuns;
+  const structuredCallsPerExtractionAttempt =
+    // initial extraction + initial audit
+    (batchCount + blockCount) * STRUCTURED_RETRY_CEILING +
+    // focused repair extraction + mandatory repair re-audit for every block
+    blockCount * 2 * STRUCTURED_RETRY_CEILING +
+    // every targeted taint replacement is both re-extracted and re-audited
+    blockCount * TAINT_RESAMPLE_MAX_ROUNDS * 2 * STRUCTURED_RETRY_CEILING;
+  const extractionRawCalls =
+    structuredCallsPerExtractionAttempt *
+    RAW_CHAT_ATTEMPTS_PER_STRUCTURED_CALL *
+    MAX_TAINT_RETRY_ATTEMPTS;
+  const corpusEmbeddingCalls = MAX_TAINT_RETRY_ATTEMPTS;
+  const rawCallsPerQuestionAttempt =
+    // query-frame + reranker + synthesis
+    3 * RAW_CHAT_ATTEMPTS_PER_STRUCTURED_CALL +
+    // one query embedding
+    1 +
+    // classifier may run once for every retrieved candidate
+    MAX_DECISION_RELEVANCE_CALLS_PER_QUESTION * RAW_CHAT_ATTEMPTS_PER_STRUCTURED_CALL;
+  const questionCalls =
+    rawCallsPerQuestionAttempt * MAX_ENGINE_QUESTION_RETRY_ATTEMPTS * questionCount;
+  const paidCallCeiling =
+    (extractionRawCalls + corpusEmbeddingCalls + questionCalls) * args.extractionRuns;
 
   console.log('\n=== PRE-RUN COST CEILING (worst case — see caveats below) ===');
   console.log(`  document: ${blockCount} block(s), batch-size=${args.batchSize} -> ${batchCount} batch(es)`);
   console.log(`  extraction-runs: ${args.extractionRuns}, questions: ${questionCount}`);
   console.log(
-    `  worst-case METERED structured() call ceiling: ${totalCeiling} (assumes every bounded retry maxes out — ` +
-      `not a forecast; each of these can itself be up to 4 raw HTTP attempts via chat-provider.ts's own transient-error retry)`
+    `  worst-case paid provider-request ceiling: ${paidCallCeiling} ` +
+      `(includes repair re-audit, taint re-audit, decision relevance, corpus/query embeddings, reranking, and all chat-provider retries)`
   );
   console.log(
     `  --max-cost-usd=${args.maxCostUsd} — the run aborts the moment cumulative metered spend exceeds this, independent of the ceiling above`
   );
   console.log(
-    `  NOT included in this ceiling: ${UNMETERED_PURPOSES.map((p) => p.purpose).join(', ')} (see UNMETERED_PURPOSES) — real worst case is higher.`
+    `  --max-paid-calls=${args.maxPaidCalls} — hard raw-request reservation ceiling; no provider request starts after this many reservations`
+  );
+  console.log(
+    `  NOT included in dollar totals (but included in --max-paid-calls): ${UNMETERED_PURPOSES.map((p) => p.purpose).join(', ')}.`
   );
 }
 
@@ -1325,7 +1455,7 @@ async function main() {
 
   mkdirSync(args.outDir, { recursive: true });
 
-  const ledger = new CostLedger({ maxTotalUsd: args.maxCostUsd });
+  const ledger = new CostLedger({ maxTotalUsd: args.maxCostUsd, maxPaidCalls: args.maxPaidCalls });
   // Call-trace log (2026-08-10): the exact prompt next to the exact raw
   // response, per call — the debugging visibility CostLedger's aggregate
   // number never gave. JSONL, written incrementally like CostLedger's own
@@ -1416,6 +1546,8 @@ async function main() {
         cost: {
           totalUsd: ledger.totalUsd(),
           totalAttemptCount: ledger.totalAttemptCount(),
+          reservedPaidCallCount: ledger.totalReservedPaidCalls(),
+          maxPaidCalls: args.maxPaidCalls,
           byPurpose: ledger.summaryByPurpose(),
           // Честно, а не молчаливым занижением: reranker и extraction/audit/
           // query-frame/synthesis метрятся, но decision-relevance (LLM-путь
@@ -1441,6 +1573,7 @@ async function main() {
     );
   }
   console.log(`  TOTAL (metered): $${ledger.totalUsd().toFixed(4)} across ${ledger.totalAttemptCount()} attempt(s)`);
+  console.log(`  PAID-CALL RESERVATIONS: ${ledger.totalReservedPaidCalls()}/${args.maxPaidCalls}`);
   console.log(
     `  NOT YET METERED: ${UNMETERED_PURPOSES.map((p) => `${p.purpose} (${p.reason})`).join('; ')} — real spend is higher than the total above.`
   );

@@ -29,6 +29,25 @@ export interface CostLedgerOptions {
    *  no budget, matches pre-Task-38 behavior; a ledger with no ceiling
    *  never throws. */
   readonly maxTotalUsd?: number;
+  /** Hard ceiling on paid provider calls. Unlike the dollar ceiling, this
+   *  can be enforced before a request starts: callers must reserve exactly
+   *  once immediately before each metered external call. */
+  readonly maxPaidCalls?: number;
+}
+
+/** Thrown before the provider is called when no paid-call slot remains. */
+export class PaidCallBudgetExceededError extends Error {
+  constructor(
+    readonly purpose: string,
+    readonly reservedPaidCalls: number,
+    readonly maxPaidCalls: number
+  ) {
+    super(
+      `Paid-call budget exhausted before "${purpose}": ${reservedPaidCalls}/${maxPaidCalls} ` +
+        `call slots are already reserved. Provider was not called — see --max-paid-calls.`
+    );
+    this.name = 'PaidCallBudgetExceededError';
+  }
 }
 
 /**
@@ -78,9 +97,26 @@ export class CostLedger {
   private readonly attemptsByPurpose = new Map<string, CompletionAttempt[]>();
   private readonly callCountByPurpose = new Map<string, number>();
   private readonly maxTotalUsd?: number;
+  private readonly maxPaidCalls?: number;
+  private reservedPaidCalls = 0;
 
   constructor(options: CostLedgerOptions = {}) {
     this.maxTotalUsd = options.maxTotalUsd;
+    this.maxPaidCalls = options.maxPaidCalls;
+  }
+
+  /** Atomically claims one paid-call slot before an external request starts.
+   *  A reservation is intentionally never refunded: a request that fails or
+   *  has unverifiable usage may still have reached and billed the provider. */
+  reservePaidCall(purpose: string): void {
+    if (this.maxPaidCalls !== undefined && this.reservedPaidCalls >= this.maxPaidCalls) {
+      throw new PaidCallBudgetExceededError(purpose, this.reservedPaidCalls, this.maxPaidCalls);
+    }
+    this.reservedPaidCalls += 1;
+  }
+
+  totalReservedPaidCalls(): number {
+    return this.reservedPaidCalls;
   }
 
   /** One call = one logical operation, e.g. one extraction batch or one

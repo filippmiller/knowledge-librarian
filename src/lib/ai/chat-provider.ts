@@ -39,6 +39,10 @@ export interface CompletionRunConfig {
   fallbackPolicy: FallbackPolicy;
   requestTimeoutMs?: number;
   totalDeadlineMs?: number;
+  /** Optional synchronous circuit breaker invoked immediately before every
+   *  raw provider request, including transport retries and fallback. Throwing
+   *  prevents that request from starting. Runtime-only; never persisted. */
+  beforeProviderAttempt?: (attempt: { provider: Provider; model: string }) => void;
 }
 
 export interface ChatCompletionOptions extends Partial<CompletionRunConfig> {
@@ -426,6 +430,9 @@ export function resolveRunConfig(
     fallbackPolicy: resolveFallbackPolicy(options),
     requestTimeoutMs: options.requestTimeoutMs,
     totalDeadlineMs: options.totalDeadlineMs,
+    ...(options.beforeProviderAttempt && {
+      beforeProviderAttempt: options.beforeProviderAttempt,
+    }),
   };
 }
 
@@ -729,6 +736,17 @@ function coerceJsonSyntax(candidate: string): string {
 }
 
 const RETRYABLE_STATUS_CODES = [429, 529, 503, 502];
+/** Policy for caller-owned bounded retries after provider-layer retries have
+ *  completed. Permanent 4xx failures (bad request, auth, insufficient
+ *  credit, etc.) must not be multiplied by an outer extraction/audit loop. */
+export function isRetryableChatCompletionError(error: ChatCompletionError): boolean {
+  const status = error.statusCode;
+  if (status === undefined) return true;
+  if (status >= 400 && status < 500) {
+    return status === 408 || status === 409 || status === 429;
+  }
+  return status >= 500;
+}
 /** Нормализованные коды ошибок (не числа), означающие транзиентный сбой. */
 const RETRYABLE_ERROR_CODES = new Set([
   'overloaded_error',
@@ -1071,6 +1089,13 @@ async function callOpenAI(
   defaults: ResolvedDefaults,
   signal: AbortSignal | undefined
 ): Promise<ProviderCallResult> {
+  const requestOptions = {
+    ...(signal && { signal }),
+    // When the raw-attempt circuit breaker is active, chat-provider owns
+    // retries. Hidden SDK retries would bypass the breaker. Unbudgeted
+    // production paths omit this and preserve the shared client default.
+    ...(options.beforeProviderAttempt && { maxRetries: 0 }),
+  };
   const response = await openai.chat.completions.create(
     {
       model,
@@ -1081,7 +1106,7 @@ async function callOpenAI(
         response_format: { type: options.responseFormat },
       }),
     },
-    signal ? { signal } : undefined
+    Object.keys(requestOptions).length > 0 ? requestOptions : undefined
   );
 
   const text = response.choices[0]?.message?.content?.trim() || '';
@@ -1217,6 +1242,7 @@ export async function createChatCompletionDetailed(
     model: string,
     isPrimary: boolean
   ): Promise<AttemptResult> => {
+    options.beforeProviderAttempt?.({ provider, model });
     const { ms, code } = attemptTimeout();
     const result = await runCompletionAttempt(
       provider,

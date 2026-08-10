@@ -88,6 +88,9 @@ export function resolveExtractionRunConfig(
     ...(overrides.totalDeadlineMs !== undefined && {
       totalDeadlineMs: overrides.totalDeadlineMs,
     }),
+    ...(overrides.beforeProviderAttempt && {
+      beforeProviderAttempt: overrides.beforeProviderAttempt,
+    }),
   });
 
   return {
@@ -151,6 +154,7 @@ export function toCompletionOptions(
   providerModels?: { anthropic?: string; openai?: string };
   requestTimeoutMs?: number;
   totalDeadlineMs?: number;
+  beforeProviderAttempt?: CompletionRunConfig['beforeProviderAttempt'];
 } {
   return {
     provider: config.provider,
@@ -163,6 +167,9 @@ export function toCompletionOptions(
     }),
     ...(config.totalDeadlineMs !== undefined && {
       totalDeadlineMs: config.totalDeadlineMs,
+    }),
+    ...(config.beforeProviderAttempt && {
+      beforeProviderAttempt: config.beforeProviderAttempt,
     }),
   };
 }

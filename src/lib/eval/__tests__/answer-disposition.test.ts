@@ -57,6 +57,14 @@ describe('resolveAnswerDisposition', () => {
     expect(resolveAnswerDisposition(null)).toBe('UNVERIFIED_ANSWER');
   });
 
+  it('a false-IRRELEVANT cannot silently upgrade an answer to DIRECT_ANSWER', () => {
+    expect(
+      resolveAnswerDisposition(verification({ verified: true }), {
+        answerDependsOnProbabilisticExclusion: true,
+      })
+    ).toBe('UNVERIFIED_ANSWER');
+  });
+
   it('exposes exactly the four dispositions an engine question can end in', () => {
     expect([...ANSWER_DISPOSITIONS]).toEqual(['DIRECT_ANSWER', 'UNVERIFIED_ANSWER', 'HOLD', 'ERROR']);
     // Pins the literal the grader is read against (see the HOLD test above):
