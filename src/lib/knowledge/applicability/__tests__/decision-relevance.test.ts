@@ -304,6 +304,63 @@ describe('applyDecisionRelevanceGate — детерминированный сл
     expect(result.relevant.map((r) => r.unitId)).toEqual(['malformed']);
   });
 
+  // Кросс-аудит 2026-08-10 (gpt-5.6-sol), подтверждено чтением кода: вердикт
+  // LLM `IRRELEVANT` единолично снимает кандидата ДО детерминированного
+  // resolveKnowledgeSet, а классификатор вызывается РОВНО для исключений с
+  // неразрешённым триггером — самого рискованного класса. Один false-negative
+  // превращает «здесь может быть исключение, надо уточнить» в «исключения
+  // нет» и выпускает ответ.
+  //
+  // Полный запрет на снятие ПРОВЕРЯЛСЯ и отвергнут: тест ниже (rule 10,
+  // ограниченная подвижность vs вопрос про чистые руки) — реальный кейс, где
+  // снятие ВЕРНО, а удержание заставило бы систему спрашивать у клиента
+  // бессмыслицу. Поэтому политика остаётся, но перестаёт быть невидимой:
+  // `droppedByClassifier` даёт вызывающему и постфактум-анализу точный
+  // список снятых по мнению модели исключений.
+  it('снятые ИСКЛЮЧИТЕЛЬНО вердиктом классификатора попадают в droppedByClassifier — ответ, состоявшийся только из-за такого снятия, перестаёт быть неотличимым от честного', async () => {
+    const exception = candidate({
+      unitId: 'exc',
+      kind: 'EXCEPTION_RULE',
+      parentRuleRef: null,
+      trigger: unknownTrigger(),
+    });
+    const result = await applyDecisionRelevanceGate(
+      [input({ evaluated: exception })],
+      'Вопрос?',
+      {} as never,
+      async () => ({ verdict: 'IRRELEVANT', reason: 'другая ситуация', potentiallyDecidingFacts: [] })
+    );
+    expect(result.droppedByClassifier).toEqual(['exc']);
+    expect(result.relevant).toEqual([]);
+  });
+
+  it('классификатор говорит RELEVANT -> droppedByClassifier пуст', async () => {
+    const exception = candidate({
+      unitId: 'exc',
+      kind: 'EXCEPTION_RULE',
+      parentRuleRef: null,
+      trigger: unknownTrigger(),
+    });
+    const result = await applyDecisionRelevanceGate(
+      [input({ evaluated: exception })],
+      'Вопрос?',
+      {} as never,
+      async () => ({ verdict: 'RELEVANT', reason: 'по теме', potentiallyDecidingFacts: [] })
+    );
+    expect(result.droppedByClassifier).toEqual([]);
+  });
+
+  it('детерминированные ветки (LLM не звался) никогда не наполняют droppedByClassifier — там снятия по мнению модели не было по определению', async () => {
+    const c = candidate({ unitId: 'r1', kind: 'PROCEDURE_STEP' });
+    const result = await applyDecisionRelevanceGate([input({ evaluated: c })], 'Вопрос?', {} as never, async () => ({
+      verdict: 'IRRELEVANT',
+      reason: 'x',
+      potentiallyDecidingFacts: [],
+    }));
+    expect(result.droppedByClassifier).toEqual([]);
+    expect(result.relevant.map((r) => r.unitId)).toEqual(['r1']);
+  });
+
   it('trace содержит ВСЕ кандидаты независимо от вердикта, в исходном порядке', async () => {
     const relevantCand = candidate({ unitId: 'r1', kind: 'PROCEDURE_STEP' });
     const irrelevantCand = candidate({

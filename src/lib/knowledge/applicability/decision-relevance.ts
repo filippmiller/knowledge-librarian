@@ -173,6 +173,28 @@ export interface DecisionRelevanceGateResult {
   /** EVERY candidate with its verdict, relevant or not — full trace for
    *  debugging real company documents later (architectural review §6). */
   readonly trace: readonly GatedCandidate[];
+  /**
+   * unitId исключений, снятых ИСКЛЮЧИТЕЛЬНО вердиктом LLM-классификатора —
+   * без единого детерминированного основания (кросс-аудит 2026-08-10).
+   *
+   * Зачем отдельно от `trace`: по трейсу видно, что вердикт был IRRELEVANT,
+   * но не видно, был ли он единственной причиной снятия. А это как раз тот
+   * класс решений, где стохастическая ошибка стоит дорого: снятое здесь
+   * исключение никогда не доходит до детерминированного
+   * `resolveKnowledgeSet`, и вопрос, который должен был уйти в уточнение,
+   * может получить ответ. Список позволяет вызывающему увидеть, что ответ
+   * состоялся ТОЛЬКО потому, что кандидаты были сняты по мнению модели, и
+   * посчитать частоту этого по сохранённым прогонам — без повторного
+   * платного запуска.
+   *
+   * Политика «не снимать вовсе» рассматривалась и отвергнута на данных:
+   * она возвращает документированный сбой (исключение про ограниченную
+   * подвижность снова блокировало бы вопрос про чистые руки и заставляло
+   * систему спрашивать у клиента бессмыслицу). Чем заменить нынешнюю
+   * политику — открытое решение владельца, и этот список даёт цифры, на
+   * которых его можно принять.
+   */
+  readonly droppedByClassifier: readonly string[];
 }
 
 /** True iff `parentRef` names ANOTHER candidate in this same pool that is
@@ -196,11 +218,13 @@ export async function applyDecisionRelevanceGate(
   const byUnitId = new Map(candidates.map((c) => [c.evaluated.unitId, c.evaluated]));
   const trace: GatedCandidate[] = [];
   const relevant: EvaluatedCandidate[] = [];
+  const droppedByClassifier: string[] = [];
 
   for (const candidate of candidates) {
     const ev = candidate.evaluated;
 
     let relevance: DecisionRelevance;
+    let decidedByClassifier = false;
     if (ev.kind !== 'EXCEPTION_RULE') {
       relevance = {
         verdict: 'RELEVANT',
@@ -225,11 +249,19 @@ export async function applyDecisionRelevanceGate(
         candidate: { unitId: ev.unitId, statement: candidate.statement, quote: candidate.quote },
         runConfig,
       });
+
+      // Вердикт классификатора здесь — ЕДИНСТВЕННОЕ основание отбросить
+      // кандидата (см. `droppedByClassifier` и разбор ниже).
+      decidedByClassifier = true;
     }
 
     trace.push({ unitId: ev.unitId, relevance });
-    if (relevance.verdict !== 'IRRELEVANT') relevant.push(ev);
+    if (relevance.verdict === 'IRRELEVANT') {
+      if (decidedByClassifier) droppedByClassifier.push(ev.unitId);
+    } else {
+      relevant.push(ev);
+    }
   }
 
-  return { relevant, trace };
+  return { relevant, trace, droppedByClassifier };
 }
