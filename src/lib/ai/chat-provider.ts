@@ -80,8 +80,27 @@ export interface ChatCompletionOptions extends Partial<CompletionRunConfig> {
 /** Токены реального вызова провайдера — источник для cost meter (Task 37).
  *  Отсутствует у ERROR/ABORTED попыток без ответа: нечего посчитать. */
 export interface CompletionUsage {
+  /**
+   * `input_tokens` провайдера как есть. У Anthropic с включённым кэшированием
+   * это НЕкэшированный остаток промпта, а не весь промпт: полный размер входа
+   * равен `inputTokens + cacheCreationInputTokens + cacheReadInputTokens`.
+   * Смысл поля не менялся — менялось то, сколько промпта в него попадает.
+   */
   inputTokens: number;
   outputTokens: number;
+  /**
+   * Anthropic `cache_creation_input_tokens` — записано в кэш этим вызовом
+   * (тарифицируется дороже обычного входа). Отсутствует, когда провайдер
+   * счётчика не прислал (OpenAI-путь, ответ без кэша) — не подменяется нулём:
+   * «кэш-запись 0» и «провайдер про кэш ничего не сказал» — разные факты.
+   */
+  cacheCreationInputTokens?: number;
+  /**
+   * Anthropic `cache_read_input_tokens` — прочитано из кэша (тарифицируется
+   * заметно дешевле обычного входа). Ненулевое значение здесь — единственное
+   * прямое доказательство, что breakpoint реально сработал.
+   */
+  cacheReadInputTokens?: number;
 }
 
 export interface CompletionAttempt {
@@ -432,6 +451,119 @@ function buildAnthropicPayload(options: ChatCompletionOptions) {
     system: system || undefined,
     messages: userMessages,
   };
+}
+
+/* ------------------------------------------------------------------------ *
+ * Prompt caching (W1-B, 2026-08-10) — только Anthropic.
+ *
+ * Большие system-промпты этого репозитория (экстракция знаний, coverage-audit,
+ * QueryFrame) постоянны в пределах прогона и переотправлялись на КАЖДЫЙ вызов
+ * по полной входной цене. Anthropic кэширует префикс запроса по breakpoint'у
+ * `cache_control`; порядок рендера — `tools` → `system` → `messages`, tools
+ * здесь нет, поэтому system и есть весь стабильный префикс, а меняющийся от
+ * вызова к вызову user-текст лежит ПОСЛЕ breakpoint'а и его не инвалидирует.
+ *
+ * Синтаксис, минимумы и семантика счётчиков — из скилла `claude-api`
+ * (сверено 2026-08-10), не из памяти модели.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Документированный минимум кэшируемого префикса в ТОКЕНАХ, по моделям.
+ * Префикс короче минимума не кэшируется молча (ошибки не будет, но и записи в
+ * кэш тоже — `cache_creation_input_tokens: 0`), то есть breakpoint на нём —
+ * впустую потраченная разметка, которая ещё и выглядит в коде как работающая
+ * оптимизация.
+ *
+ * Минимум НЕ монотонен по поколениям: 512 у Opus 5, но 4096 у Opus 4.6 и
+ * Haiku 4.5. Поэтому «новее — значит меньше порог» здесь неверно, и угадывать
+ * порог по имени модели нельзя.
+ */
+const CACHE_MIN_TOKENS_BY_MODEL: Readonly<Record<string, number>> = {
+  'claude-opus-5': 512,
+  'claude-fable-5': 512,
+  'claude-mythos-5': 512,
+  'claude-opus-4-8': 1024,
+  'claude-sonnet-5': 1024,
+  'claude-sonnet-4-6': 1024,
+  'claude-sonnet-4-5': 1024,
+  'claude-sonnet-4-0': 1024,
+  'claude-opus-4-1': 1024,
+  'claude-opus-4-0': 1024,
+  'claude-opus-4-7': 2048,
+  'claude-mythos-preview': 2048,
+  'claude-opus-4-6': 4096,
+  'claude-opus-4-5': 4096,
+  'claude-haiku-4-5': 4096,
+};
+
+/**
+ * Порог для модели, которой нет в таблице — самый строгий из документированных.
+ * Fail-closed сознательно: неизвестная модель может иметь порог 4096, и
+ * breakpoint ниже него — тихо неработающая оптимизация. Лучше не кэшировать
+ * там, где мы не уверены, чем показывать в коде кэш, которого нет.
+ */
+const UNKNOWN_MODEL_CACHE_MIN_TOKENS = 4096;
+
+function cacheMinTokensFor(model: string): number {
+  const exact = CACHE_MIN_TOKENS_BY_MODEL[model];
+  if (exact !== undefined) return exact;
+  // Датированные снапшоты (`claude-haiku-4-5-20251001`) — тот же порог, что у
+  // алиаса. Берём САМОЕ ДЛИННОЕ совпадение по префиксу, иначе `claude-opus-4-1`
+  // могло бы совпасть с более коротким чужим ключом.
+  let best: number | undefined;
+  let bestLength = 0;
+  for (const [key, min] of Object.entries(CACHE_MIN_TOKENS_BY_MODEL)) {
+    if (model.startsWith(key) && key.length > bestLength) {
+      best = min;
+      bestLength = key.length;
+    }
+  }
+  return best ?? UNKNOWN_MODEL_CACHE_MIN_TOKENS;
+}
+
+/**
+ * Оценка размера промпта в токенах БЕЗ обращения к сети (`count_tokens` — это
+ * оплачиваемый round-trip, а решение нужно принять до отправки).
+ *
+ * Промпты здесь преимущественно русские, а кириллица токенизируется плотнее
+ * латиницы, поэтому единый коэффициент «4 символа = токен» занижал бы оценку
+ * почти вдвое. Отсюда раздельный счёт. Оценка приблизительна by design и
+ * используется ТОЛЬКО как порог «точно хватает / не уверены»: ошибка в меньшую
+ * сторону стоит упущенной экономии, в большую — неработающего breakpoint'а,
+ * и ни то, ни другое не ломает вызов.
+ */
+function estimateTokens(text: string): number {
+  let asciiChars = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) <= 127) asciiChars++;
+  }
+  const nonAsciiChars = text.length - asciiChars;
+  return Math.floor(asciiChars / 4 + nonAsciiChars / 2);
+}
+
+interface AnthropicCachedTextBlock {
+  type: 'text';
+  text: string;
+  cache_control: { type: 'ephemeral' };
+}
+
+/** `system` в проводной форме: строка (без кэша) или блоки (с breakpoint'ом). */
+type AnthropicSystemField = string | AnthropicCachedTextBlock[];
+
+/**
+ * TTL по умолчанию (5 минут) не указывается явно. Запись в кэш стоит ~1.25×
+ * обычного входа при 5-минутном TTL и ~2× при часовом; окупаемость — со
+ * ВТОРОГО чтения в первом случае и только с третьего во втором. Вызовы одного
+ * прогона идут подряд, поэтому 5 минут покрывают их, а часовой TTL просто
+ * удвоил бы цену записи ради окна, которое здесь никому не нужно.
+ */
+function buildAnthropicSystemField(
+  system: string | undefined,
+  model: string
+): AnthropicSystemField | undefined {
+  if (!system) return undefined;
+  if (estimateTokens(system) < cacheMinTokensFor(model)) return system;
+  return [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
 }
 
 /**
@@ -788,7 +920,7 @@ function createAttemptGate(
 async function postAnthropicMessages(
   apiKey: string,
   model: string,
-  system: string | undefined,
+  system: AnthropicSystemField | undefined,
   messages: ReturnType<typeof buildAnthropicPayload>['messages'],
   maxTokens: number,
   temperature: number | undefined,
@@ -833,10 +965,11 @@ async function callAnthropic(
   }
 
   const { system, messages } = buildAnthropicPayload(options);
+  const systemField = buildAnthropicSystemField(system, model);
   const maxTokens = defaults.anthropicMaxTokens;
   const temperature = defaults.temperature;
 
-  let response = await postAnthropicMessages(apiKey, model, system, messages, maxTokens, temperature, signal);
+  let response = await postAnthropicMessages(apiKey, model, systemField, messages, maxTokens, temperature, signal);
 
   // Reasoning/thinking-tier models (e.g. claude-sonnet-5, claude-opus-5) reject
   // an explicit temperature outright — extended thinking fixes it internally.
@@ -845,7 +978,7 @@ async function callAnthropic(
   if (!response.ok && response.status === 400) {
     const errorBody = await response.clone().text();
     if (/temperature.{0,40}deprecated/i.test(errorBody)) {
-      response = await postAnthropicMessages(apiKey, model, system, messages, maxTokens, undefined, signal);
+      response = await postAnthropicMessages(apiKey, model, systemField, messages, maxTokens, undefined, signal);
     }
   }
 
@@ -860,7 +993,12 @@ async function callAnthropic(
   const data = (await response.json()) as {
     content?: { type: string; text?: string }[];
     error?: { message?: string; type?: string };
-    usage?: { input_tokens?: number; output_tokens?: number };
+    usage?: {
+      input_tokens?: number;
+      output_tokens?: number;
+      cache_creation_input_tokens?: number;
+      cache_read_input_tokens?: number;
+    };
   };
 
   if (data.error?.message) {
@@ -873,9 +1011,21 @@ async function callAnthropic(
     ? data.content.map((part) => part.text || '').join('')
     : '';
 
+  // Кэш-счётчики добавляются ТОЛЬКО когда провайдер их прислал: ключ со
+  // значением undefined виден в `toEqual` и сделал бы красными уже
+  // существующие моки usage в других файлах, ничего не сообщив взамен.
   const usage =
     typeof data.usage?.input_tokens === 'number' && typeof data.usage?.output_tokens === 'number'
-      ? { inputTokens: data.usage.input_tokens, outputTokens: data.usage.output_tokens }
+      ? {
+          inputTokens: data.usage.input_tokens,
+          outputTokens: data.usage.output_tokens,
+          ...(typeof data.usage.cache_creation_input_tokens === 'number' && {
+            cacheCreationInputTokens: data.usage.cache_creation_input_tokens,
+          }),
+          ...(typeof data.usage.cache_read_input_tokens === 'number' && {
+            cacheReadInputTokens: data.usage.cache_read_input_tokens,
+          }),
+        }
       : null;
 
   return { text: content.trim(), usage };
@@ -906,6 +1056,15 @@ function withOpenAiJsonInstruction(options: ChatCompletionOptions): ChatMessage[
   ];
 }
 
+/**
+ * Кэширование промпта здесь сознательно НЕ реализовано: у OpenAI другая
+ * семантика — кэш префикса включается на их стороне автоматически, без
+ * какого-либо аналога `cache_control` в запросе, со своим порогом и своими
+ * условиями попадания. Добавить сюда «то же самое» нечего: любая разметка,
+ * придуманная по аналогии с Anthropic, была бы неизвестным полем в их API.
+ * Соответственно и кэш-счётчиков в `CompletionUsage` этот путь не заполняет —
+ * `prompt_tokens` у OpenAI остаётся полным входом, а не остатком.
+ */
 async function callOpenAI(
   options: ChatCompletionOptions,
   model: string,
@@ -1189,11 +1348,12 @@ async function* streamProviderTokens(
     }
 
     const { system, messages } = buildAnthropicPayload(options);
+    const systemField = buildAnthropicSystemField(system, model);
     const maxTokens = defaults.anthropicMaxTokens;
     const buildBody = (withTemperature: boolean) =>
       JSON.stringify({
         model,
-        system,
+        system: systemField,
         messages,
         max_tokens: maxTokens,
         stream: true,

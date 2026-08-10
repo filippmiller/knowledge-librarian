@@ -393,6 +393,136 @@ describe('OpenAI JSON-режим требует упоминания JSON в с�
   });
 });
 
+describe('prompt caching (Anthropic)', () => {
+  // W1-B (2026-08-10): большие system-промпты (экстракция, coverage-audit,
+  // QueryFrame) переотправлялись на КАЖДЫЙ вызов по полной входной цене.
+  // Минимумы кэширования — из скилла `claude-api` (сверено 2026-08-10):
+  // claude-sonnet-5 → 1024 токена.
+
+  /** ~5250 ASCII-символов ≈ 1312 токенов по оценке провайдер-слоя — выше
+   *  минимума Sonnet 5 (1024) и ниже минимума неизвестной модели (4096). */
+  const LONG_SYSTEM = 'System instructions line. '.repeat(210);
+
+  it('ставит cache breakpoint на system-промпт, когда он выше минимума модели', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('ok'));
+
+    await createChatCompletionDetailed({
+      messages: [{ role: 'system', content: LONG_SYSTEM }, ...MESSAGES],
+      provider: 'anthropic',
+      model: 'claude-sonnet-5',
+    });
+
+    expect(anthropicRequestBodies()[0].system).toEqual([
+      {
+        type: 'text',
+        text: LONG_SYSTEM.trim(),
+        cache_control: { type: 'ephemeral' },
+      },
+    ]);
+  });
+
+  it('короткий system-промпт остаётся строкой: breakpoint ниже минимума впустую', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('ok'));
+
+    await createChatCompletionDetailed({
+      messages: [{ role: 'system', content: 'Отвечай кратко.' }, ...MESSAGES],
+      provider: 'anthropic',
+      model: 'claude-sonnet-5',
+    });
+
+    expect(anthropicRequestBodies()[0].system).toBe('Отвечай кратко.');
+  });
+
+  it('модель с неизвестным минимумом кэшируется fail-closed, а не наугад', async () => {
+    // claude-env-default нет в таблице минимумов — берётся самый строгий
+    // документированный минимум (4096), и промпт на ~1300 токенов его не
+    // проходит. Иначе слой ставил бы breakpoint вслепую на модели, чей
+    // порог может оказаться выше (минимум НЕ монотонен по поколениям).
+    fetchMock.mockResolvedValue(anthropicOk('ok'));
+
+    await createChatCompletionDetailed({
+      messages: [{ role: 'system', content: LONG_SYSTEM }, ...MESSAGES],
+      provider: 'anthropic',
+    });
+
+    expect(anthropicRequestBodies()[0].system).toBe(LONG_SYSTEM.trim());
+  });
+
+  it('стриминг кэширует тот же system-префикс', async () => {
+    fetchMock.mockResolvedValue(sseResponse(['ok']));
+
+    const operation = createChatCompletionStreamDetailed({
+      messages: [{ role: 'system', content: LONG_SYSTEM }, ...MESSAGES],
+      provider: 'anthropic',
+      model: 'claude-sonnet-5',
+    });
+    await operation.completion;
+
+    expect(anthropicRequestBodies()[0].system).toEqual([
+      {
+        type: 'text',
+        text: LONG_SYSTEM.trim(),
+        cache_control: { type: 'ephemeral' },
+      },
+    ]);
+  });
+
+  it('OpenAI-путь не трогается: у него другая семантика кэширования', async () => {
+    openaiCreate.mockResolvedValue(openaiOk('ok'));
+
+    await createChatCompletionDetailed({
+      messages: [{ role: 'system', content: LONG_SYSTEM }, ...MESSAGES],
+      provider: 'openai',
+      model: 'gpt-4o',
+    });
+
+    expect(JSON.stringify(openaiCreate.mock.calls[0][0])).not.toContain('cache_control');
+  });
+
+  it('поднимает cache-счётчики Anthropic в usage — добавочно, не подменяя input/output', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          content: [{ type: 'text', text: 'ok' }],
+          usage: {
+            input_tokens: 12,
+            output_tokens: 5,
+            cache_creation_input_tokens: 1300,
+            cache_read_input_tokens: 0,
+          },
+        }),
+        { status: 200 }
+      )
+    );
+
+    const result = await createChatCompletionDetailed({
+      messages: [{ role: 'system', content: LONG_SYSTEM }, ...MESSAGES],
+      provider: 'anthropic',
+      model: 'claude-sonnet-5',
+    });
+
+    expect(result.attempts[0].usage).toEqual({
+      inputTokens: 12,
+      outputTokens: 5,
+      cacheCreationInputTokens: 1300,
+      cacheReadInputTokens: 0,
+    });
+  });
+
+  it('без cache-счётчиков usage остаётся ровно {inputTokens, outputTokens}', async () => {
+    // Регрессия на уже существующие моки в других файлах: они сверяют usage
+    // через toEqual, и ключ со значением undefined сделал бы их красными.
+    fetchMock.mockResolvedValue(anthropicOk('ok', { input_tokens: 10, output_tokens: 5 }));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+    });
+
+    expect(result.attempts[0].usage).toEqual({ inputTokens: 10, outputTokens: 5 });
+  });
+});
+
 describe('createChatCompletionDetailed — фоллбэк', () => {
   it('при providerModels уходит к резерву с ЕГО model ID, а не с закреплённым', async () => {
     fetchMock.mockResolvedValue(anthropicFailure());
