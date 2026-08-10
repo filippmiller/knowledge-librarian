@@ -47,7 +47,7 @@ import {
   type AuditBlockCoverageOptions,
   type BlockCoverageAuditResult,
 } from '../src/lib/knowledge/extraction-coverage-auditor';
-import { ChatCompletionError } from '../src/lib/ai/chat-provider';
+import { ChatCompletionError, type CompletionAttempt } from '../src/lib/ai/chat-provider';
 import { CostLedger } from '../src/lib/ai/cost-ledger';
 import {
   assignIdentity,
@@ -237,6 +237,19 @@ function classifyStructuredError(error: unknown): ExtractionAttemptLog['outcome'
 }
 
 /**
+ * Both failure classes `classifyStructuredError` distinguishes carry the
+ * REAL underlying attempts (incl. token usage) on the error object itself —
+ * a SCHEMA_MISMATCH means the HTTP call succeeded and cost real tokens, only
+ * local JSON validation failed afterward. `null` for any other error class
+ * (a genuine bug, not a priced provider round-trip).
+ */
+function attemptsFromError(error: unknown): readonly CompletionAttempt[] | null {
+  if (error instanceof StructuredOutputError) return error.attempts;
+  if (error instanceof ChatCompletionError) return error.attempts;
+  return null;
+}
+
+/**
  * Same bounded retry class as scripts/run-extraction.ts's
  * extractKnowledgeUnitsWithRetry — structured() deliberately doesn't retry
  * SCHEMA_MISMATCH/TRUNCATED_JSON itself (caller's decision per its own
@@ -254,11 +267,22 @@ function classifyStructuredError(error: unknown): ExtractionAttemptLog['outcome'
  * call had no retry wrapper at all while the extraction call did — this
  * generalization closes that gap instead of duplicating the same
  * classification logic a second time for the auditor call.
+ *
+ * OWNS ledger recording for every attempt this loop sees, success or
+ * failure (Task 38 fix, 2026-08-10): a prior version recorded only the
+ * final successful attempt, so every retried-away SCHEMA_MISMATCH/
+ * NETWORK_ERROR attempt's real token cost — the exact failure mode behind
+ * 43/43 identical schema failures earlier this session — was invisible to
+ * the ledger. A dollar ceiling built on that undercount could never
+ * actually trip at the real spend.
  */
 async function withStructuredRetry<T>(
   call: () => Promise<T>,
   maxAttempts: number,
-  label: string
+  label: string,
+  ledger: CostLedger,
+  purpose: string,
+  getAttempts: (result: T) => readonly CompletionAttempt[]
 ): Promise<{ result: T; attemptLog: ExtractionAttemptLog[] }> {
   const attemptLog: ExtractionAttemptLog[] = [];
 
@@ -266,6 +290,7 @@ async function withStructuredRetry<T>(
     try {
       const result = await call();
       attemptLog.push({ attempt, outcome: 'SUCCESS', message: null });
+      ledger.record(purpose, getAttempts(result));
       return { result, attemptLog };
     } catch (error) {
       const outcome = classifyStructuredError(error);
@@ -275,6 +300,8 @@ async function withStructuredRetry<T>(
         outcome,
         message: error instanceof Error ? error.message : String(error),
       });
+      const failedAttempts = attemptsFromError(error);
+      if (failedAttempts) ledger.record(purpose, failedAttempts);
       console.warn(`[${label} attempt ${attempt}/${maxAttempts}] failed (${outcome}): ${attemptLog[attemptLog.length - 1].message}`);
       if (!retryable || attempt === maxAttempts) throw error;
     }
@@ -284,9 +311,17 @@ async function withStructuredRetry<T>(
 
 async function extractKnowledgeUnitsWithRetry(
   options: ExtractKnowledgeUnitsOptions,
-  maxAttempts: number
+  maxAttempts: number,
+  ledger: CostLedger
 ): Promise<{ result: ExtractKnowledgeUnitsResult; attemptLog: ExtractionAttemptLog[] }> {
-  return withStructuredRetry(() => extractKnowledgeUnits(options), maxAttempts, 'extraction');
+  return withStructuredRetry(
+    () => extractKnowledgeUnits(options),
+    maxAttempts,
+    'extraction',
+    ledger,
+    'extraction',
+    (r) => r.structuredResult.attempts
+  );
 }
 
 interface TaintResampleLog {
@@ -589,9 +624,8 @@ async function runOneExtractionRun(
   // whole-document вызов молча забыл правила 5-10 на реальном прогоне, хотя
   // JSON был схема-валиден и retry на это не сработал бы никогда.
   const retryingExtractor = async (options: ExtractKnowledgeUnitsOptions): Promise<ExtractKnowledgeUnitsResult> => {
-    const { result, attemptLog } = await extractKnowledgeUnitsWithRetry(options, 6);
+    const { result, attemptLog } = await extractKnowledgeUnitsWithRetry(options, 6, ledger);
     allAttemptLogs.push(...attemptLog);
-    ledger.record('extraction', result.structuredResult.attempts);
     return result;
   };
   // Same bounded transport/schema retry as extraction itself — a real run
@@ -599,9 +633,15 @@ async function runOneExtractionRun(
   // "fetch failed" INSIDE the coverage-audit call, which previously had no
   // retry wrapper at all.
   const retryingAuditor = async (options: AuditBlockCoverageOptions): Promise<BlockCoverageAuditResult> => {
-    const { result, attemptLog } = await withStructuredRetry(() => auditBlockCoverage(options), 6, 'coverage audit');
+    const { result, attemptLog } = await withStructuredRetry(
+      () => auditBlockCoverage(options),
+      6,
+      'coverage audit',
+      ledger,
+      'coverage-audit',
+      (r) => r.attempts ?? []
+    );
     allAttemptLogs.push(...attemptLog);
-    ledger.record('coverage-audit', result.attempts ?? []);
     return result;
   };
 
