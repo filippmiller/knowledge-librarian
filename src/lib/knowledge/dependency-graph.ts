@@ -35,6 +35,27 @@ export interface DependencyEdge extends DependencyEdgeInput {
   readonly edgeId: string;
 }
 
+/** A relation the auditor could not settle even after every repair round,
+ * so the builder omitted it instead of guessing (see
+ * dependency-graph-builder.ts's final-round handling). Recorded on the
+ * published graph so a reader can see exactly what the system chose NOT to
+ * assert, and why -- silent omission would hide evidence about what the
+ * system does not know. `relation` is null when the finding named a real,
+ * known unit pair that never had a proposed edge to begin with (the
+ * ambiguity was over whether a relation should exist at all, not over an
+ * edge that was actually proposed and then withdrawn); it is one of
+ * REQUIRES/CO_REQUIRED/ALTERNATIVE when an actually-proposed edge for that
+ * pair was withdrawn. An omitted pair is never traversable: it is excluded
+ * from `edges`, `expandDependencyClosure`, and cycle/bounds checks -- this
+ * is purely an audit trail, never a graph relation. */
+export const dependencyEdgeOmissionSchema = z.strictObject({
+  fromUnitId: z.string().min(1),
+  toUnitId: z.string().min(1),
+  relation: dependencyRelationSchema.nullable(),
+  reason: z.string().min(1),
+});
+export type DependencyEdgeOmission = z.infer<typeof dependencyEdgeOmissionSchema>;
+
 export interface DependencyGraphBounds {
   readonly maxEdges: number;
   readonly maxDegree: number;
@@ -43,6 +64,7 @@ export interface DependencyGraphBounds {
 export interface DependencyGraph {
   readonly units: ReadonlyMap<string, DependencyEndpoint>;
   readonly edges: readonly DependencyEdge[];
+  readonly omittedEdges: readonly DependencyEdgeOmission[];
   readonly fingerprint: string;
   readonly bounds: DependencyGraphBounds;
 }
@@ -64,6 +86,9 @@ export const dependencyGraphBoundsSchema = z.strictObject({
 });
 export const dependencyGraphDocumentSchema = z.strictObject({
   edges: z.array(dependencyEdgeInputSchema).readonly(),
+  // Defaulted so a sidecar artifact written before omission-tracking existed
+  // still parses (as zero omissions) instead of failing to hydrate.
+  omittedEdges: z.array(dependencyEdgeOmissionSchema).readonly().default([]),
   bounds: dependencyGraphBoundsSchema,
   fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
 });
@@ -109,6 +134,11 @@ function canonicalEdge(input: DependencyEdgeInput): DependencyEdge {
 export function createDependencyGraph(options: {
   readonly units: readonly DependencyEndpoint[];
   readonly edges: readonly DependencyEdgeInput[];
+  /** Relations the builder considered but deliberately did not assert (see
+   * dependencyEdgeOmissionSchema). Never affects traversal, cycle checks, or
+   * maxEdges/maxDegree bounds -- purely a recorded audit trail. Defaults to
+   * empty so every existing call site is unaffected. */
+  readonly omittedEdges?: readonly DependencyEdgeOmission[];
   readonly bounds?: Partial<DependencyGraphBounds>;
 }): DependencyGraph {
   const bounds = { ...DEFAULT_BOUNDS, ...options.bounds };
@@ -140,13 +170,24 @@ export function createDependencyGraph(options: {
     }
   }
   assertAcyclicRequires(units, edges);
-  const fingerprint = graphFingerprint(units, edges, bounds);
-  return { units, edges, fingerprint, bounds };
+  const omittedEdges = [...(options.omittedEdges ?? [])].sort((a, b) => omissionSortKey(a).localeCompare(omissionSortKey(b)));
+  for (const omission of omittedEdges) {
+    if (!units.has(omission.fromUnitId) || !units.has(omission.toUnitId)) {
+      throw new Error(`dependency omission references missing endpoint: ${omission.fromUnitId} -> ${omission.toUnitId}`);
+    }
+  }
+  const fingerprint = graphFingerprint(units, edges, omittedEdges, bounds);
+  return { units, edges, omittedEdges, fingerprint, bounds };
+}
+
+function omissionSortKey(omission: DependencyEdgeOmission): string {
+  return `${omission.fromUnitId} ${omission.toUnitId} ${omission.relation ?? ''} ${omission.reason}`;
 }
 
 function graphFingerprint(
   units: ReadonlyMap<string, DependencyEndpoint>,
   edges: readonly DependencyEdge[],
+  omittedEdges: readonly DependencyEdgeOmission[],
   bounds: DependencyGraphBounds
 ): string {
   const endpointEvidence = [...units.values()].map((unit) => ({
@@ -158,12 +199,14 @@ function graphFingerprint(
     bounds,
     endpoints: endpointEvidence,
     edges: edges.map(({ edgeId: _edgeId, ...edge }) => edge),
+    omittedEdges,
   });
 }
 
 export function serializeDependencyGraph(graph: DependencyGraph): DependencyGraphDocument {
   return dependencyGraphDocumentSchema.parse({
     edges: graph.edges.map(({ edgeId: _edgeId, ...edge }) => edge),
+    omittedEdges: graph.omittedEdges,
     bounds: graph.bounds,
     fingerprint: graph.fingerprint,
   });
@@ -174,7 +217,7 @@ export function hydrateDependencyGraph(
   units: readonly DependencyEndpoint[]
 ): DependencyGraph {
   const parsed = dependencyGraphDocumentSchema.parse(document);
-  const graph = createDependencyGraph({ units, edges: parsed.edges, bounds: parsed.bounds });
+  const graph = createDependencyGraph({ units, edges: parsed.edges, omittedEdges: parsed.omittedEdges, bounds: parsed.bounds });
   if (graph.fingerprint !== parsed.fingerprint) throw new Error('dependency graph fingerprint mismatch');
   return graph;
 }

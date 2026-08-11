@@ -13,7 +13,7 @@ import {
 const extraction = { phase: 'COMPLETE', contentDigest: 'a'.repeat(64) };
 const units = [{ unitId: 'u1', text: 'one' }, { unitId: 'u2', text: 'two' }];
 const config = { provider: 'p', model: 'm', prompt: 'prompt-v1', schema: 'schema-v1', policy: 'policy-v1' };
-const graph = { edges: [], bounds: { maxEdges: 1000, maxDegree: 50 }, fingerprint: 'c'.repeat(64) };
+const graph = { edges: [], omittedEdges: [], bounds: { maxEdges: 1000, maxDegree: 50 }, fingerprint: 'c'.repeat(64) };
 let dir: string | undefined;
 afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); dir = undefined; });
 

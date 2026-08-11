@@ -8,6 +8,7 @@ import {
   buildDependencyProposalMessages,
   buildDependencyRepairMessages,
   DEPENDENCY_GRAPH_MAX_REPAIRS,
+  DependencyGraphBuildError,
   FileDependencyGraphCheckpoint,
   type DependencyAudit,
   type DependencyGraphProposal,
@@ -172,7 +173,109 @@ describe('buildAuditedDependencyGraph', () => {
     expect(auditor).toHaveBeenCalledTimes(2);
   });
 
-  it('still fails closed when ambiguity survives every repair round, with a message distinct from "did not converge" and "requires focused findings"', async () => {
+  // --- conservative convergence: drop solely-ambiguous edges instead of discarding the whole graph ---
+  // Motivating live failure: scratchpad/aurora-v7.log /
+  // scratchpad/aurora-v7/call-trace.jsonl. The final AUDIT_2 response there
+  // is a REPAIR verdict with five findings -- WRONG_DIRECTION,
+  // UNSUPPORTED_EDGE, MISSING_EDGE, UNSUPPORTED_EDGE, and ONE
+  // AMBIGUOUS_RELATION (31d54a3b64736657 -> 0f2a7c950991a0c4, "it is unclear
+  // whether 31d54a3b64736657 should also REQUIRES-link to 0f2a7c950991a0c4
+  // ... evidence does not clearly settle which units the example targets").
+  // Because that set is MIXED, isPureAmbiguity is false for it and this
+  // fix does not rescue that particular run (see the "does NOT drop..." test
+  // below) -- the earlier aurora-v5 trace is what a PURE case looks like:
+  // its single AMBIGUOUS_RELATION finding ("It is unclear whether the
+  // general interpretive definition of 'допускается' (28c466edc64bb222)
+  // should be modeled as REQUIRES toward the specific exception clause
+  // b4a9f07af40342af, or whether the dependency runs the opposite way") rode
+  // alongside FIVE other actionable findings on ITS first audit, but nothing
+  // stops all six from being the ONLY findings on some later, final round.
+
+  it('drops the sole surviving AMBIGUOUS_RELATION edge after the final repair, re-audits once, and on PASS publishes the remaining edges as TRUSTED while recording the drop', async () => {
+    const proposer = async () => proposal();
+    const auditor = vi.fn()
+      .mockResolvedValueOnce(repairAudit) // AUDIT_0: ordinary MISSING_EDGE act->consent, forces REPAIR_1
+      .mockResolvedValueOnce({
+        verdict: 'REPAIR',
+        findings: [{ kind: 'MISSING_EDGE', fromUnitId: 'consent', toUnitId: 'stop', explanation: 'Stop is a prerequisite of consent handling.' }],
+      }) // AUDIT_1: another ordinary repair, forces REPAIR_2
+      .mockResolvedValueOnce({
+        verdict: 'REPAIR',
+        findings: [{
+          kind: 'AMBIGUOUS_RELATION', fromUnitId: 'consent', toUnitId: 'stop',
+          explanation: 'Unclear whether consent requires stop, or the dependency runs the opposite way.',
+        }],
+      }) // AUDIT_2 (final round, repair === DEPENDENCY_GRAPH_MAX_REPAIRS): pure ambiguity, single finding
+      .mockResolvedValueOnce(pass); // AUDIT_AMBIGUOUS_DROP: PASS once the ambiguous edge is gone
+    const repairer = vi.fn()
+      .mockResolvedValueOnce(proposal(edge('act', 'consent'))) // REPAIR_1
+      .mockResolvedValueOnce(proposal(edge('act', 'consent'), edge('consent', 'stop'))); // REPAIR_2
+    const graph = await buildAuditedDependencyGraph({ units, proposer, auditor, repairer, exactRequestFingerprint: fingerprint });
+    expect(auditor).toHaveBeenCalledTimes(4);
+    expect(repairer).toHaveBeenCalledTimes(2);
+    // The ambiguous consent->stop edge is gone; act->consent survives, TRUSTED.
+    expect(graph.edges).toHaveLength(1);
+    expect(graph.edges[0]).toMatchObject({ fromUnitId: 'act', toUnitId: 'consent', relation: 'REQUIRES', auditStatus: 'TRUSTED' });
+    // The drop is recorded, not silently discarded.
+    expect(graph.omittedEdges).toHaveLength(1);
+    expect(graph.omittedEdges[0]).toMatchObject({
+      fromUnitId: 'consent', toUnitId: 'stop', relation: 'REQUIRES',
+      reason: 'Unclear whether consent requires stop, or the dependency runs the opposite way.',
+    });
+  });
+
+  it('matches by UNORDERED unit pair, not direction: drops an edge stored in the opposite direction from the one the finding names -- the real aurora-v5 ambiguity was precisely about which direction is correct', async () => {
+    const ambiguousDirection: DependencyAudit = {
+      verdict: 'REPAIR',
+      findings: [{
+        kind: 'AMBIGUOUS_RELATION', fromUnitId: 'consent', toUnitId: 'stop',
+        explanation: 'Unclear whether consent requires stop, or stop requires consent.',
+      }],
+    };
+    const proposer = async () => proposal(edge('stop', 'consent')); // stored stop -> consent, the OTHER direction
+    const auditor = vi.fn()
+      .mockResolvedValueOnce(ambiguousDirection)
+      .mockResolvedValueOnce(ambiguousDirection)
+      .mockResolvedValueOnce(ambiguousDirection) // AUDIT_2, final round: still the same single pure-ambiguity finding
+      .mockResolvedValueOnce(pass);
+    const repairer = vi.fn(async () => proposal(edge('stop', 'consent')));
+    const graph = await buildAuditedDependencyGraph({ units, proposer, auditor, repairer, exactRequestFingerprint: fingerprint });
+    expect(graph.edges).toHaveLength(0);
+    expect(graph.omittedEdges).toHaveLength(1);
+    // Recorded with the edge's OWN stored direction (stop -> consent), not
+    // the finding's direction (consent -> stop) -- the omission documents
+    // what was actually withdrawn, not how the auditor happened to phrase it.
+    expect(graph.omittedEdges[0]).toMatchObject({ fromUnitId: 'stop', toUnitId: 'consent', relation: 'REQUIRES' });
+  });
+
+  it('records a `relation: null` omission -- not a failure -- when a final-round AMBIGUOUS_RELATION finding names a real, known unit pair that never had a proposed edge; matches the live aurora-v7 finding shape (31d54a3b64736657 -> 0f2a7c950991a0c4 matched zero edges in that run\'s REPAIR_2 graph)', async () => {
+    const neverProposedPair: DependencyAudit = {
+      verdict: 'AMBIGUOUS',
+      findings: [{
+        kind: 'AMBIGUOUS_RELATION', fromUnitId: 'consent', toUnitId: 'stop',
+        explanation: 'Unclear whether consent should also link to stop; evidence does not settle it.',
+      }],
+    };
+    const proposer = async () => proposal(edge('act', 'consent'));
+    const auditor = vi.fn()
+      .mockResolvedValueOnce(neverProposedPair)
+      .mockResolvedValueOnce(neverProposedPair)
+      .mockResolvedValueOnce(neverProposedPair) // AUDIT_2, final round
+      .mockResolvedValueOnce(pass);
+    const repairer = vi.fn(async () => proposal(edge('act', 'consent')));
+    const graph = await buildAuditedDependencyGraph({ units, proposer, auditor, repairer, exactRequestFingerprint: fingerprint });
+    // The one real edge survives untouched -- there was never a consent->stop
+    // edge to drop in the first place.
+    expect(graph.edges).toHaveLength(1);
+    expect(graph.edges[0]).toMatchObject({ fromUnitId: 'act', toUnitId: 'consent', auditStatus: 'TRUSTED' });
+    expect(graph.omittedEdges).toHaveLength(1);
+    expect(graph.omittedEdges[0]).toMatchObject({
+      fromUnitId: 'consent', toUnitId: 'stop', relation: null,
+      reason: 'Unclear whether consent should also link to stop; evidence does not settle it.',
+    });
+  });
+
+  it('after dropping the only-surviving AMBIGUOUS_RELATION pair and re-auditing once, still fails closed if that re-audit does not PASS either -- with a message distinct from "did not converge", "requires focused findings", and the old immediate-ambiguous message', async () => {
     const proposer = async () => proposal();
     const repairer = async () => proposal();
     const alwaysAmbiguous: DependencyAudit = {
@@ -186,14 +289,78 @@ describe('buildAuditedDependencyGraph', () => {
     } catch (error) {
       caught = error;
     }
-    expect(caught).toBeInstanceOf(Error);
+    expect(caught).toBeInstanceOf(DependencyGraphBuildError);
     const message = (caught as Error).message;
     expect(message).toMatch(/ambiguous/i);
-    expect(message).toContain(`after ${DEPENDENCY_GRAPH_MAX_REPAIRS} focused repairs`);
     expect(message).not.toMatch(/did not converge/i);
     expect(message).not.toMatch(/requires focused findings/i);
-    // Bounded: exactly MAX_REPAIRS+1 audits (AUDIT_0..AUDIT_MAX), never more
-    // -- DEPENDENCY_GRAPH_MAX_REPAIRS is not raised by this fix.
+    // Distinct from the old immediate-ambiguous message -- this graph was
+    // specifically given a drop-and-re-audit chance, and that is what failed.
+    expect(message).not.toBe(`Dependency graph is still ambiguous after ${DEPENDENCY_GRAPH_MAX_REPAIRS} focused repairs; refusing to publish it.`);
+    // One extra call beyond MAX_REPAIRS+1 -- the post-drop re-audit -- proves
+    // the graceful-degradation path was actually attempted, not skipped.
+    expect(auditor).toHaveBeenCalledTimes(DEPENDENCY_GRAPH_MAX_REPAIRS + 2);
+  });
+
+  it('fails closed -- without guessing -- when a final-round AMBIGUOUS_RELATION finding has a null endpoint and so cannot be tied to one specific edge to drop', async () => {
+    const proposer = async () => proposal();
+    const repairer = async () => proposal();
+    const nullEndpointFinding: DependencyAudit = {
+      verdict: 'AMBIGUOUS',
+      findings: [{ kind: 'AMBIGUOUS_RELATION', fromUnitId: null, toUnitId: 'stop', explanation: 'Unclear which other unit besides stop is even involved.' }],
+    };
+    const auditor = vi.fn(async () => nullEndpointFinding);
+    let caught: unknown;
+    try {
+      await buildAuditedDependencyGraph({ units, proposer, repairer, auditor, exactRequestFingerprint: fingerprint });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(DependencyGraphBuildError);
+    expect((caught as Error).message).toMatch(/null endpoint/i);
+    expect((caught as Error).message).toMatch(/cannot be tied to one specific edge/i);
+    // No post-drop re-audit call: an unidentifiable finding is never
+    // "resolved" by dropping, so paying for one more audit call would be
+    // pointless -- the failure happens locally and deterministically,
+    // exactly MAX_REPAIRS+1 audits, zero extra provider spend.
+    expect(auditor).toHaveBeenCalledTimes(DEPENDENCY_GRAPH_MAX_REPAIRS + 1);
+  });
+
+  it('does NOT drop-and-retry when an AMBIGUOUS_RELATION finding survives alongside an ordinary MISSING_EDGE/UNSUPPORTED_EDGE/WRONG_DIRECTION finding -- fails exactly as before, matching the live aurora-v7 trace shape (WRONG_DIRECTION + two UNSUPPORTED_EDGE + MISSING_EDGE + one AMBIGUOUS_RELATION all survived its final audit together)', async () => {
+    const proposer = async () => proposal();
+    const repairer = async () => proposal();
+    const mixedFinalAudit: DependencyAudit = {
+      verdict: 'REPAIR',
+      findings: [
+        { kind: 'WRONG_DIRECTION', fromUnitId: 'act', toUnitId: 'consent', explanation: 'Direction looks backwards.' },
+        { kind: 'AMBIGUOUS_RELATION', fromUnitId: 'consent', toUnitId: 'stop', explanation: 'Unclear whether consent requires stop or the reverse.' },
+      ],
+    };
+    const auditor = vi.fn(async () => mixedFinalAudit);
+    let caught: unknown;
+    try {
+      await buildAuditedDependencyGraph({ units, proposer, repairer, auditor, exactRequestFingerprint: fingerprint });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(DependencyGraphBuildError);
+    // Byte-identical to the message the ORIGINAL all-or-nothing code produced
+    // for this shape -- proves a mixed finding set gets no new escape hatch.
+    expect((caught as Error).message).toBe(
+      `Dependency graph is still ambiguous after ${DEPENDENCY_GRAPH_MAX_REPAIRS} focused repairs; refusing to publish it.`
+    );
+    // No post-drop re-audit call: exactly MAX_REPAIRS+1, unchanged from
+    // before this fix -- an ordinary defect riding along must still block
+    // publication outright.
+    expect(auditor).toHaveBeenCalledTimes(DEPENDENCY_GRAPH_MAX_REPAIRS + 1);
+  });
+
+  it('a MISSING_EDGE finding surviving every repair round (no ambiguity at all) still fails closed exactly as before', async () => {
+    const proposer = async () => proposal();
+    const repairer = async () => proposal();
+    const auditor = vi.fn(async () => repairAudit);
+    await expect(buildAuditedDependencyGraph({ units, proposer, repairer, auditor, exactRequestFingerprint: fingerprint }))
+      .rejects.toThrow('Dependency graph did not converge after two focused repairs.');
     expect(auditor).toHaveBeenCalledTimes(DEPENDENCY_GRAPH_MAX_REPAIRS + 1);
   });
 

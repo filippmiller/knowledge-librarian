@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import type { ChatMessage } from '@/lib/ai/chat-provider';
 import type { PersistedKnowledgeUnit } from './applicability/identity-assignment';
-import { createDependencyGraph, type DependencyGraph, type DependencyEdgeInput } from './dependency-graph';
+import { createDependencyGraph, type DependencyGraph, type DependencyEdgeInput, type DependencyEdgeOmission } from './dependency-graph';
 import { z } from 'zod';
 
 export const dependencyEdgeSchema = z.strictObject({
@@ -214,6 +214,91 @@ function hasUnresolvedAmbiguity(audit: DependencyAudit): boolean {
   return audit.verdict === 'AMBIGUOUS' || audit.findings.some(isAmbiguousRelationFinding);
 }
 
+/** True iff EVERY surviving finding is an AMBIGUOUS_RELATION hedge -- the
+ * narrow case where dropping-and-re-auditing (see resolveAmbiguousDrop) is
+ * safe, because no concrete defect (a missing edge, an unsupported edge, a
+ * wrong direction) is left unaddressed alongside it. Deliberately narrower
+ * than hasUnresolvedAmbiguity, which is true for ANY mix: a single
+ * MISSING_EDGE/UNSUPPORTED_EDGE/WRONG_DIRECTION finding surviving alongside
+ * an AMBIGUOUS_RELATION one must still hard-fail via the existing
+ * hasUnresolvedAmbiguity path below -- this function must never become true
+ * for that mixed case, or ordinary defects would gain a new escape hatch
+ * (live example: aurora-v7's final audit had four ordinary findings plus
+ * one AMBIGUOUS_RELATION, so isPureAmbiguity is false for it -- see
+ * scratchpad/aurora-v7/call-trace.jsonl, the last dependency-graph-audit
+ * record). `findings` is guaranteed non-empty by the "Repair verdict
+ * requires focused findings" check above this is called from, so `.every`
+ * here can never vacuously pass on an empty array. */
+function isPureAmbiguity(audit: DependencyAudit): boolean {
+  return audit.findings.every(isAmbiguousRelationFinding);
+}
+
+function unorderedPairKey(a: string, b: string): string {
+  return a.localeCompare(b) <= 0 ? `${a}\u0000${b}` : `${b}\u0000${a}`;
+}
+
+/** Drops precisely the edges a surviving, final-round, all-AMBIGUOUS_RELATION
+ * finding set identifies, and records what was dropped -- or, when nothing
+ * matched, what pair was considered and declined -- so a reader can see
+ * exactly what the system chose not to assert (dependencyEdgeOmissionSchema
+ * carries the full rationale).
+ *
+ * Matching is by UNORDERED unit pair, independent of relation or direction:
+ * the real aurora-v5 finding this is built for ("It is unclear whether the
+ * general interpretive definition of 'допускается' (28c466edc64bb222)
+ * should be modeled as REQUIRES toward the specific exception clause
+ * b4a9f07af40342af, or whether the dependency runs the opposite way") is a
+ * hedge about DIRECTION, so an edge stored in either direction between the
+ * same two units is exactly the thing being hedged on -- keeping it because
+ * it happens to be stored in the "other" direction from the one the finding
+ * named would still be a guess.
+ *
+ * A null endpoint throws instead of guessing (see point 5 of the task this
+ * implements): with only one unit named -- or none -- there is no way to
+ * identify a specific candidate edge among however many the named unit
+ * touches without picking one arbitrarily, and picking arbitrarily is
+ * exactly what this mechanism exists to avoid; failing is the honest
+ * outcome. A well-identified pair (both endpoints named) that currently has
+ * NO matching edge is different, and NOT a failure: it is a hedge over
+ * whether a relation should exist at all, not over an edge that was
+ * actually proposed. That is the REAL shape recorded live in aurora-v7's
+ * final audit (scratchpad/aurora-v7/call-trace.jsonl: finding
+ * 31d54a3b64736657 -> 0f2a7c950991a0c4 matched zero edges in the graph
+ * REPAIR_2 produced, per scratchpad/aurora-v7/call-trace.jsonl's repair
+ * response). Dropping nothing for that pair is already the safe outcome
+ * (nothing was ever asserted for it), so it is recorded as a `relation:
+ * null` omission and the re-audit still proceeds -- the auditor gets one
+ * fresh, focused chance to say whether the hedge is actually blocking. */
+function resolveAmbiguousDrop(
+  graph: DependencyGraphProposal,
+  findings: readonly DependencyAudit['findings'][number][]
+): { readonly edges: DependencyGraphProposal['edges']; readonly omissions: readonly DependencyEdgeOmission[] } {
+  const named: { fromUnitId: string; toUnitId: string; explanation: string }[] = [];
+  for (const finding of findings) {
+    if (finding.fromUnitId === null || finding.toUnitId === null) {
+      throw new DependencyGraphBuildError(
+        'An AMBIGUOUS_RELATION finding with a null endpoint cannot be tied to one specific edge to drop; refusing to guess which edge it concerns.'
+      );
+    }
+    named.push({ fromUnitId: finding.fromUnitId, toUnitId: finding.toUnitId, explanation: finding.explanation });
+  }
+  const droppedPairKeys = new Set(named.map((finding) => unorderedPairKey(finding.fromUnitId, finding.toUnitId)));
+  const edges = graph.edges.filter((candidate) => !droppedPairKeys.has(unorderedPairKey(candidate.fromUnitId, candidate.toUnitId)));
+  const omissions: DependencyEdgeOmission[] = [];
+  for (const finding of named) {
+    const pairKey = unorderedPairKey(finding.fromUnitId, finding.toUnitId);
+    const matches = graph.edges.filter((candidate) => unorderedPairKey(candidate.fromUnitId, candidate.toUnitId) === pairKey);
+    if (matches.length === 0) {
+      omissions.push({ fromUnitId: finding.fromUnitId, toUnitId: finding.toUnitId, relation: null, reason: finding.explanation });
+    } else {
+      for (const dropped of matches) {
+        omissions.push({ fromUnitId: dropped.fromUnitId, toUnitId: dropped.toUnitId, relation: dropped.relation, reason: finding.explanation });
+      }
+    }
+  }
+  return { edges, omissions };
+}
+
 export async function buildAuditedDependencyGraph(options: {
   readonly units: readonly PersistedKnowledgeUnit[];
   readonly proposer: DependencyGraphStage<DependencyGraphProposal>;
@@ -276,12 +361,48 @@ export async function buildAuditedDependencyGraph(options: {
       (finding.toUnitId !== null && !unitIds.has(finding.toUnitId))
     )) throw new DependencyGraphBuildError('Repair findings reference unknown directed endpoints.');
     if (repair === DEPENDENCY_GRAPH_MAX_REPAIRS) {
-      // Same bar as before (DEPENDENCY_GRAPH_MAX_REPAIRS is not raised), but
-      // the message now says truthfully which kind of non-convergence
-      // survived every round instead of always calling it "did not
-      // converge" -- a graph that is still ambiguous after a real repair
-      // attempt is a different, more diagnosable failure than one that
-      // simply never settled.
+      // Same bar as before (DEPENDENCY_GRAPH_MAX_REPAIRS is not raised).
+      // Three outcomes now, not two. A graph that is still ambiguous after
+      // a real repair attempt is diagnosably different from one that simply
+      // never settled (unchanged). NEW: when the ONLY thing left wrong is
+      // pure ambiguity -- every surviving finding is an AMBIGUOUS_RELATION
+      // hedge, nothing concrete unaddressed -- the whole graph is no longer
+      // discarded outright. It gets exactly one more chance: drop precisely
+      // the hedged relations and ask again. This is conservative, not a
+      // loosening -- see resolveAmbiguousDrop and the PASS branch just
+      // below for why: publication still requires a fresh PASS verdict,
+      // dropped/omitted relations are never marked TRUSTED (they never
+      // enter `edges` at all), and a null-endpoint finding still fails
+      // closed rather than guessing which edge to drop. A mix of an
+      // AMBIGUOUS_RELATION finding with any ordinary finding kind is
+      // deliberately excluded (isPureAmbiguity is false for it) and falls
+      // through to the unchanged hasUnresolvedAmbiguity path -- no new
+      // escape hatch for a real MISSING_EDGE/UNSUPPORTED_EDGE/WRONG_DIRECTION
+      // defect just because ambiguity also happens to be present.
+      if (isPureAmbiguity(audit)) {
+        const { edges: survivingEdges, omissions } = resolveAmbiguousDrop(graph, audit.findings);
+        const trimmedGraph = validateGraph({ edges: survivingEdges }, orderedUnits);
+        const reaudit = await runStage('AUDIT_AMBIGUOUS_DROP', buildDependencyAuditMessages(orderedUnits, trimmedGraph), options.exactRequestFingerprint, validatedAuditSchema, options.auditor, options.checkpoint);
+        if (reaudit.verdict === 'PASS') {
+          // Mirrors the ordinary PASS branch above exactly (same double
+          // check on an already schema-enforced invariant): publish only on
+          // a fresh PASS, and only PASS edges become TRUSTED.
+          if (reaudit.findings.length !== 0) throw new DependencyGraphBuildError('PASS audit cannot contain findings.');
+          const edges: DependencyEdgeInput[] = trimmedGraph.edges.map((edge) => ({ ...edge, auditStatus: 'TRUSTED' }));
+          return createDependencyGraph({
+            units: orderedUnits.map((unit) => ({ unitId: unit.unitId, sourceSpan: unit.sourceSpan, evidenceByField: unit.evidenceByField })),
+            edges,
+            omittedEdges: omissions,
+          });
+        }
+        // Distinct from both other terminal messages below: this graph was
+        // never ambiguous-and-untouched -- it specifically had its hedged
+        // relations removed and was given a fresh, focused re-audit, and
+        // THAT still did not come back clean.
+        throw new DependencyGraphBuildError(
+          `Dependency graph remained ambiguous after dropping ${omissions.length} solely-ambiguous relation(s) and re-auditing once more; refusing to publish it.`
+        );
+      }
       throw new DependencyGraphBuildError(
         hasUnresolvedAmbiguity(audit)
           ? `Dependency graph is still ambiguous after ${DEPENDENCY_GRAPH_MAX_REPAIRS} focused repairs; refusing to publish it.`

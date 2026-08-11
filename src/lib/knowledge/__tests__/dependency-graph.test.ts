@@ -77,6 +77,48 @@ describe('dependency graph integrity and closure', () => {
     expect(expandDependencyClosure(graph, ['a'], { maxDepth: 1 })).toMatchObject({ truncated: true, entries: [{ unitId: 'a' }, { unitId: 'b' }] });
   });
 
+  it('records and round-trips omitted edges, keeps them out of traversal/cycle/bounds checks, and binds them into the fingerprint', () => {
+    const a = unit('a'); const b = unit('b'); const c = unit('c');
+    const graph = createDependencyGraph({
+      units: [a, b, c],
+      edges: [edge(a, b, 'REQUIRES')],
+      omittedEdges: [{ fromUnitId: b.unitId, toUnitId: c.unitId, relation: 'REQUIRES', reason: 'Ambiguous direction.' }],
+    });
+    expect(graph.omittedEdges).toEqual([{ fromUnitId: 'b', toUnitId: 'c', relation: 'REQUIRES', reason: 'Ambiguous direction.' }]);
+    // Never traversable: closure from 'b' does not reach 'c' via the
+    // omission (only a real REQUIRES a->b edge exists, and it does not
+    // pull 'a' in from 'b' either -- REQUIRES only flows in its declared
+    // direction).
+    expect(expandDependencyClosure(graph, ['b']).entries.map((entry) => entry.unitId)).toEqual(['b']);
+    // Bound to the fingerprint -- an omission is not decorative metadata,
+    // tampering with it must be detectable exactly like tampering with an
+    // edge or a bound already is.
+    const withoutOmission = createDependencyGraph({ units: [a, b, c], edges: [edge(a, b, 'REQUIRES')] });
+    expect(graph.fingerprint).not.toBe(withoutOmission.fingerprint);
+    // Round-trips through serialize/hydrate.
+    const document = serializeDependencyGraph(graph);
+    expect(document.omittedEdges).toEqual(graph.omittedEdges);
+    expect(hydrateDependencyGraph(document, [a, b, c]).fingerprint).toBe(graph.fingerprint);
+    // A never-proposed pair is representable too (relation: null) -- see
+    // dependency-graph-builder.ts's resolveAmbiguousDrop.
+    const nullRelationGraph = createDependencyGraph({
+      units: [a, b], edges: [],
+      omittedEdges: [{ fromUnitId: a.unitId, toUnitId: b.unitId, relation: null, reason: 'Considered, not asserted.' }],
+    });
+    expect(nullRelationGraph.omittedEdges[0]!.relation).toBeNull();
+    // An omission referencing an unknown unit is rejected just like a real
+    // edge referencing one would be.
+    expect(() => createDependencyGraph({
+      units: [a, b], edges: [],
+      omittedEdges: [{ fromUnitId: 'a', toUnitId: 'ghost', relation: null, reason: 'x' }],
+    })).toThrow(/missing endpoint/);
+    // A pre-existing sidecar document written before omission-tracking
+    // existed (no omittedEdges key at all) still hydrates, defaulting to
+    // zero omissions instead of failing to parse.
+    const legacyDocument = { edges: document.edges, bounds: document.bounds, fingerprint: withoutOmission.fingerprint };
+    expect(hydrateDependencyGraph(legacyDocument, [a, b, c]).omittedEdges).toEqual([]);
+  });
+
   it('strictly serializes and hydrates a fingerprint bound to endpoints and bounds', () => {
     const a = unit('a'); const b = unit('b');
     const graph = createDependencyGraph({ units: [a, b], edges: [edge(a, b, 'REQUIRES')] });
