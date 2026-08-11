@@ -214,4 +214,89 @@ describe('buildAuditedDependencyGraph', () => {
     expect(prompt).toMatch(/real cited evidence/i);
     expect(prompt).toMatch(/drop the edge entirely/i);
   });
+
+  // --- aurora-v6 forged-evidence repair failure (scratchpad/aurora-v6/call-trace.jsonl) ---
+  // Root cause was case (a), a prompt/contract gap, not guard hallucination or
+  // spanKey normalisation: the rejected edge (edgeId b0baef49...,
+  // 31d54a3b64736657 -> b4a9f07af40342af) cited evidence.from as
+  // "разрешённое краткое надавливание в общественном месте не превращается в
+  // разрешение на полноценное чесание через одежду" -- a real, verbatim,
+  // contiguous substring of unit 31d54a3b64736657's actual sourceSpan (per
+  // scripts/fixtures/.../extraction-artifact.json and the literal unit
+  // payload sent to the model in that same call), but not the WHOLE listed
+  // quote (it drops the leading clause and trailing period). The prompt never
+  // told the model that citing a sub-quote of a multi-clause span is
+  // forbidden, and never showed evidenceByField at all (only sourceSpan) --
+  // so a model choosing the semantically-relevant clause out of a two-clause
+  // span was never told that was non-compliant, and had no visibility into
+  // any OTHER real per-field span it might otherwise have cited instead.
+
+  it('sends every citable span per unit -- sourceSpan AND each evidenceByField entry -- not sourceSpan alone (previously evidenceByField was never shown, so a unit\'s only OTHER real evidence was undiscoverable by the model)', () => {
+    const richUnit = {
+      unitId: 'rich',
+      statement: 'General priority rule; a specific example illustrates it.',
+      sourceSpan: span('General rule applies. For example, the specific example applies.'),
+      evidenceByField: {
+        statement: span('General rule applies. For example, the specific example applies.'),
+        triggerCondition: { anchor: 'block', quote: 'the specific example applies' },
+      },
+      sourceBlockAnchor: 'source', contentHash: 'rich', parentRuleRef: null,
+    } as unknown as PersistedKnowledgeUnit;
+    const proposalUserContent = buildDependencyProposalMessages([richUnit])[1]!.content;
+    expect(proposalUserContent).toContain('"evidenceByField"');
+    expect(proposalUserContent).toContain('"triggerCondition"');
+    expect(proposalUserContent).toContain('the specific example applies');
+    const repairUserContent = buildDependencyRepairMessages([richUnit], proposal(), repairAudit)[1]!.content;
+    expect(repairUserContent).toContain('"triggerCondition"');
+    expect(repairUserContent).toContain('the specific example applies');
+  });
+
+  it('tells the model plainly that a cited span must be an exact, complete, unedited listed span -- never a trimmed sub-quote', () => {
+    for (const prompt of [
+      buildDependencyProposalMessages(units)[0]!.content,
+      buildDependencyRepairMessages(units, proposal(), repairAudit)[0]!.content,
+    ]) {
+      expect(prompt).toMatch(/character for character/i);
+      expect(prompt).toMatch(/sub-quote/i);
+      expect(prompt).toMatch(/(trim|shorten)/i);
+    }
+  });
+
+  it('still rejects a real but partial sub-quote of a multi-clause sourceSpan as forged -- reproduces the live aurora-v6 repair failure verbatim, proving the anti-forgery guard was not loosened into a substring match by showing more evidence in the prompt', async () => {
+    const multiClause = {
+      unitId: 'multi', statement: 'x',
+      sourceSpan: span('Если к ситуации подходят несколько пунктов, применяются все, а специальное правило имеет приоритет над общим. Например, разрешённое краткое надавливание в общественном месте не превращается в разрешение на полноценное чесание через одежду.'),
+      evidenceByField: { statement: span('Если к ситуации подходят несколько пунктов, применяются все, а специальное правило имеет приоритет над общим. Например, разрешённое краткое надавливание в общественном месте не превращается в разрешение на полноценное чесание через одежду.') },
+      sourceBlockAnchor: 'source', contentHash: 'multi', parentRuleRef: null,
+    } as unknown as PersistedKnowledgeUnit;
+    const target = units[0]!;
+    // The exact substring the live model cited: real text, but missing the
+    // leading clause and trailing period of the listed quote.
+    const trimmedSubQuote = { anchor: 'block', quote: 'разрешённое краткое надавливание в общественном месте не превращается в разрешение на полноценное чесание через одежду' };
+    const proposer = async () => ({
+      edges: [{ ...edge(multiClause.unitId, target.unitId), evidence: { from: trimmedSubQuote, to: target.sourceSpan } }],
+    });
+    await expect(buildAuditedDependencyGraph({
+      units: [...units, multiClause], proposer, exactRequestFingerprint: fingerprint,
+      auditor: async () => pass, repairer: async () => proposal(),
+    })).rejects.toThrow(/forged dependency evidence/i);
+  });
+
+  it('accepts the same edge once the FULL listed span is cited verbatim instead of a trimmed sub-quote', async () => {
+    const multiClause = {
+      unitId: 'multi', statement: 'x',
+      sourceSpan: span('Если к ситуации подходят несколько пунктов, применяются все, а специальное правило имеет приоритет над общим. Например, разрешённое краткое надавливание в общественном месте не превращается в разрешение на полноценное чесание через одежду.'),
+      evidenceByField: { statement: span('Если к ситуации подходят несколько пунктов, применяются все, а специальное правило имеет приоритет над общим. Например, разрешённое краткое надавливание в общественном месте не превращается в разрешение на полноценное чесание через одежду.') },
+      sourceBlockAnchor: 'source', contentHash: 'multi', parentRuleRef: null,
+    } as unknown as PersistedKnowledgeUnit;
+    const target = units[0]!;
+    const proposer = async () => ({
+      edges: [{ ...edge(multiClause.unitId, target.unitId), evidence: { from: multiClause.sourceSpan, to: target.sourceSpan } }],
+    });
+    const graph = await buildAuditedDependencyGraph({
+      units: [...units, multiClause], proposer, exactRequestFingerprint: fingerprint,
+      auditor: async () => pass, repairer: async () => proposal(),
+    });
+    expect(graph.edges).toHaveLength(1);
+  });
 });

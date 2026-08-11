@@ -75,20 +75,21 @@ export class FileDependencyGraphCheckpoint implements DependencyGraphCheckpoint 
   }
 }
 
-export const DEPENDENCY_GRAPH_BUILDER_POLICY_VERSION = '2026-08-11-audited-dependency-graph-v1';
+export const DEPENDENCY_GRAPH_BUILDER_POLICY_VERSION = '2026-08-11-audited-dependency-graph-v2';
 export const DEPENDENCY_GRAPH_MAX_REPAIRS = 2;
 
 const POLICY = `Build a dependency graph from the complete trusted-unit set. Be neutral and evidence-bound.
 REQUIRES means fromUnitId cannot be safely/actionably applied without toUnitId. CO_REQUIRED means both clauses are jointly mandatory peers. ALTERNATIVE means either route can satisfy the same role. Independence is represented by no edge, never by inventing a relation.
 Inspect cross-block prerequisites, multiple mandatory clauses within the same procedure, and alternative routes. Do not assume that block boundaries, proximity, ordering, or shared wording imply a relation. Every edge needs evidence from listed units.
+Each unit lists every span you may cite as "sourceSpan" plus zero or more per-field entries under "evidenceByField" (e.g. facets/triggerCondition/numericConstraint) -- evidence.from and evidence.to must each copy the COMPLETE anchor/quote pair of exactly one of those listed spans for the cited unit, character for character. Never trim, shorten, paraphrase, merge separate spans, or select a sub-quote out of a longer listed quote, even when only part of it is relevant to this specific edge: copy a listed quote in full exactly as given, or omit the edge instead of citing a partial match.
 Every proposed/repaired edge must use auditStatus "PENDING". Only the deterministic publication boundary may change it to "TRUSTED" after a full PASS audit.`;
 
 function digest(stage: string, messages: readonly ChatMessage[], exactRequestFingerprint: unknown): string {
   return createHash('sha256').update(JSON.stringify({ stage, messages, exactRequestFingerprint }), 'utf8').digest('hex');
 }
 function unitPayload(units: readonly PersistedKnowledgeUnit[]): string {
-  return JSON.stringify([...units].sort((left, right) => left.unitId.localeCompare(right.unitId)).map(({ unitId, statement, sourceSpan, sourceBlockAnchor, parentRuleRef }) =>
-    ({ unitId, statement, sourceSpan, sourceBlockAnchor, parentRuleRef })), null, 2);
+  return JSON.stringify([...units].sort((left, right) => left.unitId.localeCompare(right.unitId)).map(({ unitId, statement, sourceSpan, evidenceByField, sourceBlockAnchor, parentRuleRef }) =>
+    ({ unitId, statement, sourceSpan, evidenceByField, sourceBlockAnchor, parentRuleRef })), null, 2);
 }
 export function buildDependencyProposalMessages(units: readonly PersistedKnowledgeUnit[]): ChatMessage[] {
   return [{
