@@ -68,6 +68,41 @@ describe('synthesizeFromSelectedUnits — что видит генератор',
     expect(prompt.question).toContain('15 секунд');
   });
 
+  it('передаёт relevanceRationale выбранного unit-а генератору (Fix 3)', async () => {
+    const generate = generator();
+
+    await synthesizeFromSelectedUnits(
+      pack({
+        items: [
+          {
+            unitId: 'u1',
+            kind: 'PROCEDURE_STEP',
+            statement: 'Не дольше 15 секунд подряд.',
+            citation: { anchor: 'a1', quote: 'не дольше 15 секунд' },
+            numericConstraint: { factKey: 'max_seconds', value: 15, unit: 'seconds' },
+            relevanceRationale: 'Описывает прямые действия после завершения процедуры.',
+          },
+        ],
+      }),
+      'Сколько можно чесать?',
+      generate
+    );
+
+    const prompt = (generate as unknown as { mock: { calls: [SynthesisPrompt][] } }).mock.calls[0][0];
+    expect(prompt.evidence[0].relevanceRationale).toBe(
+      'Описывает прямые действия после завершения процедуры.'
+    );
+  });
+
+  it('relevanceRationale отсутствует у генератора, если его не было в pack (Fix 3)', async () => {
+    const generate = generator();
+
+    await synthesizeFromSelectedUnits(pack(), 'Сколько можно чесать?', generate);
+
+    const prompt = (generate as unknown as { mock: { calls: [SynthesisPrompt][] } }).mock.calls[0][0];
+    expect(prompt.evidence[0].relevanceRationale).toBeUndefined();
+  });
+
   it('передаёт source anchors — цитаты строятся из них, не из номера кандидата', async () => {
     const generate = generator();
 

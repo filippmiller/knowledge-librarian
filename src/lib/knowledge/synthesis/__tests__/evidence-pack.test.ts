@@ -284,3 +284,63 @@ describe('buildEvidencePack — overridden direct-parent supporting context', ()
     )).toThrow(/selected-child precedence/);
   });
 });
+
+/**
+ * Q08 postfix, Fix 3 (2026-08-11): decision-relevance's OWN rationale for why
+ * a unit is relevant threaded through to synthesis, so it does not have to
+ * re-derive a bridging judgement an earlier stage already made. This is
+ * additive plumbing — a THIRD, optional argument to `buildEvidencePack` — not
+ * a new requirement: every existing call site above (no third argument) must
+ * keep behaving exactly as before.
+ */
+describe('buildEvidencePack — relevanceRationale (Fix 3)', () => {
+  it('attaches the rationale from the map to the matching selected item', () => {
+    const pack = buildEvidencePack(
+      [unit()],
+      resolution({ selected: ['u1'] }),
+      new Map([['u1', 'Описывает прямые действия после завершения процедуры.']])
+    );
+
+    expect(pack.items[0].relevanceRationale).toBe(
+      'Описывает прямые действия после завершения процедуры.'
+    );
+  });
+
+  it('leaves relevanceRationale undefined when no map is passed at all — old call sites unaffected', () => {
+    const pack = buildEvidencePack([unit()], resolution({ selected: ['u1'] }));
+
+    expect(pack.items[0].relevanceRationale).toBeUndefined();
+  });
+
+  it('leaves relevanceRationale undefined for a unit absent from the map, even though the unit IS selected', () => {
+    // Simulates exactly the case the classifier must fail closed on: this
+    // unit reached the pack through resolution (selected), but the caller's
+    // rationale map does not carry it — e.g. because its decision-relevance
+    // verdict was IRRELEVANT and got filtered out upstream.
+    const pack = buildEvidencePack(
+      [unit()],
+      resolution({ selected: ['u1'] }),
+      new Map([['some-other-unit', 'не относится к u1']])
+    );
+
+    expect(pack.items[0].relevanceRationale).toBeUndefined();
+  });
+
+  it('also attaches to negativeEvidence items — the pack treats selected and negative evidence uniformly', () => {
+    const negative = unit({ numericConstraint: { factKey: 'maximum', value: 3, unit: 'times' } });
+    const pack = buildEvidencePack(
+      [negative],
+      resolution({
+        selected: [],
+        negativeEvidence: ['u1'],
+        selectedApplicability: [{ unitId: 'u1', mode: 'NEGATIVE', presentationConditions: [] }],
+      }),
+      new Map([['u1', 'Условие исключения признано неактивным, но relevant к вопросу.']])
+    );
+
+    expect(pack.items).toHaveLength(1);
+    expect(pack.items[0].relevanceRationale).toBe(
+      'Условие исключения признано неактивным, но relevant к вопросу.'
+    );
+  });
+});

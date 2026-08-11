@@ -126,6 +126,7 @@ import {
 import {
   synthesizeFromSelectedUnits,
   type AnswerGenerator,
+  type SynthesisPrompt,
 } from '../src/lib/knowledge/synthesis/synthesize';
 import type { DraftAnswer } from '../src/lib/knowledge/synthesis/draft-answer';
 import {
@@ -1219,6 +1220,89 @@ const answerSchema = z.strictObject({
   citedUnitIds: z.array(z.string()).readonly(),
 });
 
+/**
+ * Label for the upstream decision-relevance rationale rendered per evidence
+ * item (Fix 3, 2026-08-11 — threading `decisionRelevance.trace[].relevance.
+ * reason` through so synthesis does not have to re-derive a bridging
+ * judgement an earlier stage already made). Deliberately given BOTH an
+ * inline self-explanatory label here AND a dedicated system-prompt sentence
+ * below — the same double-reinforcement OVERRIDDEN_PARENT_CONTEXT gets
+ * (inline "РОЛЬ:" line + its own system sentence), because both are status
+ * distinctions the model must not blur: this text explains why a unit was
+ * included, it is never itself a fact the answer may state or cite.
+ */
+const RELEVANCE_RATIONALE_LABEL = 'ПОМЕТКА ПРЕДЫДУЩЕГО ЭТАПА (служебная, не текст источника)';
+
+/**
+ * Fix 3 (2026-08-11): carries the classifier's OWN rationale for why a unit
+ * is relevant into synthesis, instead of letting synthesis re-derive a
+ * bridging judgement an earlier stage already made and explained (root cause
+ * of the Q08 refusal-while-holding-the-answer failure).
+ *
+ * Only RELEVANT/CONDITIONALLY_RELEVANT entries qualify — an IRRELEVANT
+ * verdict must never be rendered as if it were a positive relevance
+ * rationale, even for a unit that ends up in the evidence pack through a
+ * different, deterministic path (e.g. an INACTIVE-trigger unit kept as
+ * negative evidence, or a challenge candidate promoted by recovery). Pulled
+ * out as its own pure, exported function — rather than left inline at the
+ * call site — specifically so this filtering rule has a unit test that does
+ * not require a paid call or the full engine pipeline.
+ */
+export function buildRelevanceRationaleByUnitId(
+  trace: readonly GatedCandidate[]
+): ReadonlyMap<string, string> {
+  return new Map(
+    trace
+      .filter((entry) => entry.relevance.verdict !== 'IRRELEVANT')
+      .map((entry) => [entry.unitId, entry.relevance.reason] as const)
+  );
+}
+
+/**
+ * Pure prompt builder — no network call. Exported so tests can assert on the
+ * exact rendered prompt without a paid completion (mirrors
+ * `buildExceptionRepairPromptMessages` elsewhere in this file). Also fed into
+ * `buildQuestionJournalFingerprint` below via `.toString()`: THIS function,
+ * not `buildRealAnswerGenerator`, is what must change identity whenever the
+ * synthesis prompt's behavior changes.
+ */
+export function buildRealAnswerPromptMessages(prompt: SynthesisPrompt): ChatMessage[] {
+  const evidenceText = prompt.evidence
+    .map((e) => `[${e.unitId}] ${e.statement}${e.numericConstraint ? ` (${e.numericConstraint.factKey}: ${e.numericConstraint.value} ${e.numericConstraint.unit})` : ''}${(e.presentationConditions?.length ?? 0) > 0 ? `\nУСЛОВИЯ ПРИМЕНИМОСТИ: ${e.presentationConditions!.map((condition) => `"${condition}"`).join('; ')}` : ''}${e.applicabilityMode === 'NEGATIVE' ? '\nРЕЖИМ: условие достоверно НЕ выполнено; используй правило только как основание для отказа/отрицания, никогда как разрешение.' : e.applicabilityMode === 'CONDITIONAL' ? '\nРЕЖИМ: условие неизвестно; правило можно сообщить только как явно условную ветку, никогда как безусловное разрешение.' : ''}${e.relevanceRationale ? `\n${RELEVANCE_RATIONALE_LABEL}: "${e.relevanceRationale}"` : ''}`)
+    .join('\n');
+  const supportingContextText = prompt.supportingContext
+    .map((e) =>
+      `[${e.unitId}] ${e.statement}${e.numericConstraint ? ` (${e.numericConstraint.factKey}: ${e.numericConstraint.value} ${e.numericConstraint.unit})` : ''}\n` +
+      `РОЛЬ: OVERRIDDEN_PARENT_CONTEXT — это НЕ действующее правило. Оно переопределено выбранным исключением [${e.overriddenByUnitId}]. ` +
+      `Разрешено использовать только его дополнительные процедурные детали, не противоречащие [${e.overriddenByUnitId}]; выбранное исключение всегда имеет приоритет. ` +
+      `Если ответ использует этот контекст, citedUnitIds обязан включать и [${e.unitId}], и [${e.overriddenByUnitId}].`
+    )
+    .join('\n');
+  return [
+    {
+      role: 'system',
+      content:
+        'Ты отвечаешь на вопрос СТРОГО на основе перечисленных unit\'ов знания — не добавляй ничего от себя. ' +
+        'citedUnitIds обязан перечислять id ровно тех unit\'ов, на утверждениях которых построен ответ. ' +
+        'OVERRIDDEN_PARENT_CONTEXT никогда не является самостоятельным разрешением или запретом: выбранное исключение имеет безусловный приоритет, и контекст всегда цитируется вместе с ним. ' +
+        'Каждое УСЛОВИЕ ПРИМЕНИМОСТИ явно привяжи к соответствующему правилу; условное правило запрещено подавать как безусловное. ' +
+        'Каждый перечисленный ниже unit уже прошёл проверку релевантности на предыдущем этапе конвейера — не отказывайся отвечать фразой вида «в предоставленных данных нет ответа», если хотя бы один unit отвечает на вопрос по существу, пусть и другими словами, чем в вопросе; это не отменяет обязанность сослаться на использованный unit в citedUnitIds. ' +
+        'Если УСЛОВИЯ ПРИМЕНИМОСТИ одного правила перечисляют несколько альтернатив через «либо»/«или», ответ обязан назвать все альтернативы этого правила — пропускать часть перечня запрещено, даже если вопрос назвал лишь некоторые из них; формулировку можно менять, смысл каждой альтернативы — нет. ' +
+        `Строка «${RELEVANCE_RATIONALE_LABEL}» у unit'а — объяснение предыдущего этапа конвейера, почему unit сочли относящимся к вопросу: это не факт документа, и ссылаться на неё как на источник или приводить её в тексте ответа запрещено. ` +
+        `${prompt.answerTextPolicy} ` +
+        'Ответ СТРОГО JSON: {"text": "...", "citedUnitIds": ["..."]}',
+    },
+    {
+      role: 'user',
+      content:
+        `Вопрос: "${prompt.question}"\n\nДействующее выбранное знание:\n${evidenceText}` +
+        (supportingContextText.length > 0
+          ? `\n\nНеоперативный контекст переопределённых прямых родителей:\n${supportingContextText}`
+          : ''),
+    },
+  ];
+}
+
 function buildRealAnswerGenerator(
   runConfig: ReturnType<typeof resolveExtractionRunConfig>,
   ledger: CostLedger,
@@ -1229,17 +1313,6 @@ function buildRealAnswerGenerator(
   purpose = 'synthesis'
 ): AnswerGenerator {
   return async (prompt) => {
-    const evidenceText = prompt.evidence
-      .map((e) => `[${e.unitId}] ${e.statement}${e.numericConstraint ? ` (${e.numericConstraint.factKey}: ${e.numericConstraint.value} ${e.numericConstraint.unit})` : ''}${(e.presentationConditions?.length ?? 0) > 0 ? `\nУСЛОВИЯ ПРИМЕНИМОСТИ: ${e.presentationConditions!.map((condition) => `"${condition}"`).join('; ')}` : ''}${e.applicabilityMode === 'NEGATIVE' ? '\nРЕЖИМ: условие достоверно НЕ выполнено; используй правило только как основание для отказа/отрицания, никогда как разрешение.' : e.applicabilityMode === 'CONDITIONAL' ? '\nРЕЖИМ: условие неизвестно; правило можно сообщить только как явно условную ветку, никогда как безусловное разрешение.' : ''}`)
-      .join('\n');
-    const supportingContextText = prompt.supportingContext
-      .map((e) =>
-        `[${e.unitId}] ${e.statement}${e.numericConstraint ? ` (${e.numericConstraint.factKey}: ${e.numericConstraint.value} ${e.numericConstraint.unit})` : ''}\n` +
-        `РОЛЬ: OVERRIDDEN_PARENT_CONTEXT — это НЕ действующее правило. Оно переопределено выбранным исключением [${e.overriddenByUnitId}]. ` +
-        `Разрешено использовать только его дополнительные процедурные детали, не противоречащие [${e.overriddenByUnitId}]; выбранное исключение всегда имеет приоритет. ` +
-        `Если ответ использует этот контекст, citedUnitIds обязан включать и [${e.unitId}], и [${e.overriddenByUnitId}].`
-      )
-      .join('\n');
     const correlation: CallTraceCorrelation = {
       runId, stage: purpose, caseId, engineProvider: runConfig.provider, engineModel: runConfig.model,
       engineProfile,
@@ -1247,26 +1320,7 @@ function buildRealAnswerGenerator(
     const result = await recordOnFailure(purpose, ledger, traceLog, correlation, () =>
       structured({
         schema: answerSchema,
-        messages: [
-          {
-            role: 'system',
-            content:
-              'Ты отвечаешь на вопрос СТРОГО на основе перечисленных unit\'ов знания — не добавляй ничего от себя. ' +
-              'citedUnitIds обязан перечислять id ровно тех unit\'ов, на утверждениях которых построен ответ. ' +
-              'OVERRIDDEN_PARENT_CONTEXT никогда не является самостоятельным разрешением или запретом: выбранное исключение имеет безусловный приоритет, и контекст всегда цитируется вместе с ним. ' +
-              'Каждое УСЛОВИЕ ПРИМЕНИМОСТИ явно привяжи к соответствующему правилу; условное правило запрещено подавать как безусловное. ' +
-              `${prompt.answerTextPolicy} ` +
-              'Ответ СТРОГО JSON: {"text": "...", "citedUnitIds": ["..."]}',
-          },
-          {
-            role: 'user',
-            content:
-              `Вопрос: "${prompt.question}"\n\nДействующее выбранное знание:\n${evidenceText}` +
-              (supportingContextText.length > 0
-                ? `\n\nНеоперативный контекст переопределённых прямых родителей:\n${supportingContextText}`
-                : ''),
-          },
-        ],
+        messages: buildRealAnswerPromptMessages(prompt),
         runConfig,
       })
     );
@@ -1388,6 +1442,7 @@ async function runEngineOnQuestion(
     );
 
     const resolution = resolveKnowledgeSet(decisionRelevance.relevant, queryFrame);
+    const relevanceRationaleByUnitId = buildRelevanceRationaleByUnitId(decisionRelevance.trace);
 
     if (resolution.disposition !== 'ANSWER') {
       return {
@@ -1420,7 +1475,7 @@ async function runEngineOnQuestion(
     const selectedUnits = [...evidenceUnitIds]
       .map((id) => ctx.unitsById.get(id))
       .filter((u): u is PersistedKnowledgeUnit => u !== undefined);
-    const evidencePack = buildEvidencePack(selectedUnits, resolution);
+    const evidencePack = buildEvidencePack(selectedUnits, resolution, relevanceRationaleByUnitId);
     assertOracleTaintPolicy(ctx.taintDetector, 'ENGINE_INPUT', evidencePack, `engine input (EvidencePack, ${input.caseId})`);
 
     const draft = await synthesizeFromSelectedUnits(
@@ -1502,7 +1557,7 @@ async function runEngineOnQuestion(
         const recoveredUnits = [...recoveredResolution.selected, ...(recoveredResolution.negativeEvidence ?? [])]
           .map((id) => ctx.unitsById.get(id))
           .filter((unit): unit is PersistedKnowledgeUnit => unit !== undefined);
-        const recoveredPack = buildEvidencePack(recoveredUnits, recoveredResolution);
+        const recoveredPack = buildEvidencePack(recoveredUnits, recoveredResolution, relevanceRationaleByUnitId);
         assertOracleTaintPolicy(ctx.taintDetector, 'ENGINE_INPUT', recoveredPack, `recovery engine input (EvidencePack, ${input.caseId})`);
         const recoveredDraft = await synthesizeFromSelectedUnits(
           recoveredPack, input.question, ctx.recoveryAnswerGeneratorForCase(input.caseId)
@@ -1989,7 +2044,7 @@ async function runQuestionsAgainstSnapshot(
     conditionPreservationSchema: conditionPreservationResponseSchema._zod.def,
     conditionPreservationBehavior: conditionedEvidenceOf.toString(),
     overriddenParentContext: overriddenParentContextBehaviorProbe(),
-    synthesis: buildRealAnswerGenerator.toString(),
+    synthesis: buildRealAnswerPromptMessages.toString(),
     synthesisSchema: answerSchema._zod.def,
     oracleTaintPolicy: {
       version: ORACLE_TAINT_POLICY_VERSION,

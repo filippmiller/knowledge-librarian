@@ -33,6 +33,17 @@ export interface EvidenceItem {
   /** CONDITIONAL must retain its condition; NEGATIVE proves the condition is
    * false and may support only a denial, never a permission. */
   readonly applicabilityMode?: 'NORMAL' | 'CONDITIONAL' | 'NEGATIVE';
+  /**
+   * Why an earlier stage (the decision-relevance classifier) judged this
+   * unit relevant to the question — e.g. "Описывает прямые действия после
+   * завершения процедуры". THIS IS NOT EVIDENCE: not source text, not a
+   * quote, not something `citedUnitIds` may point at. It exists purely so
+   * synthesis does not have to re-derive, with less context, a bridging
+   * judgement an earlier stage already made and explained. Optional and
+   * absent by default — callers that do not pass a rationale map to
+   * `buildEvidencePack` get the previous behavior unchanged.
+   */
+  readonly relevanceRationale?: string;
 }
 
 /** An overridden rule is visible only as explanatory/procedural context.  It
@@ -69,7 +80,14 @@ export function overriddenParentContextBehaviorProbe(): unknown {
 
 export function buildEvidencePack(
   units: readonly PersistedKnowledgeUnit[],
-  resolution: ResolutionDecision
+  resolution: ResolutionDecision,
+  /**
+   * Optional unitId -> upstream decision-relevance rationale. When present,
+   * each matching evidence item carries it as `relevanceRationale` (see that
+   * field's docstring for what it is and is not). Absent unitIds simply get
+   * no rationale — this is additive, not a new requirement.
+   */
+  relevanceRationaleByUnitId?: ReadonlyMap<string, string>
 ): EvidencePack {
   if (resolution.disposition !== 'ANSWER') {
     throw new Error(
@@ -182,6 +200,7 @@ export function buildEvidencePack(
         ...(applicability?.presentationConditions ?? []),
       ])],
       applicabilityMode: applicability?.mode ?? 'NORMAL',
+      relevanceRationale: relevanceRationaleByUnitId?.get(unitId),
     });
   }
 

@@ -287,3 +287,59 @@ describe('verifyAnswerClaims — отчётность', () => {
     expect(result.violations.map((v) => v.code)).toContain('empty_answer');
   });
 });
+
+/**
+ * Q08 postfix, Fix 3 (2026-08-11): `EvidenceItem.relevanceRationale` (upstream
+ * decision-relevance rationale, threaded through for synthesis) must NOT
+ * become a backdoor grounding source or a citable pseudo-unit. This file's
+ * `verifyAnswerClaims` itself is UNCHANGED by Fix 3 — these tests exist to
+ * prove that fact: they exercise only the existing, untouched verifier
+ * against packs that now happen to carry the new optional field.
+ */
+describe('verifyAnswerClaims — relevanceRationale не является evidence (Fix 3 non-regression)', () => {
+  it('число, встречающееся ТОЛЬКО в relevanceRationale, не заземляет числовое утверждение', () => {
+    const rationalePack = pack({
+      items: [
+        {
+          unitId: 'u1',
+          kind: 'PROCEDURE_STEP',
+          statement: 'Не дольше 15 секунд подряд.',
+          citation: { anchor: 'a1', quote: 'не дольше 15 секунд' },
+          numericConstraint: { factKey: 'max_seconds', value: 15, unit: 'seconds' },
+          relevanceRationale: 'Отвечает на вопрос напрямую: максимум 9 циклов в этой процедуре.',
+        },
+      ],
+    });
+
+    const result = verifyAnswerClaims(
+      draft({ text: 'Не дольше 15 секунд, максимум 9 циклов.' }),
+      rationalePack
+    );
+
+    expect(result.verified).toBe(false);
+    expect(
+      result.violations.some((v) => v.code === 'unsupported_number' && v.detail.includes('9'))
+    ).toBe(true);
+  });
+
+  it('дословное цитирование текста rationale как citedUnitIds не проходит — это не unitId', () => {
+    const rationaleText = 'Описывает прямые действия после завершения процедуры.';
+    const rationalePack = pack({
+      items: [
+        {
+          unitId: 'u1',
+          kind: 'PROCEDURE_STEP',
+          statement: 'Не дольше 15 секунд подряд.',
+          citation: { anchor: 'a1', quote: 'не дольше 15 секунд' },
+          numericConstraint: { factKey: 'max_seconds', value: 15, unit: 'seconds' },
+          relevanceRationale: rationaleText,
+        },
+      ],
+    });
+
+    const result = verifyAnswerClaims(draft({ citedUnitIds: [rationaleText] }), rationalePack);
+
+    expect(result.verified).toBe(false);
+    expect(result.violations.map((v) => v.code)).toContain('unknown_citation');
+  });
+});

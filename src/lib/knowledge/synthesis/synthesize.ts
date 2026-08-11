@@ -36,6 +36,12 @@ export interface SynthesisEvidence {
   readonly numericConstraint: NumericConstraint | null;
   readonly presentationConditions?: readonly string[];
   readonly applicabilityMode?: 'NORMAL' | 'CONDITIONAL' | 'NEGATIVE';
+  /** See `EvidenceItem.relevanceRationale` (evidence-pack.ts): an upstream
+   * stage's explanation of why this unit is relevant to the question. NOT
+   * evidence, NOT source text, and never a valid citation target — a
+   * generator may read it to understand why the unit was included, but must
+   * render it (if at all) as a machine note, never as document content. */
+  readonly relevanceRationale?: string;
 }
 
 export interface SynthesisPrompt {
@@ -85,6 +91,7 @@ export async function synthesizeFromSelectedUnits(
       numericConstraint: item.numericConstraint,
       presentationConditions: item.presentationConditions,
       applicabilityMode: item.applicabilityMode,
+      relevanceRationale: item.relevanceRationale,
     })),
     supportingContext: pack.supportingContext ?? [],
     answerTextPolicy: SYNTHESIS_ANSWER_TEXT_POLICY,
