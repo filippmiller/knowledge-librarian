@@ -284,7 +284,9 @@ describe('контракт TriggerCondition', () => {
             ? 'EXPLICIT'
             : key === 'reachability'
               ? 'LIMITED'
-              : true;
+              : key === 'resourceAvailability'
+                ? 'AVAILABLE'
+                : true;
       expect(triggerConditionSchema.safeParse({ all: [{ fact: key, equals: sample }] }).success).toBe(
         true
       );

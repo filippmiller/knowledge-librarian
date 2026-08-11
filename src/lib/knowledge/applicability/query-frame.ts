@@ -174,6 +174,7 @@ export const queryFactMapSchema = z.strictObject({
   consentStatus: queryFactStateSchema(TRIGGER_FACT_REGISTRY.consentStatus.valueSchema),
   reachability: queryFactStateSchema(TRIGGER_FACT_REGISTRY.reachability.valueSchema),
   helperPresent: queryFactStateSchema(TRIGGER_FACT_REGISTRY.helperPresent.valueSchema),
+  resourceAvailability: queryFactStateSchema(TRIGGER_FACT_REGISTRY.resourceAvailability.valueSchema),
 });
 
 type Assert<T extends true> = T;

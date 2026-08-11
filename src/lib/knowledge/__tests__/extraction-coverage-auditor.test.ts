@@ -143,30 +143,53 @@ describe('buildCoverageAuditPromptMessages — pure, no network', () => {
     expect(system).toContain('корректно использует "times"');
   });
 
-  it('b6 presentation-only no-water alternative is explicitly covered when verbatim condition and exact uncertainty survive', () => {
-    const text = 'При отсутствии воды допустим кожный антисептик.';
+  it('b6 presentation-only step-order alternative is explicitly covered when verbatim condition and exact uncertainty survive', () => {
+    const text = 'Если так удобнее исполнителю, шаги 2 и 3 можно поменять местами.';
     const messages = buildCoverageAuditPromptMessages(text, [{
       kind: 'PROCEDURE_STEP',
       statement: text,
       quote: text,
-      extractionRef: 'antiseptic',
+      extractionRef: 'step-order',
       parentExtractionRef: null,
       triggerCondition: null,
       numericConstraint: null,
       uncertainties: [{
         kind: 'UNRECOGNIZED_TRIGGER_CONDITION',
-        description: 'условие отсутствия воды не входит в закрытый каталог trigger-фактов',
-        quote: 'При отсутствии воды',
+        description: 'условие удобства исполнителя не входит в закрытый каталог trigger-фактов',
+        quote: 'Если так удобнее исполнителю',
       }],
     }]);
     const system = messages.find((message) => message.role === 'system')!.content;
     const user = messages.find((message) => message.role === 'user')!.content;
 
     expect(system).toContain('PRESENTATION-ONLY условие');
-    expect(system).toContain('«При отсутствии воды допустим кожный антисептик»');
+    expect(system).toContain('«Если так удобнее исполнителю, шаги 2 и 3 можно поменять местами»');
     expect(system).toContain('не требуй для него выдуманный trigger или parent');
     expect(user).toContain('"kind":"UNRECOGNIZED_TRIGGER_CONDITION"');
-    expect(user).toContain('"quote":"При отсутствии воды"');
+    expect(user).toContain('"quote":"Если так удобнее исполнителю"');
+  });
+
+  // translation-oxu: до этого фикса presentation-only bullet поимённо называл
+  // ИМЕННО этот пример допустимым PROCEDURE_STEP без trigger/parent, а override
+  // bullet двумя строками ниже требовал для того же примера POSSIBLE_OMISSION/
+  // UNREPRESENTED_CLAUSE — самопротиворечие, которое аудитор устойчиво (4/4
+  // вызова живого прогона) разрешал в пользу второго правила, хотя закрытый
+  // каталог тогда не содержал факта, которым можно было бы закрыть finding.
+  // Теперь резервный ресурс — часть каталога (resourceAvailability), и промпт
+  // прямо называет исполнимое решение, а не просто перестаёт противоречить себе.
+  it('b6 water/antiseptic override now resolves to an executable resourceAvailability trigger, not a bare gap', () => {
+    const system = buildCoverageAuditPromptMessages(
+      'При отсутствии воды допустим кожный антисептик.', []
+    ).find((message) => message.role === 'system')!.content;
+
+    expect(system).toContain('resourceAvailability = AVAILABLE|UNAVAILABLE');
+    expect(system).toContain('«При отсутствии воды допустим кожный антисептик»');
+    expect(system).toContain('resourceAvailability=UNAVAILABLE');
+    expect(system).toContain('«при отсутствии воды/материала» — resourceAvailability=UNAVAILABLE');
+    // The two bullets must no longer name the same worked example for
+    // opposite verdicts -- that was the self-contradiction.
+    const presentationOnlyBullet = system.split('PRESENTATION-ONLY условие')[1]!.split('\n')[0]!;
+    expect(presentationOnlyBullet).not.toContain('При отсутствии воды');
   });
 
   it('true override without executable trigger remains a gap despite uncertainty', () => {

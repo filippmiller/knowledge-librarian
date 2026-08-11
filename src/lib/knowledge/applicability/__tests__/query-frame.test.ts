@@ -138,6 +138,7 @@ describe('триггер-факты — отдельный реестр, не ф
       'consentStatus',
       'reachability',
       'helperPresent',
+      'resourceAvailability',
     ]);
     for (const key of TRIGGER_FACT_KEYS) {
       expect(FACET_KEYS as readonly string[]).not.toContain(key);
@@ -169,6 +170,7 @@ describe('триггер-факты — отдельный реестр, не ф
     ['privacyContext', 'PRIVATE', 'AT_HOME'],
     ['consentStatus', 'EXPLICIT', 'MAYBE'],
     ['reachability', 'LIMITED', 'SLOW'],
+    ['resourceAvailability', 'AVAILABLE', 'PLENTY'],
   ] as const)('%s принимает только объявленные значения', (key, good, bad) => {
     const factFrame = (value: unknown) =>
       isValid(

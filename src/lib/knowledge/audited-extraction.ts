@@ -106,6 +106,7 @@ triggerCondition — null либо ТОЧНО {"all":[{"fact":"...","equals":...
 - consentStatus: "EXPLICIT" | "ABSENT"
 - reachability: "LIMITED" | "NORMAL"
 - helperPresent: true | false (JSON boolean, не строка)
+- resourceAvailability: "AVAILABLE" | "UNAVAILABLE"
 Если исходное условие выражается этим каталогом, запрещено оставлять его только прозой в statement.
 
 Если новое правило является узким исключением/послаблением, которое изменяет уже извлечённое базовое правило: kind="EXCEPTION_RULE", triggerCondition обязателен, parentExtractionRef обязан быть extractionRef базового unit из списка «Уже извлечено». Если base и exception оба создаются этим repair-ответом, parentExtractionRef ссылается на extractionRef нового base. Самостоятельное условное действие, не изменяющее базовое правило, остаётся PROCEDURE_STEP и не получает искусственного parent.
@@ -447,7 +448,38 @@ export async function extractKnowledgeUnitsWithCompletenessAudit(
       const existing = replacementTargetByRepairRef.get(candidate.extractionRef);
       if (existing !== undefined) {
         const preserveFacets = Object.keys(candidate.facets).length === 0 && Object.keys(existing.facets).length > 0;
-        const preserveTrigger = candidate.triggerCondition === null && existing.triggerCondition !== null;
+        // A repair response returning triggerCondition:null is ordinarily
+        // "forgot to restate it" (protected below). But the SAME repair
+        // response can also perform a genuine, intentional split: it
+        // demotes the existing unit to a general base (trigger correctly
+        // cleared) and hands the trigger to a NEW sibling/child unit whose
+        // parentExtractionRef points back at the ref being replaced here —
+        // exactly the "one existing rule repaired into several units"
+        // shape the repair contract documents (FOCUSED_REPAIR_SYSTEM_PROMPT
+        // above). Blindly preserving the stale trigger in that case
+        // resurrects the exact state the coverage auditor just rejected
+        // (observed live, block b4, 2026-08-11 fresh-extraction run:
+        // preserveTrigger kept privacyContext=PUBLIC on the general
+        // interpretation-order rule after repair correctly moved it onto a
+        // new EXCEPTION_RULE child, so the re-audit saw the same defect
+        // again and the block hard-aborted). Scoped to triggerCondition
+        // only, not facets/numericConstraint/parentExtractionRef: the
+        // contract ties this specific hand-off to EXCEPTION_RULE's defining
+        // field ("triggerCondition обязателен" for the child), numeric
+        // range splits keep a value on the reused ref rather than nulling
+        // it (see numericConstraint guidance above), and parent-clearing
+        // already has its own narrower, differently-scoped escape valve
+        // (mayClearMalformedExceptionParent below).
+        const triggerHandedToNewChild = retryResult.units.some((other) =>
+          other !== candidate &&
+          other.parentExtractionRef === existing.extractionRef &&
+          other.triggerCondition !== null &&
+          !currentUnitsForBlock.some((unit) => unit.extractionRef === other.extractionRef)
+        );
+        const preserveTrigger =
+          candidate.triggerCondition === null &&
+          existing.triggerCondition !== null &&
+          !triggerHandedToNewChild;
         const preserveNumeric = candidate.numericConstraint === null && existing.numericConstraint !== null;
         const actionableFindingOverlapsExisting = pendingAudit.findings.some((finding) =>
           (finding.verdict === 'POSSIBLE_OMISSION' || finding.verdict === 'UNREPRESENTED_CLAUSE') &&

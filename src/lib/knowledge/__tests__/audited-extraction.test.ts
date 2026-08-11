@@ -117,6 +117,122 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
     expect(repaired.parentExtractionRef).toBe(expectedParent);
     expect(result.auditResults[0].findings[0].verdict).toBe('COVERED');
   });
+
+  // b4 (fresh-extraction run, 2026-08-11): a repair response can legitimately
+  // SPLIT one existing rule into (1) a replacement for the existing ref and
+  // (2) a brand-new sibling/child unit parented back to that same existing
+  // ref. When that happens, the replacement's explicit triggerCondition:null
+  // is a deliberate hand-off, not an omission -- the child now carries the
+  // trigger. The observed bug: `preserveTrigger` could not tell this apart
+  // from an ordinary "repair forgot to restate the field" response and
+  // resurrected the stale trigger onto the (now general) parent, so the
+  // re-audit saw the exact defect it had just rejected and the block
+  // hard-aborted after exhausting repair rounds.
+  it('b4 shape: genuine split lets the null triggerCondition win instead of resurrecting the stale value', async () => {
+    const text = 'Правило приоритета применяется всегда. Например, в общественном месте разрешено узкое послабление.';
+    const extractor = async () => ({
+      units: [
+        unit({
+          kind: 'EXCEPTION_RULE',
+          extractionRef: 'u1',
+          statement: 'Правило приоритета применяется всегда, включая случай в общественном месте.',
+          triggerCondition: { all: [{ fact: 'privacyContext', equals: 'PUBLIC' }] },
+          parentExtractionRef: null,
+          sourceSpan: { anchor: 'b1', quote: 'Правило приоритета применяется всегда.' },
+        }),
+      ],
+      structuredResult: {} as never,
+    });
+    // The SAME repair response both (a) reuses the existing ref with an
+    // explicit null trigger and (b) introduces a genuinely new child unit
+    // whose parentExtractionRef is that same existing (namespaced) ref --
+    // exactly the "one existing rule repaired into several units" shape the
+    // repair contract documents (FOCUSED_REPAIR_SYSTEM_PROMPT).
+    const repairExtractor = async () => ({
+      units: [
+        unit({
+          kind: 'PROCEDURE_STEP',
+          extractionRef: 'b0-u1',
+          statement: 'Правило приоритета применяется всегда.',
+          triggerCondition: null,
+          parentExtractionRef: null,
+          sourceSpan: { anchor: 'b1', quote: 'Правило приоритета применяется всегда.' },
+        }),
+        unit({
+          kind: 'EXCEPTION_RULE',
+          extractionRef: 'u2',
+          statement: 'В общественном месте разрешено узкое послабление.',
+          triggerCondition: { all: [{ fact: 'privacyContext', equals: 'PUBLIC' }] },
+          parentExtractionRef: 'b0-u1',
+          sourceSpan: { anchor: 'b1', quote: 'в общественном месте разрешено узкое послабление.' },
+        }),
+      ],
+      structuredResult: {} as never,
+    });
+    let audits = 0;
+    const auditor = async (): Promise<BlockCoverageAuditResult> => ++audits === 1
+      ? { blockAnchor: 'b1', findings: [{ verdict: 'UNREPRESENTED_CLAUSE', quote: text, explanation: 'trigger misplaced on the general rule', quoteVerified: true }], hasGap: true }
+      : { blockAnchor: 'b1', findings: [{ verdict: 'COVERED', quote: '', explanation: 'clean', quoteVerified: false }], hasGap: false };
+
+    const result = await extractKnowledgeUnitsWithCompletenessAudit(
+      [block('b1', text)], 5, { runConfig: {} as never }, {} as never, { extractor, repairExtractor, auditor }
+    );
+
+    const parent = result.units.find((item) => item.extractionRef === 'b0-u1')!;
+    expect(parent.triggerCondition).toBeNull();
+    const child = result.units.find((item) => item.statement.includes('послабление'))!;
+    expect(child.triggerCondition).toEqual({ all: [{ fact: 'privacyContext', equals: 'PUBLIC' }] });
+    expect(child.parentExtractionRef).toBe('b0-u1');
+    expect(result.auditResults[0].findings[0].verdict).toBe('COVERED');
+  });
+
+  // Companion to the split test above: the SAME repair response shape but
+  // WITHOUT a second unit parented to the replaced ref. This is the ordinary
+  // "repair forgot to restate a populated field" case the original guard
+  // exists for, and it must keep resurrecting the existing value -- a split
+  // must be genuinely evidenced by another unit in the same response, not
+  // assumed.
+  it('ordinary (non-split) repair still preserves the existing triggerCondition when the candidate returns null', async () => {
+    const text = 'Правило приоритета применяется всегда, включая случай в общественном месте.';
+    const extractor = async () => ({
+      units: [
+        unit({
+          kind: 'EXCEPTION_RULE',
+          extractionRef: 'u1',
+          statement: 'Правило приоритета применяется всегда, включая случай в общественном месте.',
+          triggerCondition: { all: [{ fact: 'privacyContext', equals: 'PUBLIC' }] },
+          parentExtractionRef: null,
+          sourceSpan: { anchor: 'b1', quote: text },
+        }),
+      ],
+      structuredResult: {} as never,
+    });
+    const repairExtractor = async () => ({
+      units: [
+        unit({
+          kind: 'EXCEPTION_RULE',
+          extractionRef: 'b0-u1',
+          statement: 'Правило приоритета применяется всегда, включая случай в общественном месте (уточнено).',
+          triggerCondition: null,
+          parentExtractionRef: null,
+          sourceSpan: { anchor: 'b1', quote: text },
+        }),
+      ],
+      structuredResult: {} as never,
+    });
+    let audits = 0;
+    const auditor = async (): Promise<BlockCoverageAuditResult> => ++audits === 1
+      ? { blockAnchor: 'b1', findings: [{ verdict: 'UNREPRESENTED_CLAUSE', quote: text, explanation: 'needs clarification', quoteVerified: true }], hasGap: true }
+      : { blockAnchor: 'b1', findings: [{ verdict: 'COVERED', quote: '', explanation: 'clean', quoteVerified: false }], hasGap: false };
+
+    const result = await extractKnowledgeUnitsWithCompletenessAudit(
+      [block('b1', text)], 5, { runConfig: {} as never }, {} as never, { extractor, repairExtractor, auditor }
+    );
+
+    const repaired = result.units.find((item) => item.extractionRef === 'b0-u1')!;
+    expect(repaired.triggerCondition).toEqual({ all: [{ fact: 'privacyContext', equals: 'PUBLIC' }] });
+  });
+
   it('quality-v2 b13: разделяет широкую составную evidence-цитату на три доказуемые clause spans', () => {
     const quote = 'Помощник обязан надеть чистые одноразовые перчатки, соблюдать ограничения по силе и времени и немедленно остановиться по первой просьбе.';
     const refined = refineCoextensiveEvidence([

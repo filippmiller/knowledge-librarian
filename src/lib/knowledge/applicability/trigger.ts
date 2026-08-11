@@ -6,6 +6,7 @@ import {
   type ConsentStatus,
   type PrivacyContext,
   type Reachability,
+  type ResourceAvailability,
   type TriggerFactKey,
 } from './trigger-facts';
 
@@ -27,7 +28,8 @@ export type TriggerClause =
   | { readonly fact: 'privacyContext'; readonly equals: PrivacyContext }
   | { readonly fact: 'consentStatus'; readonly equals: ConsentStatus }
   | { readonly fact: 'reachability'; readonly equals: Reachability }
-  | { readonly fact: 'helperPresent'; readonly equals: boolean };
+  | { readonly fact: 'helperPresent'; readonly equals: boolean }
+  | { readonly fact: 'resourceAvailability'; readonly equals: ResourceAvailability };
 
 export interface TriggerCondition {
   /**
@@ -54,6 +56,10 @@ export const triggerClauseSchema = z.discriminatedUnion('fact', [
   z.strictObject({
     fact: z.literal('helperPresent'),
     equals: TRIGGER_FACT_REGISTRY.helperPresent.valueSchema,
+  }),
+  z.strictObject({
+    fact: z.literal('resourceAvailability'),
+    equals: TRIGGER_FACT_REGISTRY.resourceAvailability.valueSchema,
   }),
 ]);
 

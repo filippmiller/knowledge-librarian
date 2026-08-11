@@ -28,6 +28,9 @@ export type ConsentStatus = (typeof CONSENT_STATUSES)[number];
 export const REACHABILITY_LEVELS = ['LIMITED', 'NORMAL'] as const;
 export type Reachability = (typeof REACHABILITY_LEVELS)[number];
 
+export const RESOURCE_AVAILABILITY_LEVELS = ['AVAILABLE', 'UNAVAILABLE'] as const;
+export type ResourceAvailability = (typeof RESOURCE_AVAILABILITY_LEVELS)[number];
+
 interface TriggerFactDefinition {
   readonly valueSchema: z.ZodType;
   readonly description: string;
@@ -49,6 +52,14 @@ export const TRIGGER_FACT_REGISTRY = {
   helperPresent: {
     valueSchema: z.boolean(),
     description: 'есть ли рядом помощник',
+  },
+  // translation-oxu: закрытый каталог не покрывал ограничение ресурса
+  // ("при отсутствии воды допустим кожный антисептик") — override без
+  // исполнимого триггера падал в structural gap, из которого repair не
+  // мог выйти (условия для его закрытия просто не существовало).
+  resourceAvailability: {
+    valueSchema: z.enum(RESOURCE_AVAILABILITY_LEVELS),
+    description: 'доступен ли расходуемый ресурс/материал, необходимый для основного способа выполнения действия',
   },
 } as const satisfies Record<string, TriggerFactDefinition>;
 

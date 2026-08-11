@@ -35,6 +35,7 @@ describe('triggerFactCatalog', () => {
       expect(catalog).toContain('consentStatus');
       expect(catalog).toContain('reachability');
       expect(catalog).toContain('helperPresent');
+      expect(catalog).toContain('resourceAvailability');
     }
   });
 });
