@@ -20,6 +20,44 @@ import type { ExtractionRunConfig } from '@/lib/ai/extraction-run';
 import { StructuredOutputError } from '@/lib/ai/structured-output';
 
 /**
+ * `callAnthropic` (chat-provider.ts) теперь читает SSE (translation-gy3), а
+ * не плоский JSON — этот хелпер эмитит настоящую последовательность фреймов
+ * (message_start → content_block_delta → message_delta → message_stop),
+ * ОДНИМ content_block_delta на весь текст, чтобы rawResponseText
+ * реконструировался байт-в-байт. Раньше этот файл не имел общего хелпера —
+ * 3 теста ниже собирали bespoke `new Response(...)` вручную.
+ */
+function anthropicOk(
+  text: string,
+  usage: { input_tokens: number; output_tokens: number }
+): Response {
+  const frames: Record<string, unknown>[] = [
+    {
+      type: 'message_start',
+      message: {
+        id: 'msg_test',
+        type: 'message',
+        role: 'assistant',
+        model: 'test-model',
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: usage.input_tokens, output_tokens: 0 },
+      },
+    },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
+    {
+      type: 'message_delta',
+      delta: { stop_reason: 'end_turn', stop_sequence: null },
+      usage: { output_tokens: usage.output_tokens },
+    },
+    { type: 'message_stop' },
+  ];
+  const body = frames.map((frame) => `data: ${JSON.stringify(frame)}\n`).join('');
+  return new Response(body, { status: 200 });
+}
+
+/**
  * Goal-shift continuation (2026-08-09): a general, oracle-blind completeness
  * check — sees ONLY source block text + units extracted from it, NEVER
  * questions/expected answers/rule ids. Pure prompt-building and response-
@@ -526,13 +564,10 @@ describe('auditBlockCoverage — реальный сетевой путь нес
 
   it('результат несёт attempts с реальным usage — иначе cost ledger не может посчитать стоимость этого вызова', async () => {
     fetchMock.mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          content: [{ type: 'text', text: JSON.stringify({ findings: [{ verdict: 'COVERED', quote: '' }] }) }],
-          usage: { input_tokens: 321, output_tokens: 12 },
-        }),
-        { status: 200 }
-      )
+      anthropicOk(JSON.stringify({ findings: [{ verdict: 'COVERED', quote: '' }] }), {
+        input_tokens: 321,
+        output_tokens: 12,
+      })
     );
 
     const result = await auditBlockCoverage({
@@ -552,15 +587,7 @@ describe('auditBlockCoverage — реальный сетевой путь нес
   // ответила модель.
   it('результат несёт requestMessages и rawResponseText — источник для call-trace log', async () => {
     const rawResponse = JSON.stringify({ findings: [{ verdict: 'COVERED', quote: '' }] });
-    fetchMock.mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          content: [{ type: 'text', text: rawResponse }],
-          usage: { input_tokens: 321, output_tokens: 12 },
-        }),
-        { status: 200 }
-      )
-    );
+    fetchMock.mockResolvedValue(anthropicOk(rawResponse, { input_tokens: 321, output_tokens: 12 }));
 
     const result = await auditBlockCoverage({
       blockAnchor: 'b1',
@@ -581,13 +608,7 @@ describe('auditBlockCoverage — реальный сетевой путь нес
   // тихим `hasGap: false`.
   it('модель вернула {"findings": []} -> вызов падает StructuredOutputError, а не возвращает блок как покрытый', async () => {
     fetchMock.mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          content: [{ type: 'text', text: JSON.stringify({ findings: [] }) }],
-          usage: { input_tokens: 100, output_tokens: 5 },
-        }),
-        { status: 200 }
-      )
+      anthropicOk(JSON.stringify({ findings: [] }), { input_tokens: 100, output_tokens: 5 })
     );
 
     await expect(

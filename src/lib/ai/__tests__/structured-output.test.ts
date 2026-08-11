@@ -44,10 +44,39 @@ const VALID_PAYLOAD: Price = {
 
 let fetchMock: ReturnType<typeof vi.fn>;
 
+/**
+ * `callAnthropic` теперь читает SSE (translation-gy3), а не плоский JSON —
+ * этот хелпер эмитит настоящую последовательность фреймов
+ * (message_start → content_block_delta → message_delta → message_stop),
+ * ОДНИМ content_block_delta на весь текст, чтобы rawText реконструировался
+ * байт-в-байт (см. тест ниже на SCHEMA_MISMATCH result.rawText). Сигнатура
+ * не изменилась — существующие вызовы этого файла правок не требуют.
+ */
 function anthropicOk(text: string): Response {
-  return new Response(JSON.stringify({ content: [{ type: 'text', text }] }), {
-    status: 200,
-  });
+  const frames: Record<string, unknown>[] = [
+    {
+      type: 'message_start',
+      message: {
+        id: 'msg_test',
+        type: 'message',
+        role: 'assistant',
+        model: 'test-model',
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 10, output_tokens: 0 },
+      },
+    },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
+    {
+      type: 'message_delta',
+      delta: { stop_reason: 'end_turn', stop_sequence: null },
+      usage: { output_tokens: 5 },
+    },
+    { type: 'message_stop' },
+  ];
+  const body = frames.map((frame) => `data: ${JSON.stringify(frame)}\n`).join('');
+  return new Response(body, { status: 200 });
 }
 
 /** 500 не входит в RETRYABLE_STATUS_CODES — резерв начинается сразу, без sleep. */
@@ -160,10 +189,9 @@ afterEach(() => {
 
 describe('structured() — успешный разбор', () => {
   it('publishes exact attempts to a run-level cost observer once', async () => {
-    fetchMock.mockResolvedValue(new Response(JSON.stringify({
-      content: [{ type: 'text', text: JSON.stringify(VALID_PAYLOAD) }],
-      usage: { input_tokens: 10, output_tokens: 5 },
-    }), { status: 200 }));
+    // anthropicOk() уже несёт usage {input_tokens: 10, output_tokens: 5} по
+    // умолчанию — совпадает с тем, что раньше собирал этот bespoke Response.
+    fetchMock.mockResolvedValue(anthropicOk(JSON.stringify(VALID_PAYLOAD)));
     const observed: unknown[] = [];
 
     await structured({

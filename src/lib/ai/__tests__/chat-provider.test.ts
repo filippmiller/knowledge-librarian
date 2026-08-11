@@ -18,6 +18,7 @@ import {
   streamChatCompletionTokens,
   type ChatCompletionOptions,
 } from '../chat-provider';
+import { CostLedger } from '../cost-ledger';
 
 describe('outer ChatCompletionError retry policy', () => {
   it.each([400, 401, 403, 404, 422])('classifies permanent %s as non-retryable', (statusCode) => {
@@ -36,13 +37,40 @@ const MESSAGES: ChatCompletionOptions['messages'] = [
 
 let fetchMock: ReturnType<typeof vi.fn>;
 
+/**
+ * `callAnthropic` теперь читает SSE (translation-gy3), а не плоский JSON —
+ * этот хелпер эмитит настоящую последовательность фреймов
+ * (message_start → content_block_delta → message_delta → message_stop),
+ * ОДНИМ content_block_delta на весь текст, чтобы rawText реконструировался
+ * байт-в-байт. Сигнатура не изменилась — ~45 существующих вызовов этого
+ * файла правок не требуют.
+ */
 function anthropicOk(
   text: string,
   usage: { input_tokens: number; output_tokens: number } = { input_tokens: 10, output_tokens: 5 }
 ): Response {
-  return new Response(JSON.stringify({ content: [{ type: 'text', text }], usage }), {
-    status: 200,
-  });
+  return anthropicSseFramesResponse([
+    {
+      type: 'message_start',
+      message: {
+        id: 'msg_test',
+        type: 'message',
+        role: 'assistant',
+        model: 'test-model',
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: usage.input_tokens, output_tokens: 0 },
+      },
+    },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
+    {
+      type: 'message_delta',
+      delta: { stop_reason: 'end_turn', stop_sequence: null },
+      usage: { output_tokens: usage.output_tokens },
+    },
+    { type: 'message_stop' },
+  ]);
 }
 
 /** 500 не входит в RETRYABLE_STATUS_CODES — фоллбэк начинается сразу, без sleep. */
@@ -89,7 +117,7 @@ function sseEvents(texts: string[]): string {
       (text) =>
         `data: ${JSON.stringify({
           type: 'content_block_delta',
-          delta: { text },
+          delta: { type: 'text_delta', text },
         })}\n`
     )
     .join('');
@@ -98,6 +126,21 @@ function sseEvents(texts: string[]): string {
 function sseResponse(texts: string[]): Response {
   const body = sseEvents(texts) + 'data: [DONE]\n';
   return new Response(new TextEncoder().encode(body), { status: 200 });
+}
+
+/**
+ * Общий билдер SSE-тела из произвольной последовательности фреймов —
+ * каждый фрейм становится строкой `data: {...}\n`. `sseEvents()`/`sseResponse()`
+ * выше годятся только для чистого потока `content_block_delta`; этот билдер
+ * нужен там, где важны `message_start`/`message_delta` usage или mid-stream
+ * `error`-фрейм (translation-gy3 streaming fix).
+ */
+function anthropicSseFrames(frames: Record<string, unknown>[]): string {
+  return frames.map((frame) => `data: ${JSON.stringify(frame)}\n`).join('');
+}
+
+function anthropicSseFramesResponse(frames: Record<string, unknown>[]): Response {
+  return new Response(anthropicSseFrames(frames), { status: 200 });
 }
 
 /**
@@ -565,18 +608,33 @@ describe('prompt caching (Anthropic)', () => {
 
   it('поднимает cache-счётчики Anthropic в usage — добавочно, не подменяя input/output', async () => {
     fetchMock.mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          content: [{ type: 'text', text: 'ok' }],
-          usage: {
-            input_tokens: 12,
-            output_tokens: 5,
-            cache_creation_input_tokens: 1300,
-            cache_read_input_tokens: 0,
+      anthropicSseFramesResponse([
+        {
+          type: 'message_start',
+          message: {
+            id: 'msg_test',
+            type: 'message',
+            role: 'assistant',
+            model: 'test-model',
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: {
+              input_tokens: 12,
+              output_tokens: 0,
+              cache_creation_input_tokens: 1300,
+              cache_read_input_tokens: 0,
+            },
           },
-        }),
-        { status: 200 }
-      )
+        },
+        { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
+        {
+          type: 'message_delta',
+          delta: { stop_reason: 'end_turn', stop_sequence: null },
+          usage: { output_tokens: 5 },
+        },
+        { type: 'message_stop' },
+      ])
     );
 
     const result = await createChatCompletionDetailed({
@@ -1367,5 +1425,432 @@ describe('streaming', () => {
       outcome: 'ABORTED',
       errorCode: 'ATTEMPT_TIMEOUT',
     });
+  });
+});
+
+/**
+ * translation-gy3: `callAnthropic` (the NON-streaming `createChatCompletionDetailed`
+ * path) sends `max_tokens` without `stream: true`. Above ~16K max_tokens this
+ * idles through Anthropic's think+generate phase until the server closes the
+ * socket — `TypeError: fetch failed` — with all 3 retries hitting the same
+ * wall. Fix: stream unconditionally in `callAnthropic`, reusing the SSE
+ * parser `streamProviderTokens` already has, and buffer it into the same
+ * single `ChatCompletionResult` callers already get (no public contract
+ * change — `createChatCompletionDetailed` still returns one buffered result,
+ * not an async iterable).
+ */
+describe('callAnthropic reads SSE (translation-gy3 streaming fix)', () => {
+  it('stream:true присутствует в теле запроса даже при maxTokens 16000', async () => {
+    // Anthropic требует стрим выше ~16K max_tokens — порог, на котором и падал
+    // живой прогон. Мы проверяем только исходящее тело, поэтому содержимое
+    // ответа само по себе неважно — НО он обязан быть ПОЛНЫМ SSE-стримом
+    // (anthropicOk), а не `{}`: с completeness-гейтом (translation-gy3
+    // hardening) пустое тело классифицируется как incomplete_stream и
+    // ретраится 3 раза РЕАЛЬНЫМИ таймерами (тут нет vi.useFakeTimers()) —
+    // тест раньше проходил случайно быстро, а стал бы падать по таймауту.
+    fetchMock.mockResolvedValue(anthropicOk('ok'));
+
+    await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      maxTokens: 16000,
+      fallbackPolicy: 'NONE',
+    }).catch(() => undefined);
+
+    expect(anthropicRequestBodies()[0]).toMatchObject({ stream: true, max_tokens: 16000 });
+  });
+
+  it('SSE-фреймы (message_start → content_block_delta → message_delta → message_stop) собираются в тот же результат, что раньше давал плоский JSON', async () => {
+    const wholeText = 'ответ, пришедший одним content_block_delta без разбивки';
+    fetchMock.mockResolvedValue(
+      anthropicSseFramesResponse([
+        {
+          type: 'message_start',
+          message: {
+            id: 'msg_test',
+            type: 'message',
+            role: 'assistant',
+            model: 'test-model',
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: {
+              input_tokens: 42,
+              output_tokens: 0,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 17,
+            },
+          },
+        },
+        { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: wholeText } },
+        {
+          type: 'message_delta',
+          delta: { stop_reason: 'end_turn', stop_sequence: null },
+          usage: { output_tokens: 9 },
+        },
+        { type: 'message_stop' },
+      ])
+    );
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      fallbackPolicy: 'NONE',
+    });
+
+    // rawText реконструируется байт-в-байт: ОДИН content_block_delta несёт
+    // целый текст без разбивки — это то, на что смотрит wasRepaired() в
+    // structured-output.ts.
+    expect(result.text).toBe(wholeText);
+    expect(result.rawText).toBe(wholeText);
+    expect(result.attempts).toHaveLength(1);
+    // message_start даёт input_tokens/cache-счётчики и НАЧАЛЬНЫЙ output_tokens
+    // (0) — message_delta.usage.output_tokens (9) обязан его ЗАМЕСТИТЬ.
+    expect(result.attempts[0].usage).toEqual({
+      inputTokens: 42,
+      outputTokens: 9,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 17,
+    });
+  });
+
+  it('регрессия cost ledger: успешный стримленый вызов несёт usage — CostLedger.record() с maxTotalUsd не бросает UnverifiableCostError', async () => {
+    // Ловушка: CostLedger.record() бросает UnverifiableCostError, когда
+    // maxTotalUsd задан, а SUCCESS-попытка приходит БЕЗ usage. Aurora-раннер
+    // всегда задаёт бюджет — значит, если стриминговый путь вернёт успешный
+    // результат без usage, первый же успешный вызов ЛЮБОГО бюджетированного
+    // прогона падает. Собран напрямую через anthropicSseFramesResponse (а не
+    // через anthropicOk), чтобы ДО фикса тест падал по правильной причине —
+    // старый response.json() не переживает SSE-тело, а не потому, что usage
+    // случайно совпал с уже работавшим плоским JSON.
+    fetchMock.mockResolvedValue(
+      anthropicSseFramesResponse([
+        {
+          type: 'message_start',
+          message: {
+            id: 'msg_test',
+            type: 'message',
+            role: 'assistant',
+            model: 'test-model',
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: { input_tokens: 100, output_tokens: 0 },
+          },
+        },
+        { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
+        {
+          type: 'message_delta',
+          delta: { stop_reason: 'end_turn', stop_sequence: null },
+          usage: { output_tokens: 50 },
+        },
+        { type: 'message_stop' },
+      ])
+    );
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      model: 'claude-sonnet-5', // ценённая модель — см. MODEL_PRICING в cost.ts
+      fallbackPolicy: 'NONE',
+    });
+
+    const ledger = new CostLedger({ maxTotalUsd: 100 });
+    expect(() => ledger.record('test-purpose', result.attempts)).not.toThrow();
+  });
+
+  it('mid-stream error-фрейм всплывает как ChatCompletionError с errorCode, а не тонет молча', async () => {
+    // Существующий парсер фильтровал только content_block_delta и МОЛЧА
+    // проглатывал всё остальное, включая error-фреймы — retry/fallback
+    // классификация никогда их не видела. fallbackPolicy: 'NONE', чтобы
+    // проверить именно классификацию ошибки, а не то, что резерв её замаскировал.
+    vi.useFakeTimers();
+    try {
+      // overloaded_error ретраится — mockImplementation, а не mockResolvedValue:
+      // каждый retry обязан получить СВЕЖИЙ Response с непрочитанным телом,
+      // иначе повторное чтение того же стрима падает с ERR_INVALID_STATE, а не
+      // с той ошибкой, которую тест проверяет.
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(
+          anthropicSseFramesResponse([
+            { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } },
+            { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } },
+          ])
+        )
+      );
+
+      const promise = createChatCompletionDetailed({
+        messages: MESSAGES,
+        provider: 'anthropic',
+        fallbackPolicy: 'NONE',
+      });
+      // Снимаем таймеры backoff'а (RETRYABLE_ERROR_CODES), прежде чем ждать
+      // финальное отклонение.
+      const errorPromise = promise.catch((e: unknown) => e);
+      await vi.runAllTimersAsync();
+      const error = (await errorPromise) as ChatCompletionError;
+
+      expect(error).toBeInstanceOf(ChatCompletionError);
+      expect(error.errorCode).toBe('overloaded_error');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+/**
+ * translation-gy3 hardening (2026-08-11): `callAnthropic` had no notion of a
+ * COMPLETE Anthropic message, so a stream cut short by a mid-response socket
+ * close (SSE has no Content-Length — a FIN mid-stream is indistinguishable
+ * from a clean end) could return SUCCESS built from whatever partial state
+ * happened to be collected. Worst case (Path B below): `message_start`'s
+ * PROVISIONAL `usage.output_tokens` (almost always 0) satisfied the old
+ * `typeof outputTokens === 'number'` guard on its own, so a stream that died
+ * before `message_delta` ever arrived came back as a real SUCCESS with
+ * `usage.outputTokens: 0` and — if any text had already streamed in —
+ * partial text presented as the complete answer. This describe block is the
+ * RED/GREEN evidence for the fix: a completeness gate in `callAnthropic` plus
+ * an end-of-stream flush in `parseAnthropicSseFrames`.
+ */
+describe('callAnthropic completeness gate (translation-gy3 hardening)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('Path A: 200 с пустым телом — ERROR, а не фиктивный SUCCESS с usage: null, и классифицируется как retryable', async () => {
+    // Раньше response.json() на пустом теле падал сам по себе (ERROR) — это
+    // была РЕГРЕССИЯ по сравнению со старым не-стримовым путём. С SSE-парсером
+    // пустое тело — это просто ноль фреймов; без гейта цикл дал бы SUCCESS с
+    // usage: null, и CostLedger.record() падал бы на UnverifiableCostError на
+    // любом бюджетированном прогоне — далеко от настоящей причины.
+    vi.useFakeTimers();
+    // mockImplementation, а не mockResolvedValue: каждый retry обязан
+    // получить СВЕЖИЙ Response — тот же самый объект на повторное чтение
+    // упал бы с ERR_INVALID_STATE, а не с ошибкой, которую проверяет тест.
+    fetchMock.mockImplementation(() => Promise.resolve(new Response('', { status: 200 })));
+
+    const promise = createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      fallbackPolicy: 'NONE',
+    });
+    const errorPromise = promise.catch((e: unknown) => e);
+    await vi.runAllTimersAsync();
+    const error = (await errorPromise) as ChatCompletionError;
+
+    expect(error).toBeInstanceOf(ChatCompletionError);
+    expect(error.errorCode).toBe('incomplete_stream');
+    expect(error.message).toContain('no SSE frames were received');
+
+    // retryable — доказано ДЕЙСТВИЕМ (внутренний retry-цикл реально дёргает
+    // fetch ещё 3 раза тем же провайдером: MAX_RETRIES=3 → 4 попытки), а не
+    // только чтением классификатора.
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(error.attempts).toHaveLength(4);
+    expect(
+      error.attempts.every((a) => a.outcome === 'ERROR' && a.errorCode === 'incomplete_stream')
+    ).toBe(true);
+    // Внешняя политика (то, что читают вызывающие после полного отказа)
+    // согласна с внутренней: errorCode retryable → статуса нет →
+    // isRetryableChatCompletionError по умолчанию true для status===undefined.
+    expect(isRetryableChatCompletionError(error)).toBe(true);
+  });
+
+  it('Path B (money bug): message_start + частичный текст, БЕЗ message_delta — ERROR, никогда не SUCCESS с partial text и outputTokens: 0', async () => {
+    vi.useFakeTimers();
+    const partialText = 'частичный ответ, пришедший до обрыва соединения';
+    // mockImplementation — каждый retry получает свежий Response.
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        anthropicSseFramesResponse([
+          {
+            type: 'message_start',
+            message: {
+              id: 'msg_test',
+              type: 'message',
+              role: 'assistant',
+              model: 'test-model',
+              content: [],
+              stop_reason: null,
+              stop_sequence: null,
+              // 2500 РЕАЛЬНЫХ input-токенов уже потрачены; output_tokens: 0
+              // здесь — ПРОВИЗОРНОЕ значение Anthropic (стрим только начался),
+              // не финальное. Ниже никакого message_delta не будет —
+              // соединение обрывается сразу после текста.
+              usage: { input_tokens: 2500, output_tokens: 0 },
+            },
+          },
+          { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: partialText } },
+          // Обрыв здесь. Ни message_delta, ни message_stop не приходят.
+        ])
+      )
+    );
+
+    const promise = createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      fallbackPolicy: 'NONE',
+    });
+    const outcomePromise = promise.catch((e: unknown) => e);
+    await vi.runAllTimersAsync();
+    const outcome = await outcomePromise;
+
+    // УТВЕРЖДЕНИЕ, РАДИ КОТОРОГО СУЩЕСТВУЕТ ЭТОТ ТЕСТ: до фикса именно эта
+    // форма — partial text как будто это полный ответ, с outputTokens: 0 —
+    // возвращалась как SUCCESS. Проверяем явно и отдельно от instanceof-теста
+    // ниже, чтобы регрессия провалилась ИМЕННО на этой строке с неправильной
+    // формой в diff, а не на общем «not an Error».
+    expect(outcome).not.toMatchObject({
+      text: partialText,
+      attempts: [expect.objectContaining({ usage: { inputTokens: 2500, outputTokens: 0 } })],
+    });
+
+    expect(outcome).toBeInstanceOf(ChatCompletionError);
+    const error = outcome as ChatCompletionError;
+    expect(error.errorCode).toBe('incomplete_stream');
+    // Ни один attempt не несёт usage вовсе — тем более не {outputTokens: 0}.
+    expect(error.attempts.every((a) => a.usage === undefined)).toBe(true);
+    expect(isRetryableChatCompletionError(error)).toBe(true);
+  });
+
+  it('Path C: message_start без input_tokens в usage — ERROR, не SUCCESS с usage: null', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        anthropicSseFramesResponse([
+          {
+            type: 'message_start',
+            message: {
+              id: 'msg_test',
+              type: 'message',
+              role: 'assistant',
+              model: 'test-model',
+              content: [],
+              stop_reason: null,
+              stop_sequence: null,
+              usage: { output_tokens: 0 }, // input_tokens отсутствует целиком
+            },
+          },
+          { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'x' } },
+          {
+            type: 'message_delta',
+            delta: { stop_reason: 'end_turn', stop_sequence: null },
+            usage: { output_tokens: 3 },
+          },
+          { type: 'message_stop' },
+        ])
+      )
+    );
+
+    const promise = createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      fallbackPolicy: 'NONE',
+    });
+    const errorPromise = promise.catch((e: unknown) => e);
+    await vi.runAllTimersAsync();
+    const error = (await errorPromise) as ChatCompletionError;
+
+    expect(error).toBeInstanceOf(ChatCompletionError);
+    expect(error.errorCode).toBe('incomplete_stream');
+    expect(error.message).toContain('input_tokens');
+  });
+
+  it('Path D: content_block_delta + message_delta без message_start — ERROR', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        anthropicSseFramesResponse([
+          { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'x' } },
+          {
+            type: 'message_delta',
+            delta: { stop_reason: 'end_turn', stop_sequence: null },
+            usage: { output_tokens: 3 },
+          },
+          { type: 'message_stop' },
+        ])
+      )
+    );
+
+    const promise = createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      fallbackPolicy: 'NONE',
+    });
+    const errorPromise = promise.catch((e: unknown) => e);
+    await vi.runAllTimersAsync();
+    const error = (await errorPromise) as ChatCompletionError;
+
+    expect(error).toBeInstanceOf(ChatCompletionError);
+    expect(error.errorCode).toBe('incomplete_stream');
+    expect(error.message).toContain('message_start');
+  });
+
+  it('Path E: финальный message_delta БЕЗ завершающего \\n всё равно парсится — доказывает EOS flush', async () => {
+    // Без EOS-флаша эта последняя (незавершённая \n) строка осталась бы в
+    // buffer и была бы молча отброшена — Path E из ревью деградировал бы
+    // обратно в Path B (message_delta потерян → outputTokens не пришёл).
+    const wholeText = 'ответ, полностью пришедший до обрыва хвостового переноса строки';
+    const frames = [
+      {
+        type: 'message_start',
+        message: {
+          id: 'msg_test',
+          type: 'message',
+          role: 'assistant',
+          model: 'test-model',
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 30, output_tokens: 0 },
+        },
+      },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: wholeText } },
+      {
+        type: 'message_delta',
+        delta: { stop_reason: 'end_turn', stop_sequence: null },
+        usage: { output_tokens: 11 },
+      },
+      // Обрыв здесь — message_stop так и не пришёл, а сам message_delta не
+      // терминирован \n (см. построение body ниже).
+    ];
+    const lines = frames.map((frame) => `data: ${JSON.stringify(frame)}`);
+    // Каждая строка сохраняет СВОЙ разделитель, кроме самой последней — так
+    // смоделирован сокет, закрывшийся ровно на последнем байте message_delta,
+    // до того как ушёл завершающий \n.
+    const body = lines.slice(0, -1).map((line) => `${line}\n`).join('') + lines[lines.length - 1];
+    fetchMock.mockResolvedValue(new Response(body, { status: 200 }));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      fallbackPolicy: 'NONE',
+    });
+
+    expect(result.text).toBe(wholeText);
+    expect(result.rawText).toBe(wholeText);
+    expect(result.attempts).toHaveLength(1);
+    expect(result.attempts[0].outcome).toBe('SUCCESS');
+    expect(result.attempts[0].usage).toEqual({ inputTokens: 30, outputTokens: 11 });
+  });
+
+  it('regression guard: happy-path стрим (message_start → delta → message_delta → message_stop) по-прежнему даёт байт-в-байт тот же usage', async () => {
+    // Гейт не должен требовать НИЧЕГО сверх того, что нормальный ответ уже
+    // несёт — этот тест сгорел бы, потребуй гейт что-то лишнее (например,
+    // message_stop, который сознательно не требуется — см. комментарий в
+    // callAnthropic).
+    fetchMock.mockResolvedValue(anthropicOk('hello', { input_tokens: 10, output_tokens: 5 }));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      fallbackPolicy: 'NONE',
+    });
+
+    expect(result.text).toBe('hello');
+    expect(result.rawText).toBe('hello');
+    expect(result.attempts).toHaveLength(1);
+    expect(result.attempts[0].outcome).toBe('SUCCESS');
+    expect(result.attempts[0].usage).toEqual({ inputTokens: 10, outputTokens: 5 });
   });
 });

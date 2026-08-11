@@ -760,6 +760,13 @@ const RETRYABLE_ERROR_CODES = new Set([
   'econnrefused',
   'etimedout',
   'epipe',
+  // `callAnthropic`'s completeness gate (translation-gy3 hardening): thrown
+  // when an Anthropic SSE stream ends without enough frames to prove the
+  // response is whole. A truncated stream is transient by nature (same class
+  // of failure as ECONNRESET) — retrying is correct. This code can ONLY be
+  // produced by our own completeness check below, never by the provider, so
+  // adding it here cannot reclassify any real Anthropic/OpenAI error.
+  'incomplete_stream',
 ]);
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
@@ -961,10 +968,114 @@ async function postAnthropicMessages(
       system,
       messages,
       max_tokens: maxTokens,
+      stream: true,
       ...(temperature !== undefined && { temperature }),
     }),
     ...(signal && { signal }),
   });
+}
+
+/**
+ * Anthropic SSE — единственный парсер в кодовой базе (`No Shadow Systems`).
+ * И `callAnthropic`, и Anthropic-ветка `streamProviderTokens` читают через
+ * него; второй копии buffer/decode/split-on-`\n`/`data: `-parse цикла быть
+ * не должно.
+ *
+ * Отдаёт КАЖДЫЙ фрейм со строковым полем `type` — включая
+ * `message_start`/`message_delta`/`ping`/`message_stop`, а не только
+ * `content_block_delta`: что делать с конкретным типом, решает потребитель.
+ */
+async function* parseAnthropicSseFrames(
+  response: Response
+): AsyncGenerator<{ type: string; data: Record<string, unknown> }> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new ProviderRequestError('Failed to get response body reader');
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  // finally: ранний выход потребителя (throw/break в теле `for await`)
+  // обязан закрыть HTTP-соединение, иначе отменённый стрим продолжает качать
+  // токены (и деньги).
+  try {
+    let done = false;
+    while (!done) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+
+      buffer += decoder.decode(chunk.value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const content = line.slice(6).trim();
+        if (content === '[DONE]') {
+          done = true;
+          break;
+        }
+        try {
+          const data = JSON.parse(content) as Record<string, unknown>;
+          if (typeof data.type === 'string') {
+            yield { type: data.type, data };
+          }
+        } catch {
+          // Ignore parse errors for non-json lines
+        }
+      }
+    }
+
+    // EOS flush (translation-gy3 hardening, 2026-08-11): SSE has no
+    // Content-Length, so a socket closing mid-response is indistinguishable
+    // from a clean end from inside this loop. The loop above only ever
+    // parses a line once it sees the trailing `\n` — the LAST line of a real
+    // response (typically `message_stop`, or whatever the connection was
+    // mid-way through flushing when it closed) can arrive with no trailing
+    // `\n` at all, and used to be dropped on the floor together with the
+    // decoder's own pending state. `decoder.decode()` with no arguments
+    // flushes any trailing multi-byte sequence `{ stream: true }` held back
+    // above; only after that is `buffer` the true final text, safe to treat
+    // as one last (possibly unterminated) line.
+    buffer += decoder.decode();
+    if (buffer.startsWith('data: ')) {
+      const content = buffer.slice(6).trim();
+      if (content && content !== '[DONE]') {
+        try {
+          const data = JSON.parse(content) as Record<string, unknown>;
+          if (typeof data.type === 'string') {
+            yield { type: data.type, data };
+          }
+        } catch {
+          // Same as the mid-stream case above: not valid JSON, ignore.
+        }
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+}
+
+/**
+ * Мид-стрим `type: 'error'` раньше молча проглатывался (старый парсер
+ * фильтровал только `content_block_delta`) — ретрай/фоллбэк-классификация
+ * никогда его не видела. Единственная точка, где такой фрейм становится
+ * исключением; оба потребителя `parseAnthropicSseFrames` обязаны звать её.
+ *
+ * Точная проводная форма ошибочного фрейма Anthropic не подтверждена
+ * отдельно от синхронного тела ответа — код НАМЕРЕННО защитный: любой фрейм
+ * с `type: 'error'` не должен пройти молча, каким бы ни было `data.error`.
+ */
+function throwIfAnthropicErrorFrame(frame: { type: string; data: Record<string, unknown> }): void {
+  if (frame.type !== 'error') return;
+  const errorField = frame.data.error;
+  const errorObj =
+    typeof errorField === 'object' && errorField !== null
+      ? (errorField as Record<string, unknown>)
+      : undefined;
+  const message =
+    typeof errorObj?.message === 'string' ? errorObj.message : 'Unknown Anthropic streaming error';
+  const errorCode = typeof errorObj?.type === 'string' ? errorObj.type : undefined;
+  throw new ProviderRequestError(`Anthropic API error: ${message}`, { errorCode });
 }
 
 interface ProviderCallResult {
@@ -1013,43 +1124,122 @@ async function callAnthropic(
     );
   }
 
-  const data = (await response.json()) as {
-    content?: { type: string; text?: string }[];
-    error?: { message?: string; type?: string };
-    usage?: {
-      input_tokens?: number;
-      output_tokens?: number;
-      cache_creation_input_tokens?: number;
-      cache_read_input_tokens?: number;
-    };
-  };
+  let content = '';
+  let inputTokens: number | undefined;
+  let outputTokens: number | undefined;
+  let cacheCreationInputTokens: number | undefined;
+  let cacheReadInputTokens: number | undefined;
+  let frameCount = 0;
+  let sawMessageStart = false;
 
-  if (data.error?.message) {
-    throw new ProviderRequestError(`Anthropic API error: ${data.error.message}`, {
-      errorCode: data.error.type,
-    });
+  for await (const frame of parseAnthropicSseFrames(response)) {
+    throwIfAnthropicErrorFrame(frame);
+    frameCount++;
+
+    if (frame.type === 'message_start') {
+      sawMessageStart = true;
+      // input_tokens/кэш-счётчики приходят здесь. message.usage тоже несёт
+      // output_tokens, но это ПРОВИЗОРНОЕ значение (стрим только начался —
+      // почти всегда 0) и оно сознательно НЕ читается в `outputTokens`.
+      // До этого фикса (translation-gy3 hardening) провизорное значение
+      // писалось в `outputTokens` и проходило проверку `typeof outputTokens
+      // === 'number'`, даже если message_delta так и не пришёл: стрим,
+      // оборванный на середине, возвращался как SUCCESS с outputTokens: 0 —
+      // реальный оплаченный вывод учитывался как бесплатный, а вызывающий
+      // получал частичный текст под видом полного ответа. Единственный
+      // источник `outputTokens` теперь — ветка message_delta ниже.
+      const message = frame.data.message;
+      const usage =
+        typeof message === 'object' && message !== null
+          ? (message as Record<string, unknown>).usage
+          : undefined;
+      if (typeof usage === 'object' && usage !== null) {
+        const u = usage as Record<string, unknown>;
+        if (typeof u.input_tokens === 'number') inputTokens = u.input_tokens;
+        if (typeof u.cache_creation_input_tokens === 'number') {
+          cacheCreationInputTokens = u.cache_creation_input_tokens;
+        }
+        if (typeof u.cache_read_input_tokens === 'number') {
+          cacheReadInputTokens = u.cache_read_input_tokens;
+        }
+      }
+      continue;
+    }
+
+    if (frame.type === 'content_block_delta') {
+      const delta = frame.data.delta;
+      if (typeof delta === 'object' && delta !== null) {
+        const d = delta as Record<string, unknown>;
+        if (d.type === 'text_delta' && typeof d.text === 'string') {
+          content += d.text;
+        }
+      }
+      continue;
+    }
+
+    if (frame.type === 'message_delta') {
+      // Единственный источник ФИНАЛЬНОГО output_tokens во всём разборе.
+      const usage = frame.data.usage;
+      if (typeof usage === 'object' && usage !== null) {
+        const u = usage as Record<string, unknown>;
+        if (typeof u.output_tokens === 'number') outputTokens = u.output_tokens;
+      }
+      continue;
+    }
   }
 
-  const content = Array.isArray(data.content)
-    ? data.content.map((part) => part.text || '').join('')
-    : '';
+  /*
+   * Completeness gate (translation-gy3 hardening, 2026-08-11).
+   *
+   * SSE has no Content-Length: a socket closing mid-response is
+   * indistinguishable from a clean end from inside the loop above. Without
+   * this gate, the function simply falls through with whatever it collected
+   * before the cut, and the fields below would decide SUCCESS-with-null-usage
+   * (or worse, SUCCESS-with-partial-text) purely by accident of which frames
+   * happened to arrive first. `usage === null` already kills any BUDGETED run
+   * downstream — `CostLedger.record()` throws `UnverifiableCostError` — but
+   * confusingly, far from here, without ever saying a truncated stream was
+   * the actual cause. Failing HERE, loudly and specifically, turns that
+   * silent/confusing failure into a diagnosable, retryable one — matching
+   * what the OLD non-streaming `response.json()` path did for a truly empty
+   * body (threw, instead of fabricating a result).
+   *
+   * "Complete" requires a real `message_start` usage block (input_tokens
+   * present) AND a `message_delta` that supplied the final output_tokens.
+   * `message_stop` is deliberately NOT required: the EOS flush above proves a
+   * stream can legitimately end the instant `message_delta` lands, with no
+   * trailing newline and no `message_stop` ever making it onto the wire
+   * before the connection closed — that is still a complete, correctly-priced
+   * answer, and `message_stop` itself carries no data this function uses.
+   * Requiring it would mean rejecting exactly the case the EOS flush exists
+   * to accept.
+   */
+  if (!sawMessageStart || typeof inputTokens !== 'number') {
+    const reason = !sawMessageStart
+      ? frameCount === 0
+        ? 'no SSE frames were received (empty or unreadable response body)'
+        : 'no message_start frame was received'
+      : 'message_start carried no input_tokens usage';
+    throw new ProviderRequestError(`Anthropic stream ended incomplete: ${reason}`, {
+      errorCode: 'incomplete_stream',
+    });
+  }
+  if (typeof outputTokens !== 'number') {
+    throw new ProviderRequestError(
+      'Anthropic stream ended incomplete: no message_delta with a final output_tokens was received (connection likely dropped before the model finished responding)',
+      { errorCode: 'incomplete_stream' }
+    );
+  }
 
   // Кэш-счётчики добавляются ТОЛЬКО когда провайдер их прислал: ключ со
   // значением undefined виден в `toEqual` и сделал бы красными уже
   // существующие моки usage в других файлах, ничего не сообщив взамен.
-  const usage =
-    typeof data.usage?.input_tokens === 'number' && typeof data.usage?.output_tokens === 'number'
-      ? {
-          inputTokens: data.usage.input_tokens,
-          outputTokens: data.usage.output_tokens,
-          ...(typeof data.usage.cache_creation_input_tokens === 'number' && {
-            cacheCreationInputTokens: data.usage.cache_creation_input_tokens,
-          }),
-          ...(typeof data.usage.cache_read_input_tokens === 'number' && {
-            cacheReadInputTokens: data.usage.cache_read_input_tokens,
-          }),
-        }
-      : null;
+  const usage: CompletionUsage = {
+    inputTokens,
+    outputTokens,
+    ...(typeof cacheCreationInputTokens === 'number' && { cacheCreationInputTokens }),
+    ...(typeof cacheReadInputTokens === 'number' && { cacheReadInputTokens }),
+  };
 
   return { text: content.trim(), usage };
 }
@@ -1421,43 +1611,15 @@ async function* streamProviderTokens(
       );
     }
 
-    const reader = response.body?.getReader();
-    if (!reader) throw new ProviderRequestError('Failed to get response body reader');
-
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    // finally: ранний выход потребителя обязан закрыть HTTP-соединение, иначе
-    // отменённый стрим продолжает качать токены (и деньги).
-    try {
-      let done = false;
-      while (!done) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
-
-        buffer += decoder.decode(chunk.value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const content = line.slice(6).trim();
-          if (content === '[DONE]') {
-            done = true;
-            break;
-          }
-          try {
-            const data = JSON.parse(content);
-            if (data.type === 'content_block_delta' && data.delta?.text) {
-              yield data.delta.text;
-            }
-          } catch {
-            // Ignore parse errors for non-json lines
-          }
-        }
+    for await (const frame of parseAnthropicSseFrames(response)) {
+      throwIfAnthropicErrorFrame(frame);
+      if (frame.type !== 'content_block_delta') continue;
+      const delta = frame.data.delta;
+      if (typeof delta !== 'object' || delta === null) continue;
+      const d = delta as Record<string, unknown>;
+      if (d.type === 'text_delta' && typeof d.text === 'string') {
+        yield d.text;
       }
-    } finally {
-      await reader.cancel().catch(() => {});
     }
     return;
   }
