@@ -970,6 +970,22 @@ async function postAnthropicMessages(
       max_tokens: maxTokens,
       stream: true,
       ...(temperature !== undefined && { temperature }),
+      // `thinking` раньше нигде в этом файле не выставлялся — поля просто не
+      // существовало, когда код писался под семантику "omission = нет
+      // extended thinking". На Claude Sonnet 5 (и Claude Opus 5) omission
+      // ПЕРЕСТАЛ быть нейтральным: без явного поля модель включает adaptive
+      // thinking САМА, по умолчанию — ровно противоположность того, для чего
+      // написан весь этот файл (structured JSON extraction/audit/
+      // classification, а не reasoning). Живое доказательство: стадия
+      // dependency-graph-proposal с maxTokens: 16000 дважды подряд вернула
+      // outputTokens: 16000 — РОВНО потолок — с rawText: '' (пустой текст) и
+      // text: '{}'; наружу вместо честного "вывод обрезан" ушёл
+      // SCHEMA_MISMATCH на path: 'edges'. Модель потратила весь токен-бюджет
+      // на thinking и не выдала ответа. Тот же паттерн уронил более ранний
+      // coverage-audit вызов на outputTokens: 4096. НЕ убирать это поле как
+      // избыточное — оно кажется избыточным ТОЛЬКО потому, что раньше
+      // omission давал нужное поведение; на текущих моделях это больше не так.
+      thinking: { type: 'disabled' },
     }),
     ...(signal && { signal }),
   });
@@ -1579,6 +1595,12 @@ async function* streamProviderTokens(
         max_tokens: maxTokens,
         stream: true,
         ...(withTemperature && { temperature }),
+        // См. postAnthropicMessages() за полным разбором: omission `thinking`
+        // не нейтрален на Sonnet 5/Opus 5 (adaptive thinking по умолчанию,
+        // живой прогон уронил dependency-graph-proposal на outputTokens:
+        // 16000/16000 с пустым текстом) — явный disabled обязателен и здесь,
+        // в token-streaming пути, не только в буферизованном.
+        thinking: { type: 'disabled' },
       });
     const post = (withTemperature: boolean) =>
       fetch('https://api.anthropic.com/v1/messages', {

@@ -1599,6 +1599,73 @@ describe('callAnthropic reads SSE (translation-gy3 streaming fix)', () => {
 });
 
 /**
+ * Model-migration regression: `thinking` was never set anywhere in this file
+ * — omission used to mean "no extended thinking". On Claude Sonnet 5 (and
+ * Claude Opus 5) omission enables ADAPTIVE thinking instead, the opposite of
+ * the semantics every call site in this file was written for (structured
+ * JSON extraction/audit/classification, not reasoning). Live evidence: the
+ * dependency-graph-proposal stage (maxTokens: 16000) burned the entire
+ * budget on thinking twice in a row — outputTokens: 16000/16000, rawText: ''
+ * — surfacing a confusing SCHEMA_MISMATCH instead of an honest truncation
+ * error. See the comments at the `thinking: { type: 'disabled' }` call sites
+ * in chat-provider.ts for the full writeup; these tests are the RED/GREEN
+ * evidence for the fix.
+ */
+describe('thinking: disabled — восстановление pre-Sonnet-5 семантики', () => {
+  it('буферизованный путь (postAnthropicMessages) отправляет thinking: {type: "disabled"}', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('ok'));
+
+    await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+    });
+
+    expect(anthropicRequestBodies()[0]).toMatchObject({
+      thinking: { type: 'disabled' },
+    });
+  });
+
+  it('token-streaming путь (streamProviderTokens/buildBody) тоже отправляет thinking: {type: "disabled"}', async () => {
+    fetchMock.mockResolvedValue(sseResponse(['ok']));
+
+    const tokens: string[] = [];
+    for await (const token of streamChatCompletionTokens({
+      messages: MESSAGES,
+      provider: 'anthropic',
+    })) {
+      tokens.push(token);
+    }
+
+    expect(tokens).toEqual(['ok']);
+    expect(anthropicRequestBodies()[0]).toMatchObject({
+      thinking: { type: 'disabled' },
+    });
+  });
+
+  // Interaction check (see chat-provider.ts:997 area — temperature-deprecated
+  // retry): the retry only strips `temperature` on the second attempt, it
+  // must never drop `thinking`. Both raw HTTP bodies carry thinking:disabled.
+  it('thinking:disabled присутствует в ОБОИХ попытках temperature-deprecated ретрая', async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response('temperature: deprecated for this model', { status: 400 }))
+      .mockResolvedValueOnce(anthropicOk('recovered'));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      fallbackPolicy: 'NONE',
+    });
+
+    expect(result.text).toBe('recovered');
+    const bodies = anthropicRequestBodies();
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toMatchObject({ thinking: { type: 'disabled' }, temperature: 0.3 });
+    expect(bodies[1]).toMatchObject({ thinking: { type: 'disabled' } });
+    expect(bodies[1].temperature).toBeUndefined();
+  });
+});
+
+/**
  * translation-gy3 hardening (2026-08-11): `callAnthropic` had no notion of a
  * COMPLETE Anthropic message, so a stream cut short by a mid-response socket
  * close (SSE has no Content-Length — a FIN mid-stream is indistinguishable
