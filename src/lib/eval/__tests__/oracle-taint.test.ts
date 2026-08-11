@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import { buildOracleTaintDetector, OracleTaintError, type OracleTaintDetector } from '../oracle-taint';
+import { assertOracleTaintPolicy, buildOracleTaintDetector, oracleTaintPolicyBehaviorProbe, OracleTaintError, type OracleTaintDetector } from '../oracle-taint';
 import type { OracleCase } from '../semantic-rule-oracle';
 import type { SourceRule } from '../source-rule-segmentation';
 
@@ -32,6 +32,47 @@ const ORACLE: OracleCase[] = [
 const detector = () => buildOracleTaintDetector({ oracle: ORACLE, sourceText: SOURCE_TEXT });
 
 describe('buildOracleTaintDetector', () => {
+  it('reports real boundary behavior for resumable-journal fingerprints', () => {
+    expect(oracleTaintPolicyBehaviorProbe()).toEqual({
+      engineInputRejects: true,
+      artifactRejects: true,
+      generatedOutputRejects: false,
+    });
+  });
+
+  it('allows a source-grounded generated paraphrase even when it overlaps the expected answer', () => {
+    const q02Like = buildOracleTaintDetector({
+      sourceText:
+        'Прямое прикосновение к коже разрешается только после мытья рук с мылом не менее 20 секунд и их высушивания.',
+      oracle: [{
+        id: 'Q02',
+        question: 'Можно ли трогать кожу сразу?',
+        expectedRuleIds: [2],
+        expectedAnswer:
+          'Нет. Перед прямым контактом руки нужно вымыть с мылом не менее 20 секунд и высушить.',
+        matchReason: 'Нужно распознать прямой контакт и визуально чистые руки.',
+        negativeCases: [],
+      }],
+    });
+    expect(() =>
+      assertOracleTaintPolicy(
+        q02Like,
+        'GENERATED_OUTPUT',
+        { text: 'Необходимо вымыть руки с мылом не менее 20 секунд и высушить их.' },
+        'engine output'
+      )
+    ).not.toThrow();
+  });
+
+  it('still rejects expectedAnswer and matchReason at protected input boundaries', () => {
+    expect(() =>
+      assertOracleTaintPolicy(detector(), 'ENGINE_INPUT', { leaked: ORACLE[0].expectedAnswer }, 'synthesis input')
+    ).toThrow(OracleTaintError);
+    expect(() =>
+      assertOracleTaintPolicy(detector(), 'ARTIFACT', { leaked: ORACLE[0].matchReason }, 'reviewed artifact')
+    ).toThrow(OracleTaintError);
+  });
+
   it('пропускает вопрос — это законный вход движка, а не секрет', () => {
     expect(() =>
       detector().assertClean({ question: ORACLE[0].question }, 'engine input')

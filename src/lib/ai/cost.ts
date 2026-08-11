@@ -36,6 +36,8 @@ export const MODEL_PRICING: Readonly<Record<string, ModelPricing>> = {
   // confirm against platform.openai.com/pricing before trusting exact
   // totals for runs that include OpenAI calls.
   'gpt-4o': { inputPerMillion: 2.5, outputPerMillion: 10.0 },
+  // Official OpenAI model documentation, checked 2026-08-10.
+  'gpt-4o-mini': { inputPerMillion: 0.15, outputPerMillion: 0.60 },
   // Embeddings are input-only — outputPerMillion is structurally 0, not a
   // placeholder for "unknown."
   'text-embedding-3-small': { inputPerMillion: 0.02, outputPerMillion: 0 },

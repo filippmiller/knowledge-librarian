@@ -26,13 +26,19 @@ export async function generateEmbedding(text: string): Promise<number[]> {
 
 export async function generateEmbeddings(
   texts: string[],
-  requestOptions?: { maxRetries?: number }
+  requestOptions?: { maxRetries?: number },
+  onUsage?: (usage: { inputTokens: number; outputTokens: number } | null) => void
 ): Promise<number[][]> {
   const response = await openai.embeddings.create({
     model: EMBEDDING_MODEL,
     input: texts,
     dimensions: EMBEDDING_DIMENSIONS,
   }, requestOptions);
+  onUsage?.(
+    typeof response.usage?.prompt_tokens === 'number'
+      ? { inputTokens: response.usage.prompt_tokens, outputTokens: 0 }
+      : null
+  );
   return response.data.map((d) => d.embedding);
 }
 

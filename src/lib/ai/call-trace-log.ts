@@ -44,6 +44,9 @@ export interface CallTraceCorrelation {
   readonly blockAnchor?: string;
   readonly blockAnchors?: readonly string[];
   readonly caseId?: string;
+  readonly engineProvider?: string;
+  readonly engineModel?: string;
+  readonly engineProfile?: string;
 }
 
 export function attributeAttemptCosts(attempts: readonly CompletionAttempt[]): CallTraceAttempt[] {

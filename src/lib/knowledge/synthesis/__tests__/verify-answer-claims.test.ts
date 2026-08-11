@@ -155,6 +155,31 @@ describe('verifyAnswerClaims — заземление по паре (едини�
 });
 
 describe('verifyAnswerClaims — цитаты', () => {
+  it.each([
+    ['Согласно [u1], правило действует.', 'selected unit id'],
+    ['Источник a1 подтверждает правило.', 'selected source anchor'],
+  ])('rejects internal reference leak in prose: %s (%s)', (text) => {
+    const result = verifyAnswerClaims(draft({ text }), pack());
+    expect(result.violations.map((violation) => violation.code)).toContain('internal_reference_leak');
+  });
+
+  it('rejects a supporting-context unit id in prose', () => {
+    const result = verifyAnswerClaims(draft({ text: 'См. [parent-internal].' }), {
+      ...pack(),
+      supportingContext: [{
+        role: 'OVERRIDDEN_PARENT_CONTEXT', unitId: 'parent-internal', kind: 'PROCEDURE_STEP',
+        statement: 'Контекст.', citation: { anchor: 'ctx-anchor', quote: 'Контекст.' },
+        numericConstraint: null, overriddenByUnitId: 'u1',
+      }],
+    });
+    expect(result.violations.map((violation) => violation.code)).toContain('internal_reference_leak');
+  });
+
+  it('does not reject an unrelated human-facing identifier', () => {
+    const result = verifyAnswerClaims(draft({ text: 'Номер обращения AB-12345 сохранён.' }), pack());
+    expect(result.violations.map((violation) => violation.code)).not.toContain('internal_reference_leak');
+  });
+
   it('ловит цитату на unit, которого нет в evidence pack', () => {
     const result = verifyAnswerClaims(draft({ citedUnitIds: ['u1', 'u404'] }), pack());
 
@@ -168,6 +193,58 @@ describe('verifyAnswerClaims — цитаты', () => {
 
     expect(result.verified).toBe(false);
     expect(result.violations.map((v) => v.code)).toContain('uncited_answer');
+  });
+});
+
+describe('verifyAnswerClaims — overridden parent context', () => {
+  const contextualPack = (): EvidencePack => ({
+    items: [{
+      unitId: 'exception',
+      kind: 'EXCEPTION_RULE',
+      statement: 'Краткое надавливание не разрешает полноценное чесание.',
+      citation: { anchor: 'child', quote: 'не разрешает полноценное чесание' },
+      numericConstraint: null,
+    }],
+    supportingContext: [{
+      role: 'OVERRIDDEN_PARENT_CONTEXT',
+      unitId: 'parent',
+      kind: 'EXCEPTION_RULE',
+      statement: 'Надавить не более 3 секунд, затем уйти в уединённое место; не повторять.',
+      citation: { anchor: 'parent', quote: 'не более 3 секунд' },
+      numericConstraint: { factKey: 'max_seconds', value: 3, unit: 'seconds' },
+      overriddenByUnitId: 'exception',
+    }],
+    numericFacts: [],
+  });
+
+  it('allows Q05-like supplemental details when parent and operative child are co-cited', () => {
+    const result = verifyAnswerClaims(draft({
+      text: 'Надавить не более 3 секунд, затем уйти в уединённое место и не повторять; полноценно чесать нельзя.',
+      citedUnitIds: ['parent', 'exception'],
+    }), contextualPack());
+    expect(result.verified).toBe(true);
+  });
+
+  it('rejects context-only answers and context cited without its operative overrider', () => {
+    const result = verifyAnswerClaims(draft({ text: 'Не более 3 секунд.', citedUnitIds: ['parent'] }), contextualPack());
+    expect(result.violations.map((v) => v.code)).toEqual(expect.arrayContaining([
+      'context_only_answer',
+      'context_without_overrider_citation',
+    ]));
+  });
+
+  it('does not ground a parent number unless that parent is cited', () => {
+    const result = verifyAnswerClaims(draft({ text: 'Не более 3 секунд.', citedUnitIds: ['exception'] }), contextualPack());
+    expect(result.violations.map((v) => v.code)).toContain('unsupported_number');
+  });
+
+  it('rejects fabricated context whose overrider is absent from operative evidence', () => {
+    const broken = contextualPack();
+    const result = verifyAnswerClaims(draft({ citedUnitIds: ['exception'] }), {
+      ...broken,
+      supportingContext: [{ ...broken.supportingContext![0], overriddenByUnitId: 'fabricated' }],
+    });
+    expect(result.violations.map((v) => v.code)).toContain('invalid_context_edge');
   });
 });
 

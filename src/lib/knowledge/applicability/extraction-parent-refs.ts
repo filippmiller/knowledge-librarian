@@ -35,11 +35,12 @@ import type { ExtractedKnowledgeUnit, ExtractionUncertainty } from './extraction
  * несущей сырую ссылку в тексте.
  */
 export function validateParentRefs(
-  units: readonly ExtractedKnowledgeUnit[]
+  units: readonly ExtractedKnowledgeUnit[],
+  allowedExternalRefs: ReadonlySet<string> = new Set()
 ): ExtractedKnowledgeUnit[] {
   const duplicated = findDuplicateExtractionRefs(units);
   const withDuplicateFlag = flagDuplicateExtractionRefs(units, duplicated);
-  const knownRefs = new Set(units.map((u) => u.extractionRef));
+  const knownRefs = new Set([...units.map((u) => u.extractionRef), ...allowedExternalRefs]);
 
   return withDuplicateFlag.map((u) => {
     if (u.parentExtractionRef === null) return u;

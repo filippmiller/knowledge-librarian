@@ -11,6 +11,7 @@ import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 
 import { z } from 'zod';
 
 import type { CallTraceEntry } from '@/lib/ai/call-trace-log';
+import type { ChatMessage } from '@/lib/ai/chat-provider';
 import { batchSourceBlocks, type BatchExtractionCheckpoint } from '@/lib/knowledge/batch-extraction';
 import {
   extractedKnowledgeUnitSchema,
@@ -37,6 +38,56 @@ import {
 
 export const RAW_EXTRACTION_CHECKPOINT_VERSION = '2026-08-10-raw-extraction-v1';
 
+/** One-turn migration for the immediately preceding strict exception-repair
+ * prompt. Its successful outputs already passed the same schema and carry a
+ * real parent + catalogued trigger; preserving them avoids repaying for b4.
+ * Schema-failed b6 responses were never journaled and cannot enter here. */
+const PREVIOUS_STRICT_EXCEPTION_REPAIR_CONTRACT_DIGEST =
+  '8ce0fd59b182da01a2c67f00da326bef1aa34cb8f799868aa0e98305888c81e1';
+
+/** One-transition compatibility for the immediately previous quality-v2
+ * extraction prompt. Those paid raw batches are safe to reuse only for this
+ * exact source/provider/model/layout family; the new structural audit and
+ * focused replacement are the compensating gate and all paid post-raw stages
+ * are deliberately discarded. Remove after the journal has been rewritten. */
+const PREVIOUS_QUALITY_V2_RAW_FAMILY = {
+  sourceRevisionHash: '90cfcdf6ccfd2ce719bba81cf826dd93b4ace7a9234db45d750b9f3975bdc3b6',
+  canonicalTextHash: '8e87e889d6f5cd09dbd2ad5278c607e5b47d3472a6c3a85f18a90711705bdd70',
+  parserVersion: '2.0.0',
+  sourceBlocksDigest: 'f9f2cab9b297a2112d0264c7a623a0b4a1354f051057ac49840faa0d50152b05',
+  configDigest: '34a635cd960adac15ea65f2beeb64060603dd32f452bf3f483451f8866068fad',
+  provider: 'anthropic',
+  model: 'claude-sonnet-5',
+  batchSize: 4,
+  batches: [
+    ['b0', 'b1', 'b2', 'b3', 'ec9605e2ff802700a2be5e534a785912e41c72d3fef20b5ccd0cd1ad1d769684'],
+    ['b4', 'b5', 'b6', 'b7', '9a57baf98567fba7a89cae378aa8ce7c805edb2a591fc3c336ea874f3580fed0'],
+    ['b8', 'b9', 'b10', 'b11', '624d587a831a7cbdab9fca5d7cb871745ee44301f2e96205f0e5f930b1a6f457'],
+    ['b12', 'b13', 'b14', '584f1b18f780e76445c95928c04974a540c6c74a25d54ddaf27893067b298f2e'],
+  ],
+} as const;
+
+/** Exact destination of the one-transition migration above. Pinning both
+ * sides prevents a later prompt/config change from relabelling the same paid
+ * predecessor yet again. Audit/repair digests are intentionally absent: only
+ * the raw extraction contract determines whether raw batches can be reused. */
+const IMMEDIATE_QUALITY_V2_RAW_SUCCESSOR = {
+  configDigest: 'c9aa58e6eeac7e90bd144f6456b41ab40da833b0fc7f8f8a545676cfc2984db0',
+  requestDigests: [
+    'd738a03ef58b99f91a65946232ecd4f95789d10992c4702f96b97acc5f47349b',
+    'a45bc51b02b4d92e21a25fa8dca6f5f5c732cf5723c08fd0be6d9387fca859c0',
+    '9b0d90b64167d3da44d50df5e087a3e9d0394b78d9bbfb2c0fb18b0fc214f5d1',
+    'f8f36f32d66adf56a8bf821170b84086d59fb549917458e1bae489b94d733915',
+  ],
+} as const;
+
+function isReusablePreviousExceptionRepair(units: readonly ExtractedKnowledgeUnit[]): boolean {
+  return units.every((unit) =>
+    unit.kind !== 'EXCEPTION_RULE' ||
+    (unit.parentExtractionRef !== null && unit.triggerCondition !== null)
+  );
+}
+
 function digest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value), 'utf8').digest('hex');
 }
@@ -55,6 +106,7 @@ const fingerprintSchema = z.strictObject({
   configDigest: z.string().regex(/^[a-f0-9]{64}$/),
   auditContractDigest: z.string().regex(/^[a-f0-9]{64}$/),
   repairContractDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  exceptionRepairContractDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   legacyCombinedConfigDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   provider: z.string().min(1),
   model: z.string().min(1),
@@ -75,6 +127,7 @@ export interface RawExtractionFingerprintInput {
   readonly config: Readonly<Record<string, string | number | boolean | null>>;
   readonly auditContract: Readonly<Record<string, string | number | boolean | null>>;
   readonly repairContract: Readonly<Record<string, string | number | boolean | null>>;
+  readonly exceptionRepairContract?: Readonly<Record<string, string | number | boolean | null>>;
   /** Exact pre-split config object, only for one-time migration of v1 files
    * whose single configDigest mixed extraction, audit and repair settings. */
   readonly legacyCombinedConfig?: Readonly<Record<string, string | number | boolean | null>>;
@@ -98,6 +151,7 @@ export function buildRawExtractionFingerprint(
     configDigest: digest(input.config),
     auditContractDigest: digest(input.auditContract),
     repairContractDigest: digest(input.repairContract),
+    exceptionRepairContractDigest: digest(input.exceptionRepairContract ?? input.repairContract),
     ...(input.legacyCombinedConfig !== undefined && {
       legacyCombinedConfigDigest: digest(input.legacyCombinedConfig),
     }),
@@ -151,6 +205,22 @@ const completedAuditedStageSchema = z.discriminatedUnion('stage', [
   }),
   z.strictObject({
     stage: z.literal('TAINT_RESAMPLE_AUDIT'),
+    blockAnchor: z.string().min(1),
+    round: z.number().int().positive(),
+    requestDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    contractDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    result: semanticAuditResultSchema,
+  }),
+  z.strictObject({
+    stage: z.literal('EXCEPTION_REPAIR_EXTRACTION'),
+    blockAnchor: z.string().min(1),
+    round: z.number().int().positive(),
+    requestDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    contractDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    units: z.array(extractedKnowledgeUnitSchema).readonly(),
+  }),
+  z.strictObject({
+    stage: z.literal('EXCEPTION_REPAIR_AUDIT'),
     blockAnchor: z.string().min(1),
     round: z.number().int().positive(),
     requestDigest: z.string().regex(/^[a-f0-9]{64}$/),
@@ -213,8 +283,55 @@ function atomicWrite(filePath: string, value: unknown): void {
 }
 
 function sameFingerprint(left: RawExtractionFingerprint, right: RawExtractionFingerprint): boolean {
-  const extractionOnly = ({ auditContractDigest: _audit, repairContractDigest: _repair, legacyCombinedConfigDigest: _legacy, ...rest }: RawExtractionFingerprint) => rest;
+  const extractionOnly = ({
+    auditContractDigest: _audit,
+    repairContractDigest: _repair,
+    exceptionRepairContractDigest: _exceptionRepair,
+    legacyCombinedConfigDigest: _legacy,
+    ...rest
+  }: RawExtractionFingerprint) => rest;
   return digest(extractionOnly(left)) === digest(extractionOnly(right));
+}
+
+export function isImmediatelyPreviousQualityV2RawFamily(
+  saved: RawExtractionFingerprint,
+  expected: RawExtractionFingerprint
+): boolean {
+  const family = PREVIOUS_QUALITY_V2_RAW_FAMILY;
+  const successor = IMMEDIATE_QUALITY_V2_RAW_SUCCESSOR;
+  if (
+    saved.sourceRevisionHash !== family.sourceRevisionHash ||
+    saved.canonicalTextHash !== family.canonicalTextHash ||
+    saved.parserVersion !== family.parserVersion ||
+    saved.sourceBlocksDigest !== family.sourceBlocksDigest ||
+    saved.configDigest !== family.configDigest ||
+    saved.provider !== family.provider ||
+    saved.model !== family.model ||
+    saved.batchSize !== family.batchSize
+  ) return false;
+  if (
+    expected.sourceRevisionHash !== saved.sourceRevisionHash ||
+    expected.canonicalTextHash !== saved.canonicalTextHash ||
+    expected.parserVersion !== saved.parserVersion ||
+    expected.sourceBlocksDigest !== saved.sourceBlocksDigest ||
+    expected.provider !== saved.provider ||
+    expected.model !== saved.model ||
+    expected.batchSize !== saved.batchSize ||
+    expected.configDigest !== successor.configDigest ||
+    expected.batches.length !== family.batches.length ||
+    saved.batches.length !== family.batches.length
+  ) return false;
+  return family.batches.every((legacy, index) => {
+    const savedBatch = saved.batches[index];
+    const expectedBatch = expected.batches[index];
+    const anchors = legacy.slice(0, -1);
+    const requestDigest = legacy.at(-1);
+    return savedBatch?.batchIndex === index && expectedBatch?.batchIndex === index &&
+      JSON.stringify(savedBatch.blockAnchors) === JSON.stringify(anchors) &&
+      JSON.stringify(expectedBatch.blockAnchors) === JSON.stringify(anchors) &&
+      savedBatch.requestDigest === requestDigest &&
+      expectedBatch.requestDigest === successor.requestDigests[index];
+  });
 }
 
 export class RawExtractionCheckpointStore implements BatchExtractionCheckpoint, AuditedExtractionCheckpoint {
@@ -255,15 +372,27 @@ export class RawExtractionCheckpointStore implements BatchExtractionCheckpoint, 
       return;
     }
     const parsed = current.data;
-    if (!sameFingerprint(parsed.fingerprint, this.expected)) {
+    const previousQualityV2 = !sameFingerprint(parsed.fingerprint, this.expected) &&
+      isImmediatelyPreviousQualityV2RawFamily(parsed.fingerprint, this.expected);
+    if (!sameFingerprint(parsed.fingerprint, this.expected) && !previousQualityV2) {
       throw new RawExtractionCheckpointError('Raw extraction checkpoint source/config/batch fingerprint mismatch');
     }
     for (const batch of parsed.completedBatches) {
       const descriptor = this.expected.batches[batch.batchIndex];
-      if (!descriptor || descriptor.requestDigest !== batch.requestDigest || this.completed.has(batch.batchIndex)) {
+      const savedDescriptor = parsed.fingerprint.batches[batch.batchIndex];
+      if (!descriptor || !savedDescriptor || savedDescriptor.requestDigest !== batch.requestDigest || this.completed.has(batch.batchIndex)) {
         throw new RawExtractionCheckpointError(`Raw extraction checkpoint has an invalid or duplicate batch ${batch.batchIndex}`);
       }
-      this.completed.set(batch.batchIndex, batch);
+      this.completed.set(batch.batchIndex, previousQualityV2
+        ? { ...batch, requestDigest: descriptor.requestDigest }
+        : batch);
+    }
+    if (previousQualityV2) {
+      // Never reuse semantic audits/repairs produced under the statement-only
+      // contract. Persist immediately under the current raw request family.
+      this.auditedStages.clear();
+      this.persist();
+      return;
     }
     for (const stage of parsed.completedAuditedStages ?? []) {
       const key = this.stageKey(stage);
@@ -275,7 +404,13 @@ export class RawExtractionCheckpointStore implements BatchExtractionCheckpoint, 
   }
 
   private loadLegacy(parsed: z.infer<typeof legacyCheckpointSchema>): void {
-    const { auditContractDigest: _audit, repairContractDigest: _repair, legacyCombinedConfigDigest: _legacy, ...expectedCore } = this.expected;
+    const {
+      auditContractDigest: _audit,
+      repairContractDigest: _repair,
+      exceptionRepairContractDigest: _exceptionRepair,
+      legacyCombinedConfigDigest: _legacy,
+      ...expectedCore
+    } = this.expected;
     const { configDigest: _legacyMixedConfig, ...legacySeparableCore } = parsed.fingerprint;
     const { configDigest: _currentExtractionConfig, ...expectedSeparableCore } = expectedCore;
     // The legacy digest irreversibly mixed extraction and audit settings, so
@@ -347,10 +482,11 @@ export class RawExtractionCheckpointStore implements BatchExtractionCheckpoint, 
   }
 
   loadAudit(stage: CoverageAuditStage, options: AuditBlockCoverageOptions): BlockCoverageAuditResult | undefined {
-    let saved = this.auditedStages.get(`${stage}:${options.blockAnchor}`);
+    const requestDigest = this.auditRequestDigest(options);
+    const key = `${stage}:${options.blockAnchor}:${requestDigest}`;
+    let saved = this.auditedStages.get(key);
     if (saved && saved.contractDigest !== this.expected.auditContractDigest) saved = undefined;
     if (!saved) {
-      const requestDigest = this.auditRequestDigest(options);
       const matches = this.recoveryTraceEntries.filter((entry) =>
         entry.purpose === 'coverage-audit' && entry.outcome === 'SUCCESS' &&
         entry.provider === this.expected.provider && entry.model === this.expected.model &&
@@ -363,7 +499,7 @@ export class RawExtractionCheckpointStore implements BatchExtractionCheckpoint, 
         try {
           const response = coverageAuditResponseSchema.parse(JSON.parse(match.responseText));
           this.saveAudit(stage, options, interpretCoverageAuditResponse(options.blockAnchor, options.blockText, response.findings));
-          saved = this.auditedStages.get(`${stage}:${options.blockAnchor}`);
+          saved = this.auditedStages.get(key);
         } catch {
           // Diagnostic traces are never trusted when strict replay fails.
         }
@@ -392,10 +528,11 @@ export class RawExtractionCheckpointStore implements BatchExtractionCheckpoint, 
   }
 
   loadRepair(options: FocusedRepairOptions): readonly ExtractedKnowledgeUnit[] | undefined {
-    let saved = this.auditedStages.get(`FOCUSED_REPAIR:${options.block.anchor}`);
+    const requestDigest = digest(buildFocusedRepairPromptMessages(options));
+    const key = `FOCUSED_REPAIR:${options.block.anchor}:${requestDigest}`;
+    let saved = this.auditedStages.get(key);
     if (saved && saved.contractDigest !== this.expected.repairContractDigest) saved = undefined;
     if (!saved) {
-      const requestDigest = digest(buildFocusedRepairPromptMessages(options));
       const match = this.recoveryTraceEntries.find((entry) =>
         entry.purpose === 'focused-repair' && entry.outcome === 'SUCCESS' &&
         entry.provider === this.expected.provider && entry.model === this.expected.model &&
@@ -404,8 +541,14 @@ export class RawExtractionCheckpointStore implements BatchExtractionCheckpoint, 
       if (match?.responseText) {
         try {
           const response = z.strictObject({ units: z.array(extractedKnowledgeUnitSchema) }).parse(JSON.parse(match.responseText));
-          this.saveRepair(options, validateParentRefs(response.units));
-          saved = this.auditedStages.get(`FOCUSED_REPAIR:${options.block.anchor}`);
+          this.saveRepair(
+            options,
+            validateParentRefs(
+              response.units,
+              new Set(options.existingUnits.map((unit) => unit.extractionRef))
+            )
+          );
+          saved = this.auditedStages.get(key);
         } catch {
           // Invalid legacy repair response is ignored and paid call proceeds.
         }
@@ -499,6 +642,123 @@ export class RawExtractionCheckpointStore implements BatchExtractionCheckpoint, 
     });
   }
 
+  loadExceptionRepair(
+    round: number,
+    block: SourceBlock,
+    requestMessages: readonly ChatMessage[]
+  ): readonly ExtractedKnowledgeUnit[] | undefined {
+    const key = `EXCEPTION_REPAIR_EXTRACTION:${round}:${block.anchor}`;
+    let saved = this.auditedStages.get(key);
+    const expectedContract = this.expected.exceptionRepairContractDigest ?? this.expected.repairContractDigest;
+    const reusablePrevious = saved?.stage === 'EXCEPTION_REPAIR_EXTRACTION' &&
+      saved.contractDigest === PREVIOUS_STRICT_EXCEPTION_REPAIR_CONTRACT_DIGEST &&
+      isReusablePreviousExceptionRepair(saved.units);
+    if (saved && saved.contractDigest !== expectedContract && !reusablePrevious) saved = undefined;
+    const requestDigest = digest(requestMessages);
+    if (!saved) {
+      const match = this.recoveryTraceEntries.find((entry) =>
+        entry.purpose === 'exception-repair' && entry.outcome === 'SUCCESS' &&
+        entry.correlation?.stage === 'exception-repair' &&
+        entry.correlation?.blockAnchor === block.anchor &&
+        entry.provider === this.expected.provider && entry.model === this.expected.model &&
+        digest(entry.requestMessages) === requestDigest && entry.responseText !== null
+      );
+      if (match?.responseText) {
+        try {
+          const response = z.strictObject({ units: z.array(extractedKnowledgeUnitSchema) }).parse(JSON.parse(match.responseText));
+          this.saveExceptionRepair(round, block, requestMessages, validateParentRefs(response.units));
+          saved = this.auditedStages.get(key);
+        } catch { /* diagnostic traces are never authority */ }
+      }
+    }
+    if (!saved) return undefined;
+    if (saved.stage !== 'EXCEPTION_REPAIR_EXTRACTION' ||
+      (saved.requestDigest !== requestDigest && !reusablePrevious)) {
+      throw new RawExtractionCheckpointError(`Exception repair request mismatch for block ${block.anchor}, round ${round}`);
+    }
+    return saved.units;
+  }
+
+  saveExceptionRepair(
+    round: number,
+    block: SourceBlock,
+    requestMessages: readonly ChatMessage[],
+    units: readonly ExtractedKnowledgeUnit[]
+  ): void {
+    this.saveAuditedStage({
+      stage: 'EXCEPTION_REPAIR_EXTRACTION',
+      blockAnchor: block.anchor,
+      round,
+      requestDigest: digest(requestMessages),
+      contractDigest: this.expected.exceptionRepairContractDigest ?? this.expected.repairContractDigest,
+      units: z.array(extractedKnowledgeUnitSchema).parse(units),
+    });
+  }
+
+  loadExceptionRepairAudit(
+    round: number,
+    options: AuditBlockCoverageOptions
+  ): BlockCoverageAuditResult | undefined {
+    const key = `EXCEPTION_REPAIR_AUDIT:${round}:${options.blockAnchor}`;
+    let saved = this.auditedStages.get(key);
+    if (saved && saved.contractDigest !== this.expected.auditContractDigest) saved = undefined;
+    const requestDigest = this.auditRequestDigest(options);
+    // A new exception-repair prompt can produce a different replacement for
+    // the same block/round while the coverage-audit policy itself remains
+    // unchanged. The old audit answers a different exact request, so evict
+    // only this stage and let the new replacement be audited and saved.
+    if (saved?.stage === 'EXCEPTION_REPAIR_AUDIT' && saved.requestDigest !== requestDigest) {
+      this.auditedStages.delete(key);
+      this.persist();
+      saved = undefined;
+    }
+    if (!saved) {
+      const matches = this.recoveryTraceEntries.filter((entry) =>
+        entry.purpose === 'coverage-audit' && entry.outcome === 'SUCCESS' &&
+        entry.correlation?.blockAnchor === options.blockAnchor &&
+        entry.provider === this.expected.provider && entry.model === this.expected.model &&
+        digest(entry.requestMessages) === requestDigest && entry.responseText !== null
+      );
+      const match = matches.at(-1);
+      if (match?.responseText) {
+        try {
+          const response = coverageAuditResponseSchema.parse(JSON.parse(match.responseText));
+          this.saveExceptionRepairAudit(
+            round,
+            options,
+            interpretCoverageAuditResponse(options.blockAnchor, options.blockText, response.findings)
+          );
+          saved = this.auditedStages.get(key);
+        } catch { /* diagnostic traces are never authority */ }
+      }
+    }
+    if (!saved) return undefined;
+    if (saved.stage !== 'EXCEPTION_REPAIR_AUDIT' || saved.requestDigest !== requestDigest) {
+      throw new RawExtractionCheckpointError(`Exception repair audit request mismatch for block ${options.blockAnchor}, round ${round}`);
+    }
+    return saved.result;
+  }
+
+  saveExceptionRepairAudit(
+    round: number,
+    options: AuditBlockCoverageOptions,
+    result: BlockCoverageAuditResult
+  ): void {
+    this.saveAuditedStage({
+      stage: 'EXCEPTION_REPAIR_AUDIT',
+      blockAnchor: options.blockAnchor,
+      round,
+      requestDigest: this.auditRequestDigest(options),
+      contractDigest: this.expected.auditContractDigest,
+      result: {
+        blockAnchor: result.blockAnchor,
+        findings: result.findings,
+        hasGap: result.hasGap,
+        ...(result.unresolved !== undefined && { unresolved: result.unresolved }),
+      },
+    });
+  }
+
   private auditRequestDigest(options: AuditBlockCoverageOptions): string {
     return digest(buildCoverageAuditPromptMessages(options.blockText, options.extractedStatements, options.blockKind));
   }
@@ -521,7 +781,7 @@ export class RawExtractionCheckpointStore implements BatchExtractionCheckpoint, 
   private stageKey(stage: CompletedAuditedStage): string {
     return 'round' in stage
       ? `${stage.stage}:${stage.round}:${stage.blockAnchor}`
-      : `${stage.stage}:${stage.blockAnchor}`;
+      : `${stage.stage}:${stage.blockAnchor}:${stage.requestDigest}`;
   }
 
   private assertRequest(batchIndex: number, blocks: readonly SourceBlock[]) {

@@ -18,7 +18,7 @@ import path from 'node:path';
 
 import { loadSemanticRuleOracle, type OracleCase } from '../src/lib/eval/semantic-rule-oracle';
 import { loadNegativeCaseOracle, type NegativeCaseApplicabilityOracle } from '../src/lib/eval/negative-case-oracle';
-import { RULE_9_EVIDENCE_GROUP, RULE_10_EVIDENCE_GROUP, evaluateEvidenceGroupCoverage, type RequiredEvidenceGroup } from '../src/lib/eval/evidence-groups';
+import { RULE_1_EVIDENCE_GROUP, RULE_9_EVIDENCE_GROUP, RULE_10_EVIDENCE_GROUP, evaluateEvidenceGroupCoverage, type RequiredEvidenceGroup } from '../src/lib/eval/evidence-groups';
 import type { PersistedKnowledgeUnit } from '../src/lib/knowledge/applicability/identity-assignment';
 
 type FailureStage =
@@ -35,6 +35,7 @@ type FailureStage =
   | 'NONE';
 
 const EVIDENCE_GROUPS_BY_RULE: Record<number, RequiredEvidenceGroup> = {
+  1: RULE_1_EVIDENCE_GROUP,
   9: RULE_9_EVIDENCE_GROUP,
   10: RULE_10_EVIDENCE_GROUP,
 };
@@ -48,7 +49,7 @@ function parseArgs(argv: readonly string[]): { inDir: string; outPath: string } 
   return { inDir: inArg, outPath: outArg };
 }
 
-interface EngineQuestionResultLike {
+export interface EngineQuestionResultLike {
   readonly caseId: string;
   readonly question: string;
   readonly queryFrame: unknown;
@@ -59,18 +60,20 @@ interface EngineQuestionResultLike {
   readonly resolution: {
     readonly disposition: 'ANSWER' | 'CLARIFY' | 'HOLD';
     readonly selected: readonly string[];
+    readonly negativeEvidence?: readonly string[];
     readonly excluded: readonly { unitId: string; reason: string }[];
     readonly undetermined: readonly { unitId: string; reason: string }[];
     readonly clarificationNeeds: { facets: readonly string[]; triggerFacts: readonly string[]; ambiguities: readonly string[] };
     readonly reasons: readonly string[];
   } | null;
   readonly verification: { readonly verified: boolean; readonly violations: readonly { code: string; detail: string }[] } | null;
-  readonly actualDisposition: 'DIRECT_ANSWER' | 'HOLD' | 'ERROR';
+  readonly actualDisposition: 'DIRECT_ANSWER' | 'UNVERIFIED_ANSWER' | 'HOLD' | 'ERROR';
+  readonly answerDependsOnProbabilisticExclusion?: boolean | null;
   readonly errorMessage: string | null;
   readonly draft: { readonly text: string; readonly citedUnitIds: readonly string[] } | null;
 }
 
-interface RunArtifacts {
+export interface RunArtifacts {
   readonly runId: string;
   readonly units: readonly PersistedKnowledgeUnit[];
   readonly sourceRuleIdByUnitId: ReadonlyMap<string, number | null>;
@@ -86,12 +89,12 @@ function loadRunArtifacts(runDir: string, runId: string): RunArtifacts {
   return { runId, units, sourceRuleIdByUnitId: new Map(Object.entries(sourceRuleIdByUnitIdRaw)), results };
 }
 
-interface CaseVerdict {
+export interface CaseVerdict {
   readonly runId: string;
   readonly caseId: string;
   readonly pass: boolean;
   readonly expectedDisposition: 'DIRECT_ANSWER' | 'HOLD';
-  readonly actualDisposition: 'DIRECT_ANSWER' | 'HOLD' | 'ERROR';
+  readonly actualDisposition: 'DIRECT_ANSWER' | 'UNVERIFIED_ANSWER' | 'HOLD' | 'ERROR';
   readonly primaryFailureStage: FailureStage;
   readonly diagnosticFlags: readonly string[];
 }
@@ -105,7 +108,10 @@ function ruleIdsOf(unitIds: readonly string[], sourceRuleIdByUnitId: ReadonlyMap
   return out;
 }
 
-function gradePositiveCase(oracleCase: OracleCase, run: RunArtifacts): CaseVerdict {
+const numericKey = (value: number, unit: string): string =>
+  `${value}::${unit.trim().toLowerCase().replace(/s$/, '')}`;
+
+export function gradePositiveCase(oracleCase: OracleCase, run: RunArtifacts): CaseVerdict {
   const result = run.results.find((r) => r.caseId === oracleCase.id);
   const flags: string[] = [];
 
@@ -150,10 +156,28 @@ function gradePositiveCase(oracleCase: OracleCase, run: RunArtifacts): CaseVerdi
   else if (missingFromCandidates.length > 0) primaryFailureStage = 'RETRIEVAL_MISS';
   else if (missingFromTopK.length > 0) primaryFailureStage = 'RERANK_MISS';
   else if (missingFromSelected.length > 0 || evidenceGroupUncovered.length > 0) primaryFailureStage = 'RESOLUTION_ERROR';
-  else if (result.actualDisposition === 'HOLD') primaryFailureStage = 'UNEXPECTED_HOLD';
-  else if (result.verification && !result.verification.verified) {
+  else if (result.resolution === null) {
+    primaryFailureStage = 'RESOLUTION_ERROR';
+    flags.push('resolution trace missing');
+  } else if (result.resolution.disposition !== 'ANSWER' || result.actualDisposition === 'HOLD') {
+    primaryFailureStage = 'RESOLUTION_ERROR';
+    flags.push(`unexpected ${result.resolution.disposition} resolution for positive case`);
+    flags.push(...result.resolution.reasons.map((reason) => `resolution: ${reason}`));
+  } else if (result.verification?.verified === false) {
     primaryFailureStage = 'SYNTHESIS_ERROR';
     flags.push(...result.verification.violations.map((v) => `${v.code}: ${v.detail}`));
+  } else if (result.verification === null) {
+    primaryFailureStage = 'EVIDENCE_ERROR';
+    flags.push('verification result missing');
+  } else if (result.actualDisposition === 'UNVERIFIED_ANSWER') {
+    primaryFailureStage = result.answerDependsOnProbabilisticExclusion
+      ? 'APPLICABILITY_ERROR'
+      : 'RESOLUTION_ERROR';
+    flags.push(
+      result.answerDependsOnProbabilisticExclusion
+        ? 'verified answer blocked because it depends on probabilistic candidate exclusion'
+        : 'verified answer was marked UNVERIFIED_ANSWER without a recorded probabilistic-exclusion dependency'
+    );
   }
 
   const ruleCoverageOk = missingFromExtraction.length === 0 && missingFromCandidates.length === 0 && missingFromTopK.length === 0 && missingFromSelected.length === 0 && evidenceGroupUncovered.length === 0;
@@ -162,7 +186,7 @@ function gradePositiveCase(oracleCase: OracleCase, run: RunArtifacts): CaseVerdi
   return { runId: run.runId, caseId: oracleCase.id, pass, expectedDisposition: 'DIRECT_ANSWER', actualDisposition: result.actualDisposition, primaryFailureStage, diagnosticFlags: flags };
 }
 
-function gradeNegativeCase(neg: NegativeCaseApplicabilityOracle, run: RunArtifacts): CaseVerdict {
+export function gradeNegativeCase(neg: NegativeCaseApplicabilityOracle, run: RunArtifacts): CaseVerdict {
   const result = run.results.find((r) => r.caseId === neg.id);
   const flags: string[] = [];
 
@@ -175,6 +199,8 @@ function gradeNegativeCase(neg: NegativeCaseApplicabilityOracle, run: RunArtifac
 
   const candidateRuleIds = result.retrieval ? ruleIdsOf(result.retrieval.candidatesBeforeRerank, run.sourceRuleIdByUnitId) : new Set<number>();
   const selectedRuleIds = result.resolution ? ruleIdsOf(result.resolution.selected, run.sourceRuleIdByUnitId) : new Set<number>();
+  const negativeEvidenceUnitIds = result.resolution?.negativeEvidence ?? [];
+  const negativeEvidenceRuleIds = ruleIdsOf(negativeEvidenceUnitIds, run.sourceRuleIdByUnitId);
 
   let primaryFailureStage: FailureStage = 'NONE';
   let ok = true;
@@ -195,6 +221,33 @@ function gradeNegativeCase(neg: NegativeCaseApplicabilityOracle, run: RunArtifac
       flags.push(`required selected rule(s) ${missing.join(',')} not selected`);
     }
   }
+  if (neg.requiredNegativeEvidenceRuleIds) {
+    const missing = neg.requiredNegativeEvidenceRuleIds.filter((r) => !negativeEvidenceRuleIds.has(r));
+    if (missing.length > 0) {
+      ok = false;
+      if (primaryFailureStage === 'NONE') primaryFailureStage = 'APPLICABILITY_ERROR';
+      flags.push(`required negative-evidence rule(s) ${missing.join(',')} absent from negativeEvidence`);
+    }
+    const wronglyOperative = neg.requiredNegativeEvidenceRuleIds.filter((r) => selectedRuleIds.has(r));
+    if (wronglyOperative.length > 0) {
+      ok = false;
+      if (primaryFailureStage === 'NONE') primaryFailureStage = 'APPLICABILITY_ERROR';
+      flags.push(`required negative-evidence rule(s) ${wronglyOperative.join(',')} also appeared in operative selected`);
+    }
+    if (neg.expectedDisposition === 'DIRECT_ANSWER') {
+      const citedIds = new Set(result.draft?.citedUnitIds ?? []);
+      const uncited = neg.requiredNegativeEvidenceRuleIds.filter((ruleId) =>
+        !negativeEvidenceUnitIds.some(
+          (unitId) => run.sourceRuleIdByUnitId.get(unitId) === ruleId && citedIds.has(unitId)
+        )
+      );
+      if (uncited.length > 0) {
+        ok = false;
+        if (primaryFailureStage === 'NONE') primaryFailureStage = 'EVIDENCE_ERROR';
+        flags.push(`required negative-evidence rule(s) ${uncited.join(',')} not cited by direct answer`);
+      }
+    }
+  }
   if (neg.forbiddenSelectedRuleIds) {
     const wronglySelected = neg.forbiddenSelectedRuleIds.filter((r) => selectedRuleIds.has(r));
     if (wronglySelected.length > 0) {
@@ -206,12 +259,26 @@ function gradeNegativeCase(neg: NegativeCaseApplicabilityOracle, run: RunArtifac
 
   if (result.actualDisposition !== neg.expectedDisposition) {
     ok = false;
-    if (neg.expectedDisposition === 'HOLD' && result.actualDisposition === 'DIRECT_ANSWER') {
-      primaryFailureStage = 'EXPECTED_CLARIFICATION_MISSED';
-      flags.push('expected HOLD/clarify, engine answered directly — the dangerous false-positive case');
+    if (neg.expectedDisposition === 'HOLD' && (result.actualDisposition === 'DIRECT_ANSWER' || result.actualDisposition === 'UNVERIFIED_ANSWER')) {
+      if (primaryFailureStage === 'NONE') primaryFailureStage = 'EXPECTED_CLARIFICATION_MISSED';
+      flags.push(`expected HOLD/clarify, engine produced ${result.actualDisposition} — the dangerous false-positive case`);
     } else if (neg.expectedDisposition === 'DIRECT_ANSWER' && result.actualDisposition === 'HOLD') {
-      primaryFailureStage = 'UNEXPECTED_HOLD';
+      if (primaryFailureStage === 'NONE') primaryFailureStage = 'UNEXPECTED_HOLD';
       flags.push('expected a direct answer, engine held unexpectedly');
+    } else if (neg.expectedDisposition === 'DIRECT_ANSWER' && result.actualDisposition === 'UNVERIFIED_ANSWER') {
+      if (result.verification?.verified === false) {
+        if (primaryFailureStage === 'NONE') primaryFailureStage = 'SYNTHESIS_ERROR';
+        flags.push('expected a verified direct answer, engine produced UNVERIFIED_ANSWER after failed verification');
+      } else if (result.verification === null) {
+        if (primaryFailureStage === 'NONE') primaryFailureStage = 'EVIDENCE_ERROR';
+        flags.push('expected direct answer but verification result is missing');
+      } else if (result.answerDependsOnProbabilisticExclusion) {
+        if (primaryFailureStage === 'NONE') primaryFailureStage = 'APPLICABILITY_ERROR';
+        flags.push('verified answer withheld because it depends on probabilistic candidate exclusion');
+      } else {
+        if (primaryFailureStage === 'NONE') primaryFailureStage = 'RESOLUTION_ERROR';
+        flags.push('verified answer was marked UNVERIFIED_ANSWER without a recorded probabilistic-exclusion dependency');
+      }
     }
   }
 
@@ -220,6 +287,7 @@ function gradeNegativeCase(neg: NegativeCaseApplicabilityOracle, run: RunArtifac
     const unnamed = neg.expectedMissingTriggerFacts.filter((f) => !named.has(f));
     if (unnamed.length > 0) {
       ok = false;
+      if (primaryFailureStage === 'NONE') primaryFailureStage = 'RESOLUTION_ERROR';
       flags.push(`engine did not name missing trigger fact(s): ${unnamed.join(', ')}`);
     }
   }
@@ -228,7 +296,40 @@ function gradeNegativeCase(neg: NegativeCaseApplicabilityOracle, run: RunArtifac
     const missing = neg.expectedReasonCodes.filter((c) => !actual.has(c));
     if (missing.length > 0) {
       ok = false;
+      if (primaryFailureStage === 'NONE') primaryFailureStage = 'RESOLUTION_ERROR';
       flags.push(`missing expected reason code(s): ${missing.join(', ')}`);
+    }
+  }
+  if (neg.numericAssertions) {
+    const selectedIds = new Set(result.resolution?.selected ?? []);
+    const selectedNumerics = new Set(
+      run.units
+        .filter((unit) => selectedIds.has(unit.unitId) && unit.numericConstraint !== null)
+        .map((unit) => numericKey(unit.numericConstraint!.value, unit.numericConstraint!.unit))
+    );
+    const missing = neg.numericAssertions.filter(
+      (assertion) => !selectedNumerics.has(numericKey(assertion.value, assertion.unit))
+    );
+    if (missing.length > 0) {
+      ok = false;
+      if (primaryFailureStage === 'NONE') primaryFailureStage = 'EVIDENCE_ERROR';
+      flags.push(
+        `selected evidence misses required numeric(s): ${missing.map((a) => `${a.value} ${a.unit}`).join(', ')}`
+      );
+    }
+  }
+
+  // DIRECT_ANSWER means publishable only when verification actually passed.
+  // This closes the historical Q05-N1 false positive where correct
+  // applicability traces accompanied an unsupported draft.
+  if (neg.expectedDisposition === 'DIRECT_ANSWER' && result.verification?.verified !== true) {
+    ok = false;
+    if (result.verification === null) {
+      if (primaryFailureStage === 'NONE') primaryFailureStage = 'EVIDENCE_ERROR';
+      flags.push('verification result missing for expected direct answer');
+    } else {
+      if (primaryFailureStage === 'NONE') primaryFailureStage = 'SYNTHESIS_ERROR';
+      flags.push(...result.verification.violations.map((v) => `${v.code}: ${v.detail}`));
     }
   }
 

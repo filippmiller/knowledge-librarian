@@ -53,6 +53,21 @@ function statementIncludes(pattern: RegExp): (unit: PersistedKnowledgeUnit) => b
   return (unit) => pattern.test(unit.statement) || pattern.test(unit.sourceSpan.quote);
 }
 
+export const RULE_1_EVIDENCE_GROUP: RequiredEvidenceGroup = {
+  ruleId: 1,
+  description: 'Доступ к участку: минимально необходимое ослабление одежды + закрытое от окружающих место',
+  requiredClauses: [
+    {
+      description: 'одежду ослабить/спустить только настолько, чтобы открыть нужный участок',
+      matches: statementIncludes(/одежд|брюк|бель[её]|спуст|ослаб|полностью сним/i),
+    },
+    {
+      description: 'до начала перейти в закрытое место, невидимое окружающим',
+      matches: statementIncludes(/закрыт.{0,30}мест|не видн.{0,20}окружа|уедин/i),
+    },
+  ],
+};
+
 /**
  * Правило 9 (Помощь другого человека) — три компонента, названные в шапке
  * `case-grader.ts`: согласие / перчатки / остановка. Подтверждено живым
@@ -90,7 +105,7 @@ export const RULE_9_EVIDENCE_GROUP: RequiredEvidenceGroup = {
  */
 export const RULE_10_EVIDENCE_GROUP: RequiredEvidenceGroup = {
   ruleId: 10,
-  description: 'Ограниченная подвижность: альтернативный способ + запрет твёрдого/острого приспособления',
+  description: 'Ограниченная подвижность: безопасный способ и полный контракт помощи другого человека',
   requiredClauses: [
     {
       description: 'альтернативный способ при невозможности дотянуться',
@@ -99,6 +114,16 @@ export const RULE_10_EVIDENCE_GROUP: RequiredEvidenceGroup = {
     {
       description: 'запрет твёрдого/острого приспособления даже при ограниченной подвижности',
       matches: statementIncludes(/твёрд.{0,20}остр|остр.{0,20}твёрд|твёрдым или острым/i),
+    },
+    { description: 'текущее ясное согласие на помощь', matches: statementIncludes(/соглас/i) },
+    { description: 'чистые одноразовые перчатки помощника', matches: statementIncludes(/перчат/i) },
+    {
+      description: 'ограничения по силе воздействия и времени',
+      matches: statementIncludes(/ограничен.{0,30}сил.{0,30}времен|сил.{0,30}времен/i),
+    },
+    {
+      description: 'немедленная остановка по первой просьбе',
+      matches: statementIncludes(/останов/i),
     },
   ],
 };

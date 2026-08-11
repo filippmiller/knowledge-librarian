@@ -92,6 +92,34 @@ describe('buildExtractionPromptMessages — чистая функция, без 
     expect(system.content).toContain('{"all":');
   });
 
+
+  it('recognized precondition структурируется на PROCEDURE_STEP; EXCEPTION_RULE требует distinct base parent', () => {
+    const system = buildExtractionPromptMessages([BLOCK_A]).find((message) => message.role === 'system')!.content;
+    expect(system).toContain('правила ЛЮБОГО kind, включая PROCEDURE_STEP');
+    expect(system).toContain('triggerCondition ОБЯЗАТЕЛЕН');
+    expect(system).toContain('EXCEPTION_RULE используй только когда оговорка изменяет отдельное базовое правило');
+    expect(system).toContain('parentExtractionRef обязан ссылаться на extractionRef этого base-unit');
+    expect(system).toContain('privacyContext');
+    expect(system).toContain('consentStatus');
+    expect(system).toContain('reachability');
+    expect(system).toContain('helperPresent');
+  });
+
+  it('не учит модель превращать самостоятельную условную инструкцию в EXCEPTION_RULE без родителя', () => {
+    const messages = buildExtractionPromptMessages([BLOCK_A]);
+    const system = messages.find((m) => m.role === 'system')!;
+    expect(system.content).toContain('самостоятельная инструкция');
+    expect(system.content).toContain('является PROCEDURE_STEP, а не EXCEPTION_RULE');
+    expect(system.content).toContain('не отменяет отдельный родительский шаг');
+  });
+
+  it('не учит модель связывать co-required клаузы ложными parent-ссылками', () => {
+    const messages = buildExtractionPromptMessages([BLOCK_A]);
+    const system = messages.find((m) => m.role === 'system')!;
+    expect(system.content).toContain('СО-ОБЯЗАТЕЛЬНЫМИ соседями');
+    expect(system.content).toContain('а не родителями друг друга');
+  });
+
   // Real cost bug (2026-08-09): 43 of 43 SCHEMA_MISMATCH extraction failures
   // across every benchmark run this session were the SAME error — the model
   // puts trigger-fact names (privacyContext, consentStatus, reachability,

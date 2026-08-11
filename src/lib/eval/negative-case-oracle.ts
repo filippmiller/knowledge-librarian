@@ -65,6 +65,8 @@ export interface NegativeCaseApplicabilityOracle {
   readonly requiredCandidateRuleIds?: readonly number[];
   /** Должны оказаться среди выбранных. */
   readonly requiredSelectedRuleIds?: readonly number[];
+  /** Должны обосновывать отказ через отдельный non-operative NEGATIVE канал. */
+  readonly requiredNegativeEvidenceRuleIds?: readonly number[];
   /** НЕ должны оказаться среди выбранных — суть must_not_apply. */
   readonly forbiddenSelectedRuleIds?: readonly number[];
   /** Триггер-факты, отсутствие которых обязано вызвать уточнение. */
@@ -79,6 +81,7 @@ const entrySchema = z
     expectedDisposition: z.enum(['DIRECT_ANSWER', 'HOLD']),
     requiredCandidateRuleIds: z.array(ruleIdSchema).optional(),
     requiredSelectedRuleIds: z.array(ruleIdSchema).optional(),
+    requiredNegativeEvidenceRuleIds: z.array(ruleIdSchema).optional(),
     forbiddenSelectedRuleIds: z.array(ruleIdSchema).optional(),
     expectedMissingTriggerFacts: z.array(z.string().min(1)).optional(),
     expectedReasonCodes: z.array(reasonCodeSchema).optional(),
@@ -88,11 +91,18 @@ const entrySchema = z
   })
   .superRefine((entry, ctx) => {
     const forbidden = new Set(entry.forbiddenSelectedRuleIds ?? []);
+    const requiredNegative = new Set(entry.requiredNegativeEvidenceRuleIds ?? []);
     for (const required of entry.requiredSelectedRuleIds ?? []) {
       if (forbidden.has(required)) {
         ctx.addIssue({
           code: 'custom',
           message: `правило ${required} одновременно обязательно и запрещено — утверждение противоречиво`,
+        });
+      }
+      if (requiredNegative.has(required)) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `правило ${required} одновременно требуется как operative selected и negative evidence`,
         });
       }
     }

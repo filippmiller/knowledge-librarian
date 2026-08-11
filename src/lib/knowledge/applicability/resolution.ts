@@ -2,7 +2,7 @@ import type { EligibilityDecision } from './eligibility';
 import type { FacetKey } from './facets';
 import type { KnowledgeUnitKind } from './kinds';
 import type { QueryFrame } from './query-frame';
-import type { ResolutionReasonCode } from './reasons';
+import type { ResolutionReasonCode, TriggerReasonCode } from './reasons';
 import { ASKABLE_SCOPE_SITUATIONS, type ScopeDecision } from './scope';
 import type { TriggerDecision } from './trigger';
 import type { TriggerFactKey } from './trigger-facts';
@@ -29,6 +29,16 @@ export interface EvaluatedCandidate {
   readonly scope: ScopeDecision;
   /** Заполнено только у `EXCEPTION_RULE`; у остальных `kind` — `null`. */
   readonly trigger: TriggerDecision | null;
+  /** Source-backed wording for the effective (possibly inherited) trigger. */
+  readonly triggerPresentationConditions?: readonly string[];
+  /** Runtime graph/condition corruption; unlike an ordinary unknown fact this
+   * must never become presentable conditional evidence. */
+  readonly triggerInvalid?: boolean;
+  /** Set by Decision Relevance. Undefined preserves legacy/test behavior as relevant. */
+  readonly semanticRelevance?: 'RELEVANT' | 'IRRELEVANT';
+  /** Source-backed proof that this trigger is a necessary (not merely
+   * sufficient) condition, so its falsity can justify a denial. */
+  readonly negativeInferenceAllowed?: boolean;
   /** На какое правило это исключение навешано (§2.1, обязательно для исключений). */
   readonly parentRuleRef: string | null;
   /** Явная замена: единственный способ разрешить конфликт чисел без человека. */
@@ -81,6 +91,9 @@ export interface ResolutionDecision {
    */
   readonly disposition: 'ANSWER' | 'CLARIFY' | 'HOLD';
   readonly selected: readonly string[];
+  /** Non-operative evidence usable only to explain a denial. It never
+   * participates in override, supersedes, or numeric conflict resolution. */
+  readonly negativeEvidence?: readonly string[];
   /**
    * Кандидаты, судьба которых не решена. Ключевое: они НЕ выброшены. `UNKNOWN`
    * не является основанием молча удалить кандидата, и пустой набор кандидатов
@@ -92,7 +105,13 @@ export interface ResolutionDecision {
   readonly numericConflicts: readonly NumericConflict[];
   readonly requiresHumanReview: boolean;
   readonly clarificationNeeds: ClarificationNeeds;
-  readonly reasons: readonly ResolutionReasonCode[];
+  readonly reasons: readonly (ResolutionReasonCode | TriggerReasonCode)[];
+  /** How selected evidence may be rendered by synthesis. */
+  readonly selectedApplicability?: readonly {
+    readonly unitId: string;
+    readonly mode: 'NORMAL' | 'CONDITIONAL' | 'NEGATIVE';
+    readonly presentationConditions: readonly string[];
+  }[];
 }
 
 function unique<T>(values: readonly T[]): T[] {
@@ -179,13 +198,14 @@ export function resolveKnowledgeSet(
 ): ResolutionDecision {
   const excluded: ExcludedCandidate[] = [];
   const undetermined: HeldCandidate[] = [];
-  const reasons: ResolutionReasonCode[] = [];
+  const reasons: (ResolutionReasonCode | TriggerReasonCode)[] = [];
   let requiresHumanReview = false;
 
   const selectedIds: string[] = [];
+  const negativeEvidenceIds: string[] = [];
   const undeterminedIds: string[] = [];
 
-  const addReason = (reason: ResolutionReasonCode) => {
+  const addReason = (reason: ResolutionReasonCode | TriggerReasonCode) => {
     if (!reasons.includes(reason)) reasons.push(reason);
   };
   const exclude = (unitId: string, reason: ResolutionReasonCode, byUnitId?: string) => {
@@ -219,10 +239,20 @@ export function resolveKnowledgeSet(
       continue;
     }
 
-    // §4.1 п.2, явный негативный случай: условие достоверно не выполнено —
-    // исключение не активно, и его СУЩЕСТВОВАНИЕ не блокирует общее правило.
-    if (isException && candidate.trigger?.verdict === 'INACTIVE') {
-      exclude(candidate.unitId, 'exception_trigger_inactive');
+    if (candidate.trigger?.verdict === 'INACTIVE') {
+      for (const reason of candidate.trigger.reasons) addReason(reason);
+      // Exceptions retain their original fail-closed override semantics.
+      // A relevant conditional procedure, however, is useful negative
+      // evidence: it proves that its necessary condition is absent and lets
+      // synthesis deny the action. An irrelevant candidate remains excluded
+      // but still contributes structured diagnostic reasons.
+      if (isException || candidate.semanticRelevance === 'IRRELEVANT') {
+        exclude(candidate.unitId, 'exception_trigger_inactive');
+      } else if (candidate.negativeInferenceAllowed === true) {
+        negativeEvidenceIds.push(candidate.unitId);
+      } else {
+        exclude(candidate.unitId, 'exception_trigger_inactive');
+      }
       continue;
     }
 
@@ -231,13 +261,21 @@ export function resolveKnowledgeSet(
       continue;
     }
 
-    if (isException && candidate.trigger?.verdict === 'UNKNOWN') {
-      hold(candidate.unitId, 'exception_trigger_unknown');
+    if (candidate.trigger?.verdict === 'UNKNOWN') {
+      for (const reason of candidate.trigger.reasons) addReason(reason);
+      if (isException || candidate.triggerInvalid === true) {
+        hold(candidate.unitId, 'exception_trigger_unknown');
+        if (candidate.triggerInvalid === true) requiresHumanReview = true;
+      }
+      else selectedIds.push(candidate.unitId);
       continue;
     }
 
     selectedIds.push(candidate.unitId);
-    if (isException) addReason('exception_trigger_active');
+    if (candidate.trigger?.verdict === 'ACTIVE') {
+      for (const reason of candidate.trigger.reasons) addReason(reason);
+      addReason('exception_trigger_active');
+    }
   }
 
   const byId = new Map(candidates.map((candidate) => [candidate.unitId, candidate]));
@@ -294,12 +332,9 @@ export function resolveKnowledgeSet(
     const candidate = byId.get(unitId);
     if (candidate?.kind !== 'EXCEPTION_RULE') continue;
 
-    // Исключение БЕЗ родителя — не «исключение, которому некого переопределять»,
-    // а испорченная запись: §2 делает `parentRuleRef` обязательным для
-    // EXCEPTION_RULE. Раньше такой unit просто пропускал шаг переопределения и
-    // оставался в выборке — то есть отвечал КАК САМОСТОЯТЕЛЬНОЕ ПРАВИЛО, хотя
-    // по смыслу он лишь оговорка к чему-то, чего в ответе нет. Тип кандидата
-    // допускает null (миграции, ручной ввод), поэтому проверка нужна в рантайме.
+    // Исключение БЕЗ родителя — испорченная запись. Trusted-artifact v4
+    // запрещает такую форму на границе доверия, но runtime остаётся
+    // fail-closed для миграций, ручного ввода и устаревших артефактов.
     if (candidate.parentRuleRef === null) {
       requiresHumanReview = true;
       addReason('exception_without_parent');
@@ -382,11 +417,7 @@ export function resolveKnowledgeSet(
     // приходит null чаще, чем предполагалось) — молчаливо считать такое
     // исключение "нерешающим" значило бы отвечать уверенно именно там, где
     // уверенности нет.
-    if (
-      candidate.kind === 'EXCEPTION_RULE' &&
-      candidate.parentRuleRef === null &&
-      candidate.trigger?.verdict === 'UNKNOWN'
-    ) {
+    if (candidate.trigger?.verdict === 'UNKNOWN') {
       return true;
     }
 
@@ -488,7 +519,7 @@ export function resolveKnowledgeSet(
     }
   }
 
-  if (selectedIds.length === 0) addReason('no_selected_candidates');
+  if (selectedIds.length === 0 && negativeEvidenceIds.length === 0) addReason('no_selected_candidates');
 
   const needsClarification =
     clarificationNeeds.facets.length > 0 ||
@@ -500,13 +531,28 @@ export function resolveKnowledgeSet(
   // противоречат друг другу и решать должен человек.
   const disposition: ResolutionDecision['disposition'] = needsClarification
     ? 'CLARIFY'
-    : requiresHumanReview || selectedIds.length === 0
+    : requiresHumanReview || (selectedIds.length === 0 && negativeEvidenceIds.length === 0)
       ? 'HOLD'
       : 'ANSWER';
+
+  const selectedApplicability = [...selectedIds, ...negativeEvidenceIds].map((unitId) => {
+    const candidate = byId.get(unitId)!;
+    const mode = candidate.kind !== 'EXCEPTION_RULE' && candidate.trigger?.verdict === 'UNKNOWN'
+      ? 'CONDITIONAL' as const
+      : candidate.kind !== 'EXCEPTION_RULE' && candidate.trigger?.verdict === 'INACTIVE'
+        ? 'NEGATIVE' as const
+        : 'NORMAL' as const;
+    return {
+      unitId,
+      mode,
+      presentationConditions: candidate.triggerPresentationConditions ?? [],
+    };
+  });
 
   return {
     disposition,
     selected: selectedIds,
+    negativeEvidence: negativeEvidenceIds,
     undetermined,
     excluded,
     overridden,
@@ -514,5 +560,6 @@ export function resolveKnowledgeSet(
     requiresHumanReview,
     clarificationNeeds,
     reasons,
+    selectedApplicability,
   };
 }

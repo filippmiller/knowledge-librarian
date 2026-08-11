@@ -383,6 +383,47 @@ describe('triggerFacts — тот же приоритет источников, 
     expect(frame.triggerFacts.helperPresent).toEqual({ state: 'UNKNOWN' });
   });
 
+  it('Q09-N1: sleeping/current inability deterministically means consent ABSENT', () => {
+    const current = {
+      id: 'q09',
+      role: 'user' as const,
+      text: 'Муж может почесать спящей жене, раз она раньше не возражала?',
+    };
+    const frame = buildQueryFrame(extraction(), [current]);
+    expect(frame.triggerFacts.consentStatus).toMatchObject({
+      state: 'KNOWN',
+      value: 'ABSENT',
+      evidence: [{ source: 'CURRENT_MESSAGE', messageId: 'q09', quote: 'спящей' }],
+    });
+  });
+
+  it('historical or past non-objection never becomes current EXPLICIT consent', () => {
+    const current = { id: 'now', role: 'user' as const, text: 'Она раньше не возражала. Можно?' };
+    const frame = buildQueryFrame(
+      extraction({
+        triggerFactMentions: [
+          { fact: 'consentStatus', rawValue: 'EXPLICIT', messageId: current.id, quote: 'раньше не возражала' },
+        ],
+      }),
+      [current]
+    );
+    expect(frame.triggerFacts.consentStatus).toEqual({ state: 'UNKNOWN' });
+  });
+
+  it('an EXPLICIT consent mention from conversation history is not inherited as current consent', () => {
+    const history = { id: 'past', role: 'user' as const, text: 'В прошлый раз она согласилась.' };
+    const current = { id: 'now', role: 'user' as const, text: 'А сейчас можно?' };
+    const frame = buildQueryFrame(
+      extraction({
+        triggerFactMentions: [
+          { fact: 'consentStatus', rawValue: 'EXPLICIT', messageId: history.id, quote: 'согласилась' },
+        ],
+      }),
+      [history, current]
+    );
+    expect(frame.triggerFacts.consentStatus).toEqual({ state: 'UNKNOWN' });
+  });
+
   it('только в истории -> KNOWN, evidence HISTORY, не становится UNKNOWN', () => {
     const frame = buildQueryFrame(
       extraction({

@@ -52,6 +52,7 @@ describe('estimateCostUsd', () => {
     expect(MODEL_PRICING['claude-haiku-4-5-20251001']).toBeDefined();
     expect(MODEL_PRICING['gpt-4o']).toBeDefined();
     expect(MODEL_PRICING['text-embedding-3-small']).toBeDefined();
+    expect(MODEL_PRICING['gpt-4o-mini']).toEqual({ inputPerMillion: 0.15, outputPerMillion: 0.60 });
   });
 });
 

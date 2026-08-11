@@ -20,11 +20,12 @@
  *    им ошибку — значит превращать явный сбой в тихий провал кейса.
  */
 
-import type { EvidencePack } from './evidence-pack';
+import type { EvidencePack, OverriddenParentContext } from './evidence-pack';
 import type { DraftAnswer } from './draft-answer';
 import type { KnowledgeUnitKind } from '../applicability/kinds';
 import type { NumericConstraint } from '../applicability/resolution';
 import type { SourceSpan } from '../applicability/extraction';
+import { redactUnsupportedNumericClaims } from '@/lib/ai/claim-grounding';
 
 /** Ровно то, что генератору разрешено видеть. Другого входа у него нет. */
 export interface SynthesisEvidence {
@@ -33,12 +34,22 @@ export interface SynthesisEvidence {
   readonly statement: string;
   readonly citation: SourceSpan;
   readonly numericConstraint: NumericConstraint | null;
+  readonly presentationConditions?: readonly string[];
+  readonly applicabilityMode?: 'NORMAL' | 'CONDITIONAL' | 'NEGATIVE';
 }
 
 export interface SynthesisPrompt {
   readonly question: string;
   readonly evidence: readonly SynthesisEvidence[];
+  /** Non-operative direct-parent context. The selected overriding child has
+   * unconditional precedence and must be co-cited whenever this is used. */
+  readonly supportingContext: readonly OverriddenParentContext[];
+  readonly answerTextPolicy: string;
 }
+
+export const SYNTHESIS_ANSWER_TEXT_POLICY =
+  'В поле text запрещено выводить внутренние unitId, anchor, reference hash или ссылки вида [internal-id]. ' +
+  'Все машинные ссылки указывай только в structured поле citedUnitIds; пользовательский текст должен быть естественным.';
 
 export interface GeneratedAnswer {
   readonly text: string;
@@ -62,15 +73,21 @@ export async function synthesizeFromSelectedUnits(
     );
   }
 
+  const selectedSources = [...pack.items, ...(pack.supportingContext ?? [])]
+    .flatMap((item) => [item.statement, item.citation.quote]);
   const prompt: SynthesisPrompt = {
-    question,
+    question: redactUnsupportedNumericClaims(question, selectedSources),
     evidence: pack.items.map((item) => ({
       unitId: item.unitId,
       kind: item.kind,
       statement: item.statement,
       citation: item.citation,
       numericConstraint: item.numericConstraint,
+      presentationConditions: item.presentationConditions,
+      applicabilityMode: item.applicabilityMode,
     })),
+    supportingContext: pack.supportingContext ?? [],
+    answerTextPolicy: SYNTHESIS_ANSWER_TEXT_POLICY,
   };
 
   // Ошибка НЕ перехватывается: fallback на общий AI здесь отключён по плану.

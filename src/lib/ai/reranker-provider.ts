@@ -32,11 +32,16 @@ export interface RerankerProvider {
   modelInfo(): ModelInfo;
 }
 
-const rerankResponseSchema = z.strictObject({
+export const rerankResponseSchema = z.strictObject({
   scores: z
     .array(z.strictObject({ id: z.string(), score: z.number().min(0).max(1) }))
     .readonly(),
 });
+
+export function buildRerankPromptMessages(query: string, candidates: readonly RerankCandidate[]): ChatMessage[] {
+  const candidateList = candidates.map((c) => `[${c.id}] ${c.text}`).join('\n\n');
+  return [{ role: 'system', content: 'Ты оцениваешь, насколько каждый кандидат нужен для ПОЛНОГО и безопасного ответа на вопрос — по смыслу, не по совпадению слов. score от 0 (совсем не по теме) до 1 (отвечает на вопрос ИЛИ содержит обязательное условие, ограничение, предостережение или действие, без которого ответ был бы неполным). Не занижай фрагмент только потому, что соседний кандидат лучше формулирует общий вывод: несколько кандидатов могут одновременно заслуживать высокий score как разные обязательные клаузы одного ответа. Оцени КАЖДОГО кандидата из списка. Ответ СТРОГО JSON: {"scores": [{"id": "...", "score": число}]}' }, { role: 'user', content: `Вопрос: "${query}"\n\nКандидаты:\n${candidateList}` }];
+}
 
 /**
  * Кандидат из ответа модели, отсутствующий среди `candidates`, молча
@@ -69,23 +74,9 @@ export class LlmRerankerProvider implements RerankerProvider {
       return [];
     }
 
-    const candidateList = candidates
-      .map((c) => `[${c.id}] ${c.text}`)
-      .join('\n\n');
-
     const result = await structured({
       schema: rerankResponseSchema,
-      messages: [
-        {
-          role: 'system',
-          content:
-            'Ты оцениваешь, насколько каждый кандидат релевантен вопросу — по смыслу, не по совпадению слов. score от 0 (совсем не по теме) до 1 (отвечает точно на вопрос). Оцени КАЖДОГО кандидата из списка. Ответ СТРОГО JSON: {"scores": [{"id": "...", "score": число}]}',
-        },
-        {
-          role: 'user',
-          content: `Вопрос: "${query}"\n\nКандидаты:\n${candidateList}`,
-        },
-      ],
+      messages: buildRerankPromptMessages(query, candidates),
       runConfig: this.runConfig,
     });
     this.pendingAttempts = result.attempts;

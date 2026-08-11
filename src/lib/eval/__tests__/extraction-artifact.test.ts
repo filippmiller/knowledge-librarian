@@ -54,6 +54,8 @@ const FINGERPRINT: ExtractionFingerprint = {
   auditPromptFingerprint: 'a'.repeat(64),
   auditPolicyFingerprint: 'b'.repeat(64),
   focusedRepairPolicyFingerprint: 'c'.repeat(64),
+  evidenceRefinementFingerprint: '9'.repeat(64),
+  graphIntegrityPolicyFingerprint: '8'.repeat(64),
   identityAlgorithmFingerprint: 'd'.repeat(64),
   retrievalTextFingerprint: 'e'.repeat(64),
   embeddingProvider: 'openai',
@@ -304,6 +306,123 @@ describe('trusted completeness publication gate', () => {
   });
 });
 
+describe('trusted semantic integrity gate', () => {
+  it('refuses to build an orphan EXCEPTION_RULE and names its id and anchor', () => {
+    const base = artifact();
+    const malformed = {
+      ...base.snapshot.units[0],
+      kind: 'EXCEPTION_RULE' as const,
+      parentRuleRef: null,
+      triggerCondition: { all: [{ fact: 'privacyContext' as const, equals: 'PUBLIC' as const }] },
+    };
+    expect(() =>
+      artifact({ snapshot: { ...base.snapshot, units: [malformed, base.snapshot.units[1]] } })
+    ).toThrow(/u1 \(anchor=block-1, нет parentRuleRef\)/);
+  });
+
+  it('refuses to build an EXCEPTION_RULE with no trigger rather than reclassifying it', () => {
+    const base = artifact();
+    const malformed = {
+      ...base.snapshot.units[0],
+      kind: 'EXCEPTION_RULE' as const,
+      parentRuleRef: 'u2',
+      triggerCondition: null,
+    };
+    expect(() =>
+      artifact({ snapshot: { ...base.snapshot, units: [malformed, base.snapshot.units[1]] } })
+    ).toThrow(/u1 \(anchor=block-1, нет triggerCondition\)/);
+  });
+
+  it('rejects malformed exception semantics again when parsing an artifact', () => {
+    const raw = JSON.parse(serializeExtractionArtifact(artifact()));
+    raw.snapshot.units[0].kind = 'EXCEPTION_RULE';
+    raw.snapshot.units[0].parentRuleRef = null;
+    raw.snapshot.units[0].triggerCondition = null;
+    expect(() => parseExtractionArtifact(JSON.stringify(raw), 'malformed.json')).toThrow(
+      /malformed EXCEPTION_RULE.*u1.*block-1/
+    );
+  });
+});
+
+describe('trusted parent graph integrity gate', () => {
+  const trigger = (value: 'PUBLIC' | 'PRIVATE') => ({
+    all: [{ fact: 'privacyContext' as const, equals: value }],
+  });
+  const semanticArtifactWith = (units: readonly PersistedKnowledgeUnit[]) => {
+    const base = artifact();
+    return artifact({
+      phase: 'SEMANTIC_CHECKPOINT',
+      embeddings: [],
+      snapshot: { ...base.snapshot, units },
+    });
+  };
+
+  it('rejects dangling and self-parent edges at build', () => {
+    const base = artifact();
+    expect(() => semanticArtifactWith([{ ...base.snapshot.units[0], parentRuleRef: 'missing' }])).toThrow(
+      /dangling parent edge: u1 -> missing/
+    );
+    expect(() => semanticArtifactWith([{ ...base.snapshot.units[0], parentRuleRef: 'u1' }])).toThrow(
+      /self-parent.*u1 -> u1/
+    );
+  });
+
+  it('rejects cycles with the diagnostic edge path', () => {
+    const base = artifact();
+    expect(() =>
+      semanticArtifactWith([
+        { ...base.snapshot.units[0], parentRuleRef: 'u2' },
+        { ...base.snapshot.units[1], parentRuleRef: 'u1' },
+      ])
+    ).toThrow(/cycle.*u1 -> u2 -> u1/);
+  });
+
+  it('rejects contradictory inherited triggers on a structural parent chain', () => {
+    const base = artifact();
+    expect(() =>
+      semanticArtifactWith([
+        { ...base.snapshot.units[0], triggerCondition: trigger('PUBLIC') },
+        { ...base.snapshot.units[1], parentRuleRef: 'u1', triggerCondition: trigger('PRIVATE') },
+      ])
+    ).toThrow(/contradictory inherited trigger.*u2.*privacyContext/);
+  });
+
+  it('accepts a valid transitive structural chain', () => {
+    const base = artifact();
+    const leaf = { ...base.snapshot.units[0], unitId: 'u3', contentHash: 'hash-u3', parentRuleRef: 'u2' };
+    expect(() =>
+      semanticArtifactWith([
+        base.snapshot.units[0],
+        { ...base.snapshot.units[1], parentRuleRef: 'u1' },
+        leaf,
+      ])
+    ).not.toThrow();
+  });
+
+  it('accepts an EXCEPTION override trigger that differs from its target parent', () => {
+    const base = artifact();
+    expect(() =>
+      semanticArtifactWith([
+        { ...base.snapshot.units[0], triggerCondition: trigger('PRIVATE') },
+        {
+          ...base.snapshot.units[1],
+          kind: 'EXCEPTION_RULE',
+          parentRuleRef: 'u1',
+          triggerCondition: trigger('PUBLIC'),
+        },
+      ])
+    ).not.toThrow();
+  });
+
+  it('revalidates graph integrity on parse/read, not only build', () => {
+    const raw = JSON.parse(serializeExtractionArtifact(artifact()));
+    raw.snapshot.units[0].parentRuleRef = 'missing';
+    expect(() => parseExtractionArtifact(JSON.stringify(raw), 'dangling.json')).toThrow(
+      /dangling parent edge: u1 -> missing/
+    );
+  });
+});
+
 describe('readExtractionArtifact', () => {
   let dir: string;
 
@@ -438,7 +557,7 @@ describe('computePipelineProbes', () => {
     }
   });
 
-  it('probes are pairwise distinct — each observes a DIFFERENT policy, not the same one five times', () => {
+  it('probes are pairwise distinct — each observes a DIFFERENT policy', () => {
     const values = Object.values(computePipelineProbes());
     expect(new Set(values).size).toBe(values.length);
   });
@@ -447,8 +566,11 @@ describe('computePipelineProbes', () => {
     expect(Object.keys(computePipelineProbes()).sort()).toEqual([
       'auditPolicyFingerprint',
       'auditPromptFingerprint',
+      'evidenceRefinementFingerprint',
       'extractionPromptFingerprint',
+      'focusedRepairPaidStageFingerprint',
       'focusedRepairPolicyFingerprint',
+      'graphIntegrityPolicyFingerprint',
       'identityAlgorithmFingerprint',
       'retrievalTextFingerprint',
     ]);

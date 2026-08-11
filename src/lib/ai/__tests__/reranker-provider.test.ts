@@ -8,7 +8,7 @@ vi.mock('@/lib/openai', () => ({
 }));
 
 import type { StructuredRunConfig } from '../structured-output';
-import { LlmRerankerProvider } from '../reranker-provider';
+import { buildRerankPromptMessages, LlmRerankerProvider } from '../reranker-provider';
 
 function runConfig(overrides: Partial<StructuredRunConfig> = {}): StructuredRunConfig {
   return {
@@ -44,6 +44,18 @@ afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe('buildRerankPromptMessages', () => {
+  it('оценивает обязательные клаузы полного ответа, а не только лучший summary-unit', () => {
+    const system = buildRerankPromptMessages('Можно ли помочь?', [
+      { id: 'consent', text: 'Нужно согласие.' },
+      { id: 'gloves', text: 'Нужны перчатки.' },
+    ]).find((message) => message.role === 'system')!;
+    expect(system.content).toContain('ПОЛНОГО и безопасного ответа');
+    expect(system.content).toContain('несколько кандидатов');
+    expect(system.content).toContain('разные обязательные клаузы');
+  });
 });
 
 describe('LlmRerankerProvider', () => {

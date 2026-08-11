@@ -62,6 +62,9 @@ interface ObservedCaseCommon {
   /** Финальный порядок после reranker'а. */
   readonly rerankedUnitIds: readonly string[];
   readonly selectedUnitIds: readonly string[];
+  /** Resolver provenance used to reconstruct non-operative direct-parent
+   * context independently from trusted units. */
+  readonly overridden?: readonly { readonly unitId: string; readonly byUnitId: string }[];
   readonly reasonCodes: readonly string[];
   /** Какие условия система назвала недостающими при уточнении. */
   readonly missingTriggerFacts?: readonly string[];
@@ -219,6 +222,7 @@ export function gradeCase(
       ...observed.candidateUnitIds,
       ...observed.rerankedUnitIds,
       ...observed.selectedUnitIds,
+      ...(observed.overridden ?? []).flatMap((edge) => [edge.unitId, edge.byUnitId]),
     ]),
   ].filter((unitId) => !units.has(unitId));
   if (unmapped.length > 0) {
@@ -312,7 +316,11 @@ export function gradeCase(
       // проверку «обязательные правила не выбраны» выше, дубль — проверку
       // целостности trace; пропуск построения pack не оставляет кейс без
       // объяснения, просто не дублирует его исключением.
-      const selectedUnits = observed.selectedUnitIds
+      const evidenceUnitIds = new Set([
+        ...observed.selectedUnitIds,
+        ...(observed.overridden ?? []).flatMap((edge) => [edge.unitId, edge.byUnitId]),
+      ]);
+      const selectedUnits = [...evidenceUnitIds]
         .map((id) => units.get(id)?.unit)
         .filter((u): u is PersistedKnowledgeUnit => u !== undefined);
       const resolution: ResolutionDecision = {
@@ -320,7 +328,7 @@ export function gradeCase(
         selected: observed.selectedUnitIds,
         undetermined: [],
         excluded: [],
-        overridden: [],
+        overridden: observed.overridden ?? [],
         numericConflicts: [],
         requiresHumanReview: false,
         clarificationNeeds: { facets: [], triggerFacts: [], ambiguities: [] },

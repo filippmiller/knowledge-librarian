@@ -64,6 +64,20 @@ function triggerIn(privacy: 'PUBLIC' | 'PRIVATE' | null): TriggerDecision {
   );
 }
 
+function triggerFactDecision(
+  factKey: 'consentStatus' | 'reachability',
+  required: 'EXPLICIT' | 'LIMITED',
+  actual: 'EXPLICIT' | 'ABSENT' | 'LIMITED' | 'NORMAL' | null
+): TriggerDecision {
+  const condition: TriggerCondition = factKey === 'consentStatus'
+    ? { all: [{ fact: 'consentStatus', equals: required as 'EXPLICIT' }] }
+    : { all: [{ fact: 'reachability', equals: required as 'LIMITED' }] };
+  return evaluateTrigger(
+    condition,
+    buildQuery({ triggerFacts: actual === null ? {} : { [factKey]: fact(actual) } })
+  );
+}
+
 const seconds = (value: number): NumericConstraint => ({
   factKey: 'max_hold_seconds',
   value,
@@ -117,6 +131,116 @@ describe('§4.1 п.1 — «применяются все»: несвязанны
     );
 
     expect(decision.selected).toEqual(['term', 'step']);
+  });
+});
+
+describe('trigger applicability applies to every knowledge kind', () => {
+  it('privacy-conditioned PROCEDURE_STEP with unknown privacy is selected as conditional evidence', () => {
+    const decision = resolveKnowledgeSet(
+      [candidate({ unitId: 'base' }), candidate({ unitId: 'public-step', trigger: triggerIn(null) })],
+      QUERY
+    );
+    expect(decision.disposition).toBe('ANSWER');
+    expect(decision.selected).toContain('public-step');
+    expect(decision.selectedApplicability).toContainEqual(expect.objectContaining({ unitId: 'public-step', mode: 'CONDITIONAL' }));
+    expect(decision.reasons).toContain('privacyContext_unknown');
+  });
+
+  it('consent-conditioned PROCEDURE_STEP is selected as negative evidence when consent is absent', () => {
+    const decision = resolveKnowledgeSet(
+      [candidate({ unitId: 'consent-step', trigger: triggerFactDecision('consentStatus', 'EXPLICIT', 'ABSENT'), negativeInferenceAllowed: true })],
+      QUERY
+    );
+    expect(decision.selected).toEqual([]);
+    expect(decision.negativeEvidence).toEqual(['consent-step']);
+    expect(decision.selectedApplicability).toContainEqual(expect.objectContaining({ unitId: 'consent-step', mode: 'NEGATIVE' }));
+    expect(decision.reasons).toContain('consentStatus_violated');
+  });
+
+  it('unknown consent procedure remains answerable as an explicit conditional branch', () => {
+    const decision = resolveKnowledgeSet(
+      [candidate({ unitId: 'consent-step', trigger: triggerFactDecision('consentStatus', 'EXPLICIT', null) })],
+      QUERY
+    );
+    expect(decision.disposition).toBe('ANSWER');
+    expect(decision.selectedApplicability).toContainEqual(
+      expect.objectContaining({ unitId: 'consent-step', mode: 'CONDITIONAL' })
+    );
+    expect(decision.reasons).toContain('consentStatus_unknown');
+  });
+
+  it('active reachability branch and unknown consent helper branch answer together', () => {
+    const decision = resolveKnowledgeSet(
+      [
+        candidate({ unitId: 'limited-step', trigger: triggerFactDecision('reachability', 'LIMITED', 'LIMITED') }),
+        candidate({ unitId: 'helper-consent', trigger: triggerFactDecision('consentStatus', 'EXPLICIT', null) }),
+      ],
+      QUERY
+    );
+    expect(decision.disposition).toBe('ANSWER');
+    expect(decision.selected).toEqual(['limited-step', 'helper-consent']);
+    expect(decision.selectedApplicability).toContainEqual(
+      expect.objectContaining({ unitId: 'helper-consent', mode: 'CONDITIONAL' })
+    );
+  });
+
+  it('semantically irrelevant inactive procedure is excluded but preserves its trigger reason', () => {
+    const decision = resolveKnowledgeSet(
+      [candidate({
+        unitId: 'irrelevant-consent',
+        trigger: triggerFactDecision('consentStatus', 'EXPLICIT', 'ABSENT'),
+        semanticRelevance: 'IRRELEVANT',
+      })],
+      QUERY
+    );
+    expect(decision.selected).toEqual([]);
+    expect(decision.excluded).toContainEqual({ unitId: 'irrelevant-consent', reason: 'exception_trigger_inactive' });
+    expect(decision.reasons).toContain('consentStatus_violated');
+  });
+
+  it('reachability-conditioned PROCEDURE_STEP is selected only when LIMITED is active', () => {
+    const active = resolveKnowledgeSet(
+      [candidate({ unitId: 'reach-step', trigger: triggerFactDecision('reachability', 'LIMITED', 'LIMITED') })],
+      QUERY
+    );
+    const inactive = resolveKnowledgeSet(
+      [candidate({ unitId: 'reach-step', trigger: triggerFactDecision('reachability', 'LIMITED', 'NORMAL'), negativeInferenceAllowed: true })],
+      QUERY
+    );
+    expect(active.selected).toEqual(['reach-step']);
+    expect(active.disposition).toBe('ANSWER');
+    expect(inactive.selected).toEqual([]);
+    expect(inactive.negativeEvidence).toEqual(['reach-step']);
+    expect(inactive.selectedApplicability).toContainEqual(expect.objectContaining({ unitId: 'reach-step', mode: 'NEGATIVE' }));
+  });
+
+  it('false generic sufficient condition is excluded and cannot prove a denial', () => {
+    const decision = resolveKnowledgeSet(
+      [candidate({ unitId: 'if-x-then-y', trigger: triggerFactDecision('consentStatus', 'EXPLICIT', 'ABSENT') })],
+      QUERY
+    );
+    expect(decision.negativeEvidence).toEqual([]);
+    expect(decision.excluded).toContainEqual({ unitId: 'if-x-then-y', reason: 'exception_trigger_inactive' });
+    expect(decision.disposition).toBe('HOLD');
+  });
+
+  it('inactive necessary-condition evidence cannot supersede or numerically conflict with operative evidence', () => {
+    const active = candidate({
+      unitId: 'active',
+      numericConstraint: { factKey: 'maximum', value: 5, unit: 'times' },
+    });
+    const inactiveNecessary = candidate({
+      unitId: 'negative',
+      trigger: triggerFactDecision('consentStatus', 'EXPLICIT', 'ABSENT'),
+      negativeInferenceAllowed: true,
+      numericConstraint: { factKey: 'maximum', value: 3, unit: 'times' },
+      supersedes: ['active'],
+    });
+    const decision = resolveKnowledgeSet([active, inactiveNecessary], QUERY);
+    expect(decision.selected).toEqual(['active']);
+    expect(decision.negativeEvidence).toEqual(['negative']);
+    expect(decision.numericConflicts).toEqual([]);
+    expect(decision.excluded).not.toContainEqual(expect.objectContaining({ unitId: 'active' }));
   });
 });
 
@@ -228,9 +352,9 @@ describe('§4.1 п.2 — последствия активации исключ�
     expect(decision.undetermined).toEqual([{ unitId: 'rule-5', reason: 'exception_trigger_unknown' }]);
   });
 
-  it('неизвестное условие БЕЗ конкуренции не заставляет переспрашивать', () => {
-    // §4.1 п.2: существование исключения не блокирует общее правило. Родителя
-    // среди кандидатов нет — спорить не с чем, значит и уточнять нечего.
+  it('неизвестное условие релевантного кандидата требует уточнения даже без явной конкуренции', () => {
+    // После content-relevance gate кандидат уже признан способным менять
+    // ответ; неизвестный trigger нельзя молча считать неактивным.
     const decision = resolveKnowledgeSet(
       [
         candidate({ unitId: 'rule-7' }),
@@ -245,12 +369,12 @@ describe('§4.1 п.2 — последствия активации исключ�
       QUERY
     );
 
-    expect(decision.disposition).toBe('ANSWER');
+    expect(decision.disposition).toBe('CLARIFY');
     expect(decision.selected).toEqual(['rule-7']);
     expect(decision.undetermined).toEqual([
       { unitId: 'rule-5', reason: 'exception_trigger_unknown' },
     ]);
-    expect(decision.clarificationNeeds.triggerFacts).toEqual([]);
+    expect(decision.clarificationNeeds.triggerFacts).toEqual(['privacyContext']);
   });
 
   it('EXCEPTION_RULE без triggerCondition — достоверный дефект данных, а не пробел', () => {
@@ -641,11 +765,6 @@ describe('жёсткая фильтрация не убивает recall', () =>
   });
 
   it('исключение БЕЗ родителя не отвечает как самостоятельное правило', () => {
-    // Находка ревью на PR. §2 делает parentRuleRef обязательным для
-    // EXCEPTION_RULE, но тип кандидата допускает null (миграции, ручной ввод).
-    // Раньше такой unit просто пропускал шаг переопределения и ОСТАВАЛСЯ в
-    // выборке — то есть отвечал как обычное правило, хотя по смыслу он лишь
-    // оговорка к чему-то, чего в ответе нет.
     const decision = resolveKnowledgeSet(
       [
         candidate({

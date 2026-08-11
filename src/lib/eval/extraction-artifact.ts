@@ -45,7 +45,10 @@ import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import type { ModelInfo } from '@/lib/ai/embedding-provider';
 import type { BatchExtractionLog } from '@/lib/knowledge/batch-extraction';
 import {
+  buildFocusedRepairPromptMessages,
+  FOCUSED_REPAIR_MAX_ROUNDS,
   focusedRepairDuplicatesExistingUnit,
+  refineCoextensiveEvidence,
   type FocusedRetryLog,
 } from '@/lib/knowledge/audited-extraction';
 import {
@@ -57,7 +60,7 @@ import {
   type RawCoverageFinding,
 } from '@/lib/knowledge/extraction-coverage-auditor';
 import { buildExtractionPromptMessages } from '@/lib/knowledge/knowledge-unit-extractor';
-import type { ExtractedKnowledgeUnit } from '@/lib/knowledge/applicability/extraction';
+import { extractedKnowledgeUnitSchema, type ExtractedKnowledgeUnit } from '@/lib/knowledge/applicability/extraction';
 import {
   assignIdentity,
   type PersistedKnowledgeUnit,
@@ -70,7 +73,7 @@ import type { EvaluationKnowledgeSnapshot } from './evaluation-snapshot';
 
 /** Bumped whenever the artifact's SHAPE changes. Part of the fingerprint, so
  *  an artifact from an older shape is refused rather than half-read. */
-export const EXTRACTION_ARTIFACT_VERSION = '2026-08-10-extraction-artifact-v3';
+export const EXTRACTION_ARTIFACT_VERSION = '2026-08-10-extraction-artifact-v6';
 
 export type ExtractionArtifactPhase = 'SEMANTIC_CHECKPOINT' | 'COMPLETE';
 
@@ -182,9 +185,97 @@ function probeFocusedRepairPolicy(): string {
       sourceSpan: { anchor: 'probe-anchor', quote: 'не более 5 рабочих дней' },
     }),
   ];
+  const prompt = buildFocusedRepairPromptMessages({
+    block: { anchor: 'probe-anchor', text: PROBE_BLOCK_TEXT },
+    findings: [{
+      verdict: 'UNREPRESENTED_CLAUSE',
+      quote: 'за рубежом',
+      explanation: 'recognized applicability missing from triggerCondition',
+      quoteVerified: true,
+    }],
+    existingUnits: [existing],
+  });
+  return sha256(JSON.stringify({
+    duplicateDecisions: candidates.map((candidate) =>
+      focusedRepairDuplicatesExistingUnit(PROBE_BLOCK_TEXT, candidate, [existing])
+    ),
+    prompt,
+    maxRounds: FOCUSED_REPAIR_MAX_ROUNDS,
+    mandatoryFullStructureReaudit: true,
+    mergePolicy: 'full-unit-non-lossy-two-pass-parent-remap-with-grounded-malformed-exception-parent-clear-and-ambiguity-normalization',
+  }));
+}
+
+/** Post-paid-extraction evidence refinement changes persisted source spans,
+ * identities and retrieval text. Probe the real pure transformation so final
+ * trusted artifacts invalidate while raw paid-response checkpoints remain
+ * reusable and can be re-refined locally. */
+function probeEvidenceRefinementPolicy(): string {
+  const broadQuote = PROBE_BLOCK_TEXT;
+  const units = [
+    probeExtractedUnit({
+      extractionRef: 'refine-a',
+      statement: 'Документ подаётся в оригинале.',
+      sourceSpan: { anchor: 'probe-anchor', quote: broadQuote },
+      evidenceByField: { statement: { anchor: 'probe-anchor', quote: broadQuote } },
+    }),
+    probeExtractedUnit({
+      extractionRef: 'refine-b',
+      statement: 'Если заявитель находится за рубежом, допускается нотариальная копия.',
+      sourceSpan: { anchor: 'probe-anchor', quote: broadQuote },
+      evidenceByField: { statement: { anchor: 'probe-anchor', quote: broadQuote } },
+    }),
+  ];
+  const refined = refineCoextensiveEvidence(units);
+  return sha256(
+    JSON.stringify(refined.map((unit) => [unit.sourceSpan.quote, unit.evidenceByField.statement?.quote ?? null]))
+  );
+}
+
+function probeGraphIntegrityPolicy(): string {
+  const make = (
+    unitId: string,
+    parentRuleRef: string | null,
+    overrides: Partial<PersistedKnowledgeUnit> = {}
+  ): PersistedKnowledgeUnit => ({
+    kind: 'PROCEDURE_STEP',
+    statement: `probe ${unitId}`,
+    facets: {},
+    triggerCondition: null,
+    numericConstraint: null,
+    parentRuleRef,
+    sourceSpan: { anchor: 'probe-anchor', quote: 'Документ подаётся в оригинале' },
+    evidenceByField: { statement: { anchor: 'probe-anchor', quote: 'Документ подаётся в оригинале' } },
+    uncertainties: [],
+    sourceBlockAnchor: `probe-block-${unitId}`,
+    unitId,
+    contentHash: `probe-hash-${unitId}`,
+    ...overrides,
+  });
+  const trigger = (value: 'PUBLIC' | 'PRIVATE') => ({
+    all: [{ fact: 'privacyContext' as const, equals: value }],
+  });
+  const cases: readonly (readonly PersistedKnowledgeUnit[])[] = [
+    [make('root', null), make('child', 'root'), make('leaf', 'child')],
+    [make('dangling', 'missing')],
+    [make('self', 'self')],
+    [make('a', 'b'), make('b', 'a')],
+    [make('root', null, { triggerCondition: trigger('PUBLIC') }), make('child', 'root', { triggerCondition: trigger('PRIVATE') })],
+    [
+      make('root', null, { triggerCondition: trigger('PRIVATE') }),
+      make('exception', 'root', { kind: 'EXCEPTION_RULE', triggerCondition: trigger('PUBLIC') }),
+    ],
+  ];
   return sha256(
     JSON.stringify(
-      candidates.map((candidate) => focusedRepairDuplicatesExistingUnit(PROBE_BLOCK_TEXT, candidate, [existing]))
+      cases.map((units) => {
+        try {
+          assertTrustedGraphIntegrity(units, 'probe');
+          return 'OK';
+        } catch (error) {
+          return error instanceof ExtractionArtifactError ? error.message.split('.')[0] : String(error);
+        }
+      })
     )
   );
 }
@@ -278,18 +369,31 @@ export interface PipelineProbeFingerprints {
   readonly auditPromptFingerprint: string;
   readonly auditPolicyFingerprint: string;
   readonly focusedRepairPolicyFingerprint: string;
+  /** Paid-call contract only: response/schema acceptance. Exact prompt is
+   * bound separately by each journal requestDigest. Deliberately excludes
+   * offline merge/maxRounds/final-publication policy. */
+  readonly focusedRepairPaidStageFingerprint: string;
+  readonly evidenceRefinementFingerprint: string;
+  readonly graphIntegrityPolicyFingerprint: string;
   readonly identityAlgorithmFingerprint: string;
   readonly retrievalTextFingerprint: string;
 }
 
-/** Все пять проб одним вызовом — чтобы у скрипта не было выбора взять четыре
- *  из пяти. Чистая, без сети; безопасно звать до любого платного вызова. */
+/** Все поведенческие пробы одним вызовом — чтобы вызывающий не мог случайно
+ *  пропустить одну. Чистая, без сети; безопасно звать до платных вызовов. */
 export function computePipelineProbes(): PipelineProbeFingerprints {
   return {
     extractionPromptFingerprint: probeExtractionPrompt(),
     auditPromptFingerprint: probeAuditPrompt(),
     auditPolicyFingerprint: probeAuditPolicy(),
     focusedRepairPolicyFingerprint: probeFocusedRepairPolicy(),
+    focusedRepairPaidStageFingerprint: sha256(JSON.stringify({
+      schema: extractedKnowledgeUnitSchema._zod.def,
+      accepted: extractedKnowledgeUnitSchema.safeParse(probeExtractedUnit()).success,
+      rejectsBlankStatement: extractedKnowledgeUnitSchema.safeParse(probeExtractedUnit({ statement: ' ' })).success,
+    })),
+    evidenceRefinementFingerprint: probeEvidenceRefinementPolicy(),
+    graphIntegrityPolicyFingerprint: probeGraphIntegrityPolicy(),
     identityAlgorithmFingerprint: probeIdentityAlgorithm(),
     retrievalTextFingerprint: probeRetrievalText(),
   };
@@ -326,6 +430,8 @@ export interface ExtractionFingerprint {
   readonly auditPolicyFingerprint: string;
   // Политики, у которых нет константы версии (см. пробы выше).
   readonly focusedRepairPolicyFingerprint: string;
+  readonly evidenceRefinementFingerprint: string;
+  readonly graphIntegrityPolicyFingerprint: string;
   readonly identityAlgorithmFingerprint: string;
   readonly retrievalTextFingerprint: string;
   // Эмбеддинги.
@@ -503,8 +609,97 @@ export function assertTrustedCompleteness(
   }
 }
 
+/** Semantic publication invariant. An exception without both a parent rule
+ * and an executable trigger cannot participate safely in applicability: it
+ * silently behaves like missing knowledge and turns answerable cases into
+ * HOLD. Reject it; never guess/reclassify at this boundary. */
+export function assertTrustedSemanticIntegrity(
+  units: readonly PersistedKnowledgeUnit[],
+  label: string
+): void {
+  const malformed = units.filter(
+    (unit) => unit.kind === 'EXCEPTION_RULE' && (unit.parentRuleRef === null || unit.triggerCondition === null)
+  );
+  if (malformed.length === 0) return;
+
+  const details = malformed.map((unit) => {
+    const missing = [
+      ...(unit.parentRuleRef === null ? ['parentRuleRef'] : []),
+      ...(unit.triggerCondition === null ? ['triggerCondition'] : []),
+    ];
+    return `${unit.unitId} (anchor=${unit.sourceBlockAnchor}, нет ${missing.join('+')})`;
+  });
+  throw new ExtractionArtifactError(
+    `Артефакт "${label}": malformed EXCEPTION_RULE запрещён на trusted boundary: ${details.join('; ')}. ${REMEDIATION}`
+  );
+}
+
+/** Validates the persisted parent graph and structural trigger inheritance.
+ * An EXCEPTION_RULE's edge points at the rule it overrides, not at a
+ * structural parent, so trigger inheritance deliberately stops at that edge. */
+export function assertTrustedGraphIntegrity(
+  units: readonly PersistedKnowledgeUnit[],
+  label: string
+): void {
+  const byId = new Map(units.map((unit) => [unit.unitId, unit]));
+
+  for (const unit of units) {
+    if (unit.parentRuleRef === null) continue;
+    if (unit.parentRuleRef === unit.unitId) {
+      throw new ExtractionArtifactError(
+        `Артефакт "${label}": self-parent запрещён: ${unit.unitId} -> ${unit.parentRuleRef}. ${REMEDIATION}`
+      );
+    }
+    if (!byId.has(unit.parentRuleRef)) {
+      throw new ExtractionArtifactError(
+        `Артефакт "${label}": dangling parent edge: ${unit.unitId} -> ${unit.parentRuleRef}. ${REMEDIATION}`
+      );
+    }
+  }
+
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (unit: PersistedKnowledgeUnit, path: readonly string[]): void => {
+    if (visited.has(unit.unitId)) return;
+    if (visiting.has(unit.unitId)) {
+      const cycleStart = path.indexOf(unit.unitId);
+      const cycle = [...path.slice(cycleStart), unit.unitId];
+      throw new ExtractionArtifactError(
+        `Артефакт "${label}": cycle в parent graph: ${cycle.join(' -> ')}. ${REMEDIATION}`
+      );
+    }
+    visiting.add(unit.unitId);
+    if (unit.parentRuleRef !== null) visit(byId.get(unit.parentRuleRef)!, [...path, unit.unitId]);
+    visiting.delete(unit.unitId);
+    visited.add(unit.unitId);
+  };
+  for (const unit of units) visit(unit, []);
+
+  for (const unit of units) {
+    const requiredByFact = new Map<string, { value: unknown; unitId: string }>();
+    let current: PersistedKnowledgeUnit | undefined = unit;
+    while (current !== undefined) {
+      for (const clause of current.triggerCondition?.all ?? []) {
+        const prior = requiredByFact.get(clause.fact);
+        if (prior !== undefined && prior.value !== clause.equals) {
+          throw new ExtractionArtifactError(
+            `Артефакт "${label}": contradictory inherited trigger для ${unit.unitId}: ` +
+              `${clause.fact}=${String(prior.value)} (${prior.unitId}) против ${clause.fact}=${String(clause.equals)} (${current.unitId}). ${REMEDIATION}`
+          );
+        }
+        requiredByFact.set(clause.fact, { value: clause.equals, unitId: current.unitId });
+      }
+      // This edge is an override target, never structural inheritance.
+      if (current.kind === 'EXCEPTION_RULE') break;
+      current = current.parentRuleRef === null ? undefined : byId.get(current.parentRuleRef);
+    }
+  }
+}
+
 export function buildExtractionArtifact(input: BuildExtractionArtifactInput): ExtractionArtifact {
   assertTrustedCompleteness(input.batchLogs, input.auditResults, input.fingerprint.blockCount, input.sourceDocPath);
+  assertTrustedSemanticIntegrity(input.snapshot.units, input.sourceDocPath);
+  assertTrustedGraphIntegrity(input.snapshot.units, input.sourceDocPath);
   const artifactWithoutDigest = {
     artifactVersion: EXTRACTION_ARTIFACT_VERSION,
     phase: input.phase,
@@ -600,6 +795,8 @@ const FINGERPRINT_STRING_FIELDS = [
   'auditPromptFingerprint',
   'auditPolicyFingerprint',
   'focusedRepairPolicyFingerprint',
+  'evidenceRefinementFingerprint',
+  'graphIntegrityPolicyFingerprint',
   'identityAlgorithmFingerprint',
   'retrievalTextFingerprint',
   'embeddingProvider',
@@ -813,6 +1010,8 @@ export function parseExtractionArtifact(json: string, sourceLabel: string): Extr
     auditResults: requireArray<BlockCoverageAuditResult>(source.auditResults, 'auditResults'),
     focusedRetryLogs: requireArray<FocusedRetryLog>(source.focusedRetryLogs, 'focusedRetryLogs'),
   };
+  assertTrustedSemanticIntegrity(parsed.snapshot.units, sourceLabel);
+  assertTrustedGraphIntegrity(parsed.snapshot.units, sourceLabel);
   if (parsed.phase === 'SEMANTIC_CHECKPOINT' && parsed.embeddings.length !== 0) {
     throw new ExtractionArtifactError(`Артефакт "${sourceLabel}": semantic checkpoint содержит частичные embeddings. ${REMEDIATION}`);
   }

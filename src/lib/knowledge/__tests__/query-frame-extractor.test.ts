@@ -80,6 +80,14 @@ describe('buildExtractionMessages — чистая функция, без сет
     expect(systemMessage.content).toContain('apostille.zags.spb');
     expect(systemMessage.content).toContain('apostille.zags.lo');
   });
+
+  it('prompt pins current-consent semantics and rejects historical consent as EXPLICIT', () => {
+    const systemMessage = buildExtractionMessages([CURRENT]).find((m) => m.role === 'system')!;
+    expect(systemMessage.content).toContain('Спящий человек');
+    expect(systemMessage.content).toContain('означает ABSENT');
+    expect(systemMessage.content).toContain('Прошлое согласие');
+    expect(systemMessage.content).toContain('НИКОГДА не означают текущее EXPLICIT');
+  });
 });
 
 describe('extractQueryFrame — интеграция со structured()', () => {

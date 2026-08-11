@@ -159,6 +159,25 @@ afterEach(() => {
 });
 
 describe('structured() — успешный разбор', () => {
+  it('publishes exact attempts to a run-level cost observer once', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      content: [{ type: 'text', text: JSON.stringify(VALID_PAYLOAD) }],
+      usage: { input_tokens: 10, output_tokens: 5 },
+    }), { status: 200 }));
+    const observed: unknown[] = [];
+
+    await structured({
+      schema: priceSchema,
+      messages: MESSAGES,
+      runConfig: runConfig({ onCompletionAttempts: (attempts) => observed.push(attempts) }),
+    });
+
+    expect(observed).toHaveLength(1);
+    expect(observed[0]).toEqual([
+      expect.objectContaining({ outcome: 'SUCCESS', usage: { inputTokens: 10, outputTokens: 5 } }),
+    ]);
+  });
+
   it('валидный ответ разбирается в типизированные данные', async () => {
     fetchMock.mockResolvedValue(anthropicOk(JSON.stringify(VALID_PAYLOAD)));
 

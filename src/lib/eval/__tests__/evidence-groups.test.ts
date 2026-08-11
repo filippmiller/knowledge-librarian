@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { evaluateEvidenceGroupCoverage, RULE_9_EVIDENCE_GROUP, RULE_10_EVIDENCE_GROUP, type RequiredEvidenceGroup } from '../evidence-groups';
+import { evaluateEvidenceGroupCoverage, RULE_1_EVIDENCE_GROUP, RULE_9_EVIDENCE_GROUP, RULE_10_EVIDENCE_GROUP, type RequiredEvidenceGroup } from '../evidence-groups';
 import type { PersistedKnowledgeUnit } from '@/lib/knowledge/applicability/identity-assignment';
 
 /**
@@ -121,6 +121,17 @@ describe('RULE_9_EVIDENCE_GROUP — реальные компоненты из �
   });
 });
 
+describe('RULE_1_EVIDENCE_GROUP — одежда и prerequisite приватности', () => {
+  const CLOTHING = unit({ statement: 'Брюки следует ослабить или спустить настолько, чтобы открыть нужный участок; полностью снимать одежду не требуется.' });
+  const PRIVACY = unit({ statement: 'Перед началом человек должен перейти в закрытое место, где его действия не видны окружающим.' });
+
+  it('requires both semantic clauses even when both units map to rule 1', () => {
+    expect(evaluateEvidenceGroupCoverage(RULE_1_EVIDENCE_GROUP, [CLOTHING]).covered).toBe(false);
+    expect(evaluateEvidenceGroupCoverage(RULE_1_EVIDENCE_GROUP, [PRIVACY]).covered).toBe(false);
+    expect(evaluateEvidenceGroupCoverage(RULE_1_EVIDENCE_GROUP, [CLOTHING, PRIVACY]).covered).toBe(true);
+  });
+});
+
 describe('RULE_10_EVIDENCE_GROUP — реальные компоненты (anchor aa2975a920553245)', () => {
   const REACHABILITY_UNIT = unit({
     unitId: 'bfb006458f3ec1db',
@@ -138,21 +149,38 @@ describe('RULE_10_EVIDENCE_GROUP — реальные компоненты (anch
     unitId: 'b113efdef1c94d5e',
     statement: 'Для ребёнка продолжительность и гигиену контролирует взрослый.',
   });
+  const CONSENT_UNIT = unit({ statement: 'Помощь допускается только после ясного согласия того, кому помогают.' });
+  const GLOVES_UNIT = unit({ statement: 'Помощник обязан надеть чистые одноразовые перчатки.' });
+  const LIMITS_UNIT = unit({ statement: 'Помощник обязан соблюдать ограничения по силе воздействия и по времени.' });
+  const STOP_UNIT = unit({ statement: 'Помощник обязан немедленно остановиться по первой просьбе.' });
 
-  it('оба компонента подвижности выбраны -> covered=true', () => {
-    const result = evaluateEvidenceGroupCoverage(RULE_10_EVIDENCE_GROUP, [REACHABILITY_UNIT, SHARP_OBJECT_UNIT]);
+  it('reachability method plus the full helper-safety contract -> covered=true', () => {
+    const result = evaluateEvidenceGroupCoverage(RULE_10_EVIDENCE_GROUP, [
+      REACHABILITY_UNIT, SHARP_OBJECT_UNIT, CONSENT_UNIT, GLOVES_UNIT, LIMITS_UNIT, STOP_UNIT,
+    ]);
     expect(result.covered).toBe(true);
+  });
+
+  it('old incomplete reachability-only evidence fails all helper prerequisites', () => {
+    const result = evaluateEvidenceGroupCoverage(RULE_10_EVIDENCE_GROUP, [REACHABILITY_UNIT, SHARP_OBJECT_UNIT]);
+    expect(result.covered).toBe(false);
+    expect(result.uncoveredClauseDescriptions).toEqual(expect.arrayContaining([
+      'текущее ясное согласие на помощь',
+      'чистые одноразовые перчатки помощника',
+      'ограничения по силе воздействия и времени',
+      'немедленная остановка по первой просьбе',
+    ]));
   });
 
   it('выбран только reachability-фрагмент -> covered=false', () => {
     const result = evaluateEvidenceGroupCoverage(RULE_10_EVIDENCE_GROUP, [REACHABILITY_UNIT]);
     expect(result.covered).toBe(false);
-    expect(result.uncoveredClauseDescriptions.length).toBe(1);
+    expect(result.uncoveredClauseDescriptions.length).toBe(5);
   });
 
   it('unit того же anchor, но не о подвижности (child supervision) — НЕ засчитывается ни за один компонент правила 10', () => {
     const result = evaluateEvidenceGroupCoverage(RULE_10_EVIDENCE_GROUP, [CHILD_SUPERVISION_UNIT]);
     expect(result.covered).toBe(false);
-    expect(result.uncoveredClauseDescriptions.length).toBe(2);
+    expect(result.uncoveredClauseDescriptions.length).toBe(6);
   });
 });

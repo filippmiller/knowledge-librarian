@@ -24,43 +24,21 @@
  * irrelevant to "how much clothing to remove" (Q01). Only content-aware
  * judgment distinguishes these, not topic/vocabulary overlap.
  *
- * TWO-TIER DESIGN (chosen over a pure LLM classifier or a bare rerank-score
- * threshold — see the architectural review this responds to):
- *
- * 1. Deterministic structural check, free, zero LLM calls, zero regression
- *    risk: a non-`EXCEPTION_RULE` candidate is relevant by construction (it
- *    already passed scope matching, which IS a relevance signal for that
- *    kind — this is not the observed failure mode). An `EXCEPTION_RULE`
- *    candidate whose trigger is already confidently `ACTIVE`/`INACTIVE` is
- *    left to `resolveKnowledgeSet`'s already-correct, already-tested
- *    handling of those cases. An `EXCEPTION_RULE` whose `parentRuleRef`
- *    points at ANOTHER candidate that is itself scope-matched is relevant
- *    by construction too — this is exactly the Q01-M1/Q05-M1 shape when the
- *    link survives extraction, and needs no LLM call to prove.
- *
- * 2. Oracle-blind LLM classifier, invoked ONLY for what's left: an
- *    `EXCEPTION_RULE` with an unresolved trigger (`UNKNOWN` verdict, OR no
- *    `triggerCondition` at all — a malformed/incomplete extraction is a
- *    relevance question too, not exempt from it: a real full-benchmark run
- *    found a malformed record with no triggerCondition that was topically
- *    irrelevant to a question, yet still reached `resolveKnowledgeSet`
- *    unconditionally, which correctly excluded it but ALSO set
- *    `requiresHumanReview = true` — poisoning that question's disposition
- *    to `HOLD` even with two other confidently-selected candidates ready to
- *    answer it. The data-quality concern doesn't disappear; it's just no
- *    longer conflated with whether THIS question can be answered) AND no
- *    structurally-proven relevant parent. This is exactly the genuinely
- *    ambiguous remainder — real judgment about THIS question's content, not
- *    a blanket score threshold (which the architectural review explicitly
- *    rejected: reranker scores are model- and query-relative, too fragile
- *    as the sole signal).
+ * All top-K candidates are judged together in one oracle-blind structured
+ * call. Neither taxonomy, a resolved trigger, nor a parent link proves that
+ * a candidate can affect this question: the controlled quality run found
+ * counterexamples for each shortcut. Batching keeps provider call count at
+ * one per question while preserving a verdict and provenance for every unit.
+ * A bare rerank-score threshold remains intentionally insufficient because
+ * scores are model- and query-relative rather than decision semantics.
  */
 
-import type { ChatMessage } from '@/lib/ai/chat-provider';
+import type { ChatMessage, CompletionAttempt } from '@/lib/ai/chat-provider';
 import type { ExtractionRunConfig } from '@/lib/ai/extraction-run';
-import { structured } from '@/lib/ai/structured-output';
+import { PaidStructuredSemanticError, structured } from '@/lib/ai/structured-output';
 import { z } from 'zod';
-import type { EvaluatedCandidate } from './resolution';
+import { resolveKnowledgeSet, type EvaluatedCandidate, type ResolutionDecision } from './resolution';
+import type { QueryFrame } from './query-frame';
 
 export const DECISION_RELEVANCE_VERDICTS = ['RELEVANT', 'CONDITIONALLY_RELEVANT', 'IRRELEVANT'] as const;
 export type DecisionRelevanceVerdict = (typeof DECISION_RELEVANCE_VERDICTS)[number];
@@ -81,18 +59,24 @@ export interface DecisionRelevanceCandidateInfo {
   readonly quote: string;
 }
 
-const SYSTEM_PROMPT = `Ты определяешь РЕЛЕВАНТНОСТЬ правила-исключения для конкретного вопроса — способность повлиять на ответ, а НЕ тематическое сходство.
+const SYSTEM_PROMPT = `Ты определяешь РЕЛЕВАНТНОСТЬ единицы знания для конкретного вопроса — способность повлиять на ответ, а НЕ тематическое сходство.
 
-Тебе дан вопрос пользователя и текст одного правила-исключения (statement + дословная цитата из источника). Определи одно из:
+Тебе дан вопрос пользователя и текст одной единицы знания (statement + дословная цитата из источника). Определи одно из:
 - "RELEVANT": правило может НАПРЯМУЮ отвечать на вопрос или ограничивать ответ на него.
-- "CONDITIONALLY_RELEVANT": правило — законное исключение к тому, что отвечает на вопрос, и его применимость зависит от факта, которого вопрос не сообщает. Укажи этот факт (potentiallyDecidingFacts).
+- "CONDITIONALLY_RELEVANT": разные значения неизвестного факта способны изменить ответ именно на заданный вопрос. Укажи этот факт (potentiallyDecidingFacts). Само наличие условия или связи с соседним правилом недостаточно.
 - "IRRELEVANT": правило говорит о ДРУГОЙ ситуации или условии — даже если использует похожие слова (кожа, прикосновение, участок и т.п.), оно НЕ способно изменить ответ на ЭТОТ конкретный вопрос.
+
+ПОЛНОТА ПРОЦЕДУРЫ — часть релевантности. Верни RELEVANT также для обязательного предварительного условия, контекста, ограничения безопасности или сопутствующего шага, без которого ответ по другому явно названному измерению процедуры был бы неполным либо небезопасным. Правило, которое добавляет обязательное условие к отвечающему правилу, НЕ является IRRELEVANT только потому, что пользователь спросил, например, о количестве/способе, а не повторил это условие словами. В пакетном запросе оценивай единицы совместно: несколько sibling-правил могут составлять один полный ответ. Само соседство в одном блоке, однако, релевантность не доказывает.
 
 Два предметно-нейтральных примера для калибровки:
 1. Вопрос "Можно ли отправить форму по электронной почте?" + правило об увеличенном сроке для международной доставки -> IRRELEVANT (способ отправки не зависит от срока доставки).
 2. Вопрос "Можно ли применить скидку?" + исключение для некоммерческих организаций -> CONDITIONALLY_RELEVANT, potentiallyDecidingFacts: ["organizationType"] (ответ зависит от типа организации, а вопрос его не называет).
+3. Вопрос "Сколько полей формы достаточно заполнить?" + правило "перед отправкой форму обязательно подписывает заявитель" -> RELEVANT: подпись — co-required prerequisite полного ответа, хотя вопрос назвал только объём заполнения.
+4. Вопрос "Может ли помощник выполнить действие после разрешения?" + правило "помощник обязан использовать защитные перчатки" -> RELEVANT: это co-required safety step той же процедуры, а не другая тема.
+5. Тот же вопрос о заполнении формы + соседнее в исходном блоке правило "копии хранятся семь лет" -> IRRELEVANT: совместное расположение без влияния на выполнение не делает правило частью ответа.
 
 Не оценивай тематическое сходство слов. Оценивай: способно ли это правило изменить ответ на ДАННЫЙ вопрос.
+Проверка для CONDITIONALLY_RELEVANT: мысленно подставь разные значения неизвестного факта. Если ответ на заданные пользователем варианты остаётся тем же, верни IRRELEVANT. Правило про дополнительный случай, о котором пользователь не спрашивал и которое не меняет основной ответ, также IRRELEVANT.
 
 Ответ СТРОГО JSON: {"verdict": "...", "reason": "...", "potentiallyDecidingFacts": [...]}`;
 
@@ -106,7 +90,7 @@ export function buildDecisionRelevancePromptMessages(
       role: 'user',
       content:
         `Вопрос: "${question}"\n\n` +
-        `Правило-исключение:\nУтверждение: ${candidate.statement}\nЦитата: "${candidate.quote}"\n\n` +
+        `Единица знания:\nУтверждение: ${candidate.statement}\nЦитата: "${candidate.quote}"\n\n` +
         'Определи релевантность для этого вопроса.',
     },
   ];
@@ -121,12 +105,12 @@ export function buildBatchDecisionRelevancePromptMessages(
       role: 'system',
       content:
         SYSTEM_PROMPT +
-        '\n\nДля пакетного запроса верни СТРОГО JSON: {"results":[{"unitId":"...","verdict":"...","reason":"...","potentiallyDecidingFacts":[]}]}. Верни ровно один результат для каждого переданного unitId.',
+        '\n\nДля пакетного запроса сначала мысленно собери полный безопасный ответ из ВСЕХ переданных единиц: не отбрасывай prerequisite/context/safety sibling только потому, что другая единица уже узко отвечает на формулировку вопроса. Затем верни СТРОГО JSON: {"results":[{"unitId":"...","verdict":"...","reason":"...","potentiallyDecidingFacts":[]}]}. Верни ровно один результат для каждого переданного unitId.',
     },
     {
       role: 'user',
       content:
-        `Вопрос: "${question}"\n\nПравила-исключения:\n` +
+        `Вопрос: "${question}"\n\nЕдиницы знания:\n` +
         candidates
           .map(
             (candidate) =>
@@ -196,11 +180,21 @@ export interface EvaluateDecisionRelevanceBatchOptions {
   readonly runConfig: ExtractionRunConfig;
 }
 
+export interface DecisionRelevanceBatchTelemetry {
+  readonly attempts: readonly CompletionAttempt[];
+  readonly requestMessages: readonly ChatMessage[];
+  readonly responseText: string | null;
+}
+
+export interface DecisionRelevanceBatchEvaluation extends DecisionRelevanceBatchTelemetry {
+  readonly decisions: readonly ClassifiedDecisionRelevance[];
+}
+
 /** The singular return is retained only for existing one-candidate test
  * doubles. Production always uses the batched array contract. */
 export type DecisionRelevanceBatchClassifier = (
   options: EvaluateDecisionRelevanceBatchOptions
-) => Promise<readonly ClassifiedDecisionRelevance[] | DecisionRelevance>;
+) => Promise<DecisionRelevanceBatchEvaluation | readonly ClassifiedDecisionRelevance[] | DecisionRelevance>;
 
 export const evaluateDecisionRelevanceBatch: DecisionRelevanceBatchClassifier = async (options) => {
   const result = await structured({
@@ -208,7 +202,12 @@ export const evaluateDecisionRelevanceBatch: DecisionRelevanceBatchClassifier = 
     messages: buildBatchDecisionRelevancePromptMessages(options.question, options.candidates),
     runConfig: options.runConfig,
   });
-  return result.data.results;
+  return {
+    decisions: result.data.results,
+    attempts: result.attempts,
+    requestMessages: result.requestMessages ?? [],
+    responseText: result.rawText ?? null,
+  };
 };
 
 // ─────────────────────────── deterministic gate ────────────────────────────
@@ -217,11 +216,23 @@ export interface GateCandidateInput {
   readonly evaluated: EvaluatedCandidate;
   readonly statement: string;
   readonly quote: string;
+  /** Trusted graph provenance only. REQUIRES/CO_REQUIRED closure members are
+   * part of the retrieved rule's complete meaning and cannot be removed by a
+   * probabilistic relevance classifier. ALTERNATIVE members must leave this
+   * false/undefined and follow the ordinary applicability path. */
+  readonly trustedMandatoryDependency?: boolean;
 }
 
 export interface GatedCandidate {
   readonly unitId: string;
   readonly relevance: DecisionRelevance;
+}
+
+export interface DecisionRelevanceChallenge extends GateCandidateInput {
+  readonly unitId: string;
+  /** Deterministically source-backed necessary condition. A model may not
+   * clear this prerequisite by merely voting COMPATIBLE. */
+  readonly mandatoryPrerequisite: boolean;
 }
 
 export interface DecisionRelevanceGateResult {
@@ -230,7 +241,7 @@ export interface DecisionRelevanceGateResult {
    *  debugging real company documents later (architectural review §6). */
   readonly trace: readonly GatedCandidate[];
   /**
-   * unitId исключений, снятых ИСКЛЮЧИТЕЛЬНО вердиктом LLM-классификатора —
+   * unitId кандидатов, снятых ИСКЛЮЧИТЕЛЬНО вердиктом LLM-классификатора —
    * без единого детерминированного основания (кросс-аудит 2026-08-10).
    *
    * Зачем отдельно от `trace`: по трейсу видно, что вердикт был IRRELEVANT,
@@ -255,18 +266,13 @@ export interface DecisionRelevanceGateResult {
    *  rather than inferred later from a human-readable trace so callers cannot
    *  accidentally treat a classifier-dependent path as deterministic. */
   readonly answerDependsOnProbabilisticExclusion: boolean;
-}
-
-/** True iff `parentRef` names ANOTHER candidate in this same pool that is
- *  itself scope-matched — structural proof the parent is in play for this
- *  query, so the exception referencing it is too. No LLM call needed. */
-function hasScopeMatchedParent(
-  parentRef: string | null,
-  byUnitId: ReadonlyMap<string, EvaluatedCandidate>
-): boolean {
-  if (parentRef === null) return false;
-  const parent = byUnitId.get(parentRef);
-  return parent !== undefined && parent.scope.verdict === 'MATCH';
+  /** Exact metadata for the single batched provider call, or null when every
+   * candidate followed a deterministic fast path/test-double path. */
+  readonly classifierTelemetry: DecisionRelevanceBatchTelemetry | null;
+  /** Classifier-dropped ordinary rules retained for counterfactual and final
+   * compatibility checks. They are not primary evidence, but are never hidden
+   * from the safety path. Exceptions remain fail-closed via provenance. */
+  readonly challengeCandidates: readonly DecisionRelevanceChallenge[];
 }
 
 export async function applyDecisionRelevanceGate(
@@ -275,20 +281,23 @@ export async function applyDecisionRelevanceGate(
   runConfig: ExtractionRunConfig,
   classifier: DecisionRelevanceBatchClassifier = evaluateDecisionRelevanceBatch
 ): Promise<DecisionRelevanceGateResult> {
-  const byUnitId = new Map(candidates.map((c) => [c.evaluated.unitId, c.evaluated]));
   const trace: GatedCandidate[] = [];
   const relevant: EvaluatedCandidate[] = [];
   const droppedByClassifier: string[] = [];
+  const challengeCandidates: DecisionRelevanceChallenge[] = [];
+  let classifierTelemetry: DecisionRelevanceBatchTelemetry | null = null;
 
-  const unresolved = candidates.filter((candidate) => {
-    const ev = candidate.evaluated;
-    return (
-      ev.kind === 'EXCEPTION_RULE' &&
-      (ev.trigger === null || ev.trigger.verdict === 'UNKNOWN') &&
-      !hasScopeMatchedParent(ev.parentRuleRef, byUnitId)
-    );
-  });
+  const unresolved = candidates.filter((candidate) => candidate.trustedMandatoryDependency !== true);
   const classifiedByUnitId = new Map<string, DecisionRelevance>();
+  const classifierUnitIds = new Set(unresolved.map((candidate) => candidate.evaluated.unitId));
+  for (const candidate of candidates) {
+    if (candidate.trustedMandatoryDependency !== true) continue;
+    classifiedByUnitId.set(candidate.evaluated.unitId, {
+      verdict: 'RELEVANT',
+      reason: 'trusted REQUIRES/CO_REQUIRED dependency closure',
+      potentiallyDecidingFacts: [],
+    });
+  }
   if (unresolved.length > 0) {
     const classified = await classifier({
       question,
@@ -299,26 +308,71 @@ export async function applyDecisionRelevanceGate(
       })),
       runConfig,
     });
-    const normalized: readonly ClassifiedDecisionRelevance[] = Array.isArray(classified)
-      ? classified
-      : unresolved.length === 1
-        ? [{ unitId: unresolved[0].evaluated.unitId, ...classified }]
-        : (() => {
-            throw new Error('Batched decision-relevance classifier returned a singular result for multiple candidates');
-          })();
-    for (const decision of normalized) {
-      if (classifiedByUnitId.has(decision.unitId)) {
-        throw new Error(`Batched decision-relevance classifier returned duplicate unitId: ${decision.unitId}`);
-      }
-      classifiedByUnitId.set(decision.unitId, decision);
+    const batchEvaluation =
+      !Array.isArray(classified) && 'decisions' in classified ? classified : null;
+    if (batchEvaluation !== null) {
+      classifierTelemetry = {
+        attempts: batchEvaluation.attempts,
+        requestMessages: batchEvaluation.requestMessages,
+        responseText: batchEvaluation.responseText,
+      };
     }
-    for (const candidate of unresolved) {
-      if (!classifiedByUnitId.has(candidate.evaluated.unitId)) {
-        throw new Error(`Batched decision-relevance classifier omitted unitId: ${candidate.evaluated.unitId}`);
+    const rawDecisions = batchEvaluation?.decisions ?? classified;
+    try {
+      const normalized: readonly ClassifiedDecisionRelevance[] = Array.isArray(rawDecisions)
+        ? rawDecisions
+        : unresolved.length === 1
+          ? [{ unitId: unresolved[0].evaluated.unitId, ...rawDecisions }]
+          : (() => {
+              throw new Error('Batched decision-relevance classifier returned a singular result for multiple candidates');
+            })();
+      for (const decision of normalized) {
+        if (!classifierUnitIds.has(decision.unitId)) {
+          throw new Error(`Batched decision-relevance classifier returned unexpected unitId: ${decision.unitId}`);
+        }
+        if (classifiedByUnitId.has(decision.unitId)) {
+          throw new Error(`Batched decision-relevance classifier returned duplicate unitId: ${decision.unitId}`);
+        }
+        classifiedByUnitId.set(decision.unitId, decision);
       }
+      for (const candidate of unresolved) {
+        if (!classifiedByUnitId.has(candidate.evaluated.unitId)) {
+          throw new Error(`Batched decision-relevance classifier omitted unitId: ${candidate.evaluated.unitId}`);
+        }
+      }
+      if (classifiedByUnitId.size !== candidates.length) {
+        throw new Error('Batched decision-relevance classifier returned an unexpected unitId');
+      }
+    } catch (error) {
+      if (classifierTelemetry !== null) {
+        throw new PaidStructuredSemanticError(
+          error instanceof Error ? error.message : String(error),
+          classifierTelemetry,
+          { cause: error }
+        );
+      }
+      throw error;
     }
-    if (classifiedByUnitId.size !== unresolved.length) {
-      throw new Error('Batched decision-relevance classifier returned an unexpected unitId');
+
+    // Explicit extraction identity outranks a fragment-level semantic veto:
+    // once a parent is judged relevant, every linked child in this same top-K
+    // is part of that rule's structured meaning. This preserves split numeric
+    // clauses and other fragments that are incomplete when read alone.
+    let inheritedAny = true;
+    while (inheritedAny) {
+      inheritedAny = false;
+      for (const candidate of candidates) {
+        const parentRef = candidate.evaluated.parentRuleRef;
+        if (parentRef === null) continue;
+        if (classifiedByUnitId.get(parentRef)?.verdict !== 'RELEVANT') continue;
+        if (classifiedByUnitId.get(candidate.evaluated.unitId)?.verdict === 'RELEVANT') continue;
+        classifiedByUnitId.set(candidate.evaluated.unitId, {
+          verdict: 'RELEVANT',
+          reason: `explicit child of relevant parent ${parentRef}`,
+          potentiallyDecidingFacts: [],
+        });
+        inheritedAny = true;
+      }
     }
   }
 
@@ -327,37 +381,39 @@ export async function applyDecisionRelevanceGate(
 
     let relevance: DecisionRelevance;
     let decidedByClassifier = false;
-    if (ev.kind !== 'EXCEPTION_RULE') {
-      relevance = {
-        verdict: 'RELEVANT',
-        reason: 'not an exception — already scope-matched by retrieval/applicability',
-        potentiallyDecidingFacts: [],
-      };
-    } else if (ev.trigger !== null && ev.trigger.verdict !== 'UNKNOWN') {
-      relevance = {
-        verdict: 'RELEVANT',
-        reason: `trigger already confidently ${ev.trigger.verdict} — resolution handles this deterministically`,
-        potentiallyDecidingFacts: [],
-      };
-    } else if (hasScopeMatchedParent(ev.parentRuleRef, byUnitId)) {
-      relevance = {
-        verdict: 'CONDITIONALLY_RELEVANT',
-        reason: 'parent/base rule is itself a relevant candidate for this question',
-        potentiallyDecidingFacts: ev.trigger?.missingFacts ?? [],
-      };
-    } else {
+    if (classifiedByUnitId.has(ev.unitId)) {
       relevance = classifiedByUnitId.get(ev.unitId)!;
-
-      // Вердикт классификатора здесь — ЕДИНСТВЕННОЕ основание отбросить
-      // кандидата (см. `droppedByClassifier` и разбор ниже).
-      decidedByClassifier = true;
+      decidedByClassifier = classifierUnitIds.has(ev.unitId);
+    } else {
+      throw new Error(`Decision-relevance result missing after validated batch: ${ev.unitId}`);
     }
 
     trace.push({ unitId: ev.unitId, relevance });
     if (relevance.verdict === 'IRRELEVANT') {
-      if (decidedByClassifier) droppedByClassifier.push(ev.unitId);
+      const resolutionWouldExcludeAnyway =
+        !ev.eligibility.eligible ||
+        ev.scope.verdict === 'CONFLICT' ||
+        ev.trigger?.verdict === 'INACTIVE';
+      if (decidedByClassifier && !resolutionWouldExcludeAnyway) {
+        droppedByClassifier.push(ev.unitId);
+        if (ev.kind !== 'EXCEPTION_RULE') {
+          challengeCandidates.push({
+            ...candidate,
+            unitId: ev.unitId,
+            mandatoryPrerequisite:
+              candidate.trustedMandatoryDependency === true || ev.negativeInferenceAllowed === true,
+          });
+        }
+      }
+      // Keep structured INACTIVE candidates visible to resolution even when
+      // semantically irrelevant. They cannot be selected, but their exact
+      // trigger reason (for example consentStatus_violated) is required for
+      // an auditable denial trace.
+      if (ev.trigger?.verdict === 'INACTIVE') {
+        relevant.push({ ...ev, semanticRelevance: 'IRRELEVANT' });
+      }
     } else {
-      relevant.push(ev);
+      relevant.push({ ...ev, semanticRelevance: 'RELEVANT' });
     }
   }
 
@@ -366,5 +422,28 @@ export async function applyDecisionRelevanceGate(
     trace,
     droppedByClassifier,
     answerDependsOnProbabilisticExclusion: droppedByClassifier.length > 0,
+    classifierTelemetry,
+    challengeCandidates,
   };
+}
+
+export interface ChallengeCounterfactualResult {
+  readonly restoredDispositionByUnitId: Readonly<Record<string, ResolutionDecision['disposition']>>;
+  readonly blockingUnitIds: readonly string[];
+}
+
+/** Restores each challenge independently. A candidate that turns ANSWER into
+ * CLARIFY/HOLD is structurally decisive regardless of a later semantic vote. */
+export function evaluateChallengeCounterfactuals(
+  gate: DecisionRelevanceGateResult,
+  query: QueryFrame
+): ChallengeCounterfactualResult {
+  const restoredDispositionByUnitId: Record<string, ResolutionDecision['disposition']> = {};
+  const blockingUnitIds: string[] = [];
+  for (const challenge of gate.challengeCandidates) {
+    const disposition = resolveKnowledgeSet([...gate.relevant, challenge.evaluated], query).disposition;
+    restoredDispositionByUnitId[challenge.unitId] = disposition;
+    if (disposition !== 'ANSWER') blockingUnitIds.push(challenge.unitId);
+  }
+  return { restoredDispositionByUnitId, blockingUnitIds };
 }

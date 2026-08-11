@@ -122,6 +122,19 @@ function resolveTriggerFactRawValue(fact: TriggerFactKey, rawValue: string): unk
   return parsed.success ? parsed.data : undefined;
 }
 
+const HISTORICAL_CONSENT_PATTERN =
+  /(?:раньше|ранее|прежде|до\s+этого|в\s+прошл(?:ый|ом)\s+раз|когда-то|не\s+возражал[аи]?)/iu;
+
+const CURRENT_CONSENT_IMPOSSIBLE_PATTERN =
+  /(?:спящ\p{L}*|спит|без\s+сознания|бессознательн\p{L}*|не\s+может\s+(?:сейчас\s+)?(?:дать|подтвердить|выразить)\s+согласие|не\s+способ\p{L}*\s+(?:сейчас\s+)?(?:дать|подтвердить|выразить)\s+согласие)/iu;
+
+function deriveCurrentConsentAbsence(message: ConversationMessage): FacetEvidence | null {
+  const match = CURRENT_CONSENT_IMPOSSIBLE_PATTERN.exec(message.text);
+  return match === null
+    ? null
+    : { source: 'CURRENT_MESSAGE', messageId: message.id, quote: match[0] };
+}
+
 interface ResolvedFacetMention {
   readonly value: string;
   readonly polarity: 'INCLUDE' | 'EXCLUDE';
@@ -253,7 +266,16 @@ function buildTriggerFactState(
   const resolved = mentions
     .filter((m) => m.fact === fact)
     .map((m) => ({ value: resolveTriggerFactRawValue(fact, m.rawValue), mention: m }))
-    .filter((r): r is { value: unknown; mention: RawTriggerFactMention } => r.value !== undefined);
+    .filter((r): r is { value: unknown; mention: RawTriggerFactMention } => r.value !== undefined)
+    // Consent is per-current-case and cannot be inherited merely because a
+    // model labeled a historical mention (or a current quote explicitly
+    // talking about the past) EXPLICIT.
+    .filter(
+      (r) =>
+        fact !== 'consentStatus' ||
+        r.value !== 'EXPLICIT' ||
+        (r.mention.messageId === currentMessageId && !HISTORICAL_CONSENT_PATTERN.test(r.mention.quote))
+    );
 
   const current = resolved.filter((r) => r.mention.messageId === currentMessageId);
   const history = resolved.filter((r) => r.mention.messageId !== currentMessageId);
@@ -388,6 +410,20 @@ export function buildQueryFrame(
       currentMessageId,
       ambiguities
     );
+  }
+
+
+  // Deterministic safety signal independent of LLM wording: a sleeping,
+  // unconscious, or currently incapable person cannot provide current
+  // explicit consent. This current-message fact overrides any extracted or
+  // historical consent mention; absence of such evidence remains UNKNOWN.
+  const currentConsentAbsence = deriveCurrentConsentAbsence(messages[messages.length - 1]);
+  if (currentConsentAbsence !== null) {
+    triggerFacts.consentStatus = {
+      state: 'KNOWN',
+      value: 'ABSENT',
+      evidence: [currentConsentAbsence],
+    };
   }
 
   return {

@@ -29,7 +29,7 @@ import { structured } from '../src/lib/ai/structured-output';
 import { loadSemanticRuleOracle, ORACLE_PACK_DIR, SOURCE_DOCX_FILENAME } from '../src/lib/eval/semantic-rule-oracle';
 import { loadNegativeCaseOracle } from '../src/lib/eval/negative-case-oracle';
 import { loadSourceRulesFromDocx, type SourceRule } from '../src/lib/eval/source-rule-segmentation';
-import { buildOracleTaintDetector, type OracleTaintDetector } from '../src/lib/eval/oracle-taint';
+import { assertOracleTaintPolicy, buildOracleTaintDetector, type OracleTaintDetector } from '../src/lib/eval/oracle-taint';
 
 function parseArgs(argv: readonly string[]): { outDir: string; docPath: string; topK: number } {
   const outArg = argv.find((a) => a.startsWith('--out='))?.slice('--out='.length);
@@ -95,7 +95,7 @@ async function runRagOnQuestion(
   taintDetector: OracleTaintDetector
 ): Promise<RagQuestionResult> {
   try {
-    taintDetector.assertClean({ question: input.question }, `RAG baseline engine input (${input.caseId})`);
+    assertOracleTaintPolicy(taintDetector, 'ENGINE_INPUT', { question: input.question }, `RAG baseline engine input (${input.caseId})`);
 
     const [queryEmbedding] = await embeddingProvider.embed([input.question]);
     const vectorRanked = chunks
@@ -111,10 +111,10 @@ async function runRagOnQuestion(
       .map((anchor) => chunks.find((c) => c.anchor === anchor))
       .filter((c): c is Chunk => c !== undefined);
 
-    taintDetector.assertClean(topChunks.map((c) => ({ anchor: c.anchor, text: c.text })), `RAG baseline engine input (chunks, ${input.caseId})`);
+    assertOracleTaintPolicy(taintDetector, 'ENGINE_INPUT', topChunks.map((c) => ({ anchor: c.anchor, text: c.text })), `RAG baseline engine input (chunks, ${input.caseId})`);
 
     const answerText = await answerFromChunks(input.question, topChunks, runConfig);
-    taintDetector.assertClean({ text: answerText }, `RAG baseline engine output (${input.caseId})`);
+    assertOracleTaintPolicy(taintDetector, 'GENERATED_OUTPUT', { text: answerText }, `RAG baseline engine output (${input.caseId})`);
 
     return { caseId: input.caseId, question: input.question, topChunkAnchors, answerText, errorMessage: null };
   } catch (err) {

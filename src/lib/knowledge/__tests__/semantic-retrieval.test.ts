@@ -169,6 +169,89 @@ describe('retrieveUnits — оркестрация lexical + semantic + RRF + re
     expect(result.topK[0]).toBe('translation-1'); // после reranking порядок другой
   });
 
+  it('score band сохраняет Q09-подобную обязательную клаузу rank 8 со score .40 при best .90', async () => {
+    const candidates = Array.from({ length: 9 }, (_, index) => ({
+      unitId: `u${index + 1}`,
+      retrievalText: `кандидат ${index + 1}`,
+    }));
+    const embedded = await embedCandidates(candidates, new FakeEmbeddingProvider());
+    const result = await retrieveUnits('вопрос', embedded, {
+      embeddingProvider: new FakeEmbeddingProvider(),
+      rerankerProvider: new FakeRerankerProvider({
+        u1: 0.9, u2: 0.85, u3: 0.75, u4: 0.6, u5: 0.55,
+        u6: 0.55, u7: 0.5, u8: 0.4, u9: 0.2,
+      }),
+      finalLimit: 5,
+      rerankPoolSize: 9,
+    });
+
+    expect(result.topK).toEqual(['u1', 'u2', 'u3', 'u4', 'u5', 'u6', 'u7', 'u8']);
+  });
+
+  it('score band отсекает Q06-подобный шум .10 при best 1.0, включая низкий tie', async () => {
+    const candidates = Array.from({ length: 6 }, (_, index) => ({
+      unitId: `noise-${index + 1}`,
+      retrievalText: `кандидат ${index + 1}`,
+    }));
+    const embedded = await embedCandidates(candidates, new FakeEmbeddingProvider());
+    const result = await retrieveUnits('вопрос', embedded, {
+      embeddingProvider: new FakeEmbeddingProvider(),
+      rerankerProvider: new FakeRerankerProvider({
+        'noise-1': 1, 'noise-2': 0.2, 'noise-3': 0.1,
+        'noise-4': 0.1, 'noise-5': 0.1, 'noise-6': 0.1,
+      }),
+    });
+
+    expect(result.topK).toEqual(['noise-1']);
+  });
+
+  it('score band сохраняет Q05-N1-подобный rule score .60 при best 1.0', async () => {
+    const embedded = await embedCandidates(CANDIDATES, new FakeEmbeddingProvider());
+    const result = await retrieveUnits('вопрос', embedded, {
+      embeddingProvider: new FakeEmbeddingProvider(),
+      rerankerProvider: new FakeRerankerProvider({
+        'apostille-1': 1,
+        'translation-1': 0.6,
+        'unrelated-1': 0.2,
+      }),
+    });
+
+    expect(result.topK).toEqual(['apostille-1', 'translation-1']);
+  });
+
+  it('all-low pool ниже абсолютного floor возвращает пустой результат', async () => {
+    const embedded = await embedCandidates(CANDIDATES, new FakeEmbeddingProvider());
+    const result = await retrieveUnits('вопрос', embedded, {
+      embeddingProvider: new FakeEmbeddingProvider(),
+      rerankerProvider: new FakeRerankerProvider({
+        'apostille-1': 0.2,
+        'translation-1': 0.15,
+        'unrelated-1': 0.1,
+      }),
+    });
+
+    expect(result.topK).toEqual([]);
+  });
+
+  it('score-band expansion ограничен rerank pool даже когда все кандидаты проходят floor', async () => {
+    const candidates = Array.from({ length: 12 }, (_, index) => ({
+      unitId: `tie-${index + 1}`,
+      retrievalText: `равный кандидат ${index + 1}`,
+    }));
+    const scores = Object.fromEntries(candidates.map((candidate) => [candidate.unitId, 0.5]));
+    const embedded = await embedCandidates(candidates, new FakeEmbeddingProvider());
+    const result = await retrieveUnits('вопрос', embedded, {
+      embeddingProvider: new FakeEmbeddingProvider(),
+      rerankerProvider: new FakeRerankerProvider(scores),
+      finalLimit: 5,
+      rerankPoolSize: 7,
+    });
+
+    expect(result.candidatesBeforeRerank).toHaveLength(7);
+    expect(result.topK).toHaveLength(7);
+    expect(result.topK.every((id) => result.candidatesBeforeRerank.includes(id))).toBe(true);
+  });
+
   it('пустой candidate pool — не падает, пустой результат, corpusEmbeddingModel=null (нечего сравнивать)', async () => {
     const result = await retrieveUnits('апостиль', [], {
       embeddingProvider: new FakeEmbeddingProvider(),
@@ -250,7 +333,7 @@ describe('retrieveUnits — оркестрация lexical + semantic + RRF + re
       const embedded = await embedCandidates(CANDIDATES, new FakeEmbeddingProvider());
       const result = await retrieveUnits('апостиль', embedded, {
         embeddingProvider: new FakeEmbeddingProvider(),
-        rerankerProvider: new FakeRerankerProvider({}),
+        rerankerProvider: new FakeRerankerProvider({ 'apostille-1': 0.5 }),
       });
       expect(result.topK.length).toBeGreaterThan(0);
     });

@@ -2,12 +2,15 @@ import { describe, expect, it } from 'vitest';
 import {
   EVALUATION_REVIEWER_ID,
   buildEvaluatedCandidate,
+  buildEvaluatedCandidates,
+  hasSourceBackedNecessaryCondition,
   buildEvaluationApplicabilityProfile,
   buildEvaluationKnowledgeUnitLike,
 } from '../knowledge-unit-adapter';
 import type { PersistedKnowledgeUnit } from '@/lib/knowledge/applicability/identity-assignment';
 import { UNKNOWN_QUERY_FACETS, UNKNOWN_TRIGGER_FACTS, type QueryFrame } from '@/lib/knowledge/applicability/query-frame';
 import type { RequestContext } from '@/lib/knowledge/applicability/eligibility';
+import { resolveKnowledgeSet } from '@/lib/knowledge/applicability/resolution';
 
 /**
  * pre-retrieval hardening -> benchmark goal shift (2026-08-09). No adapter
@@ -66,6 +69,28 @@ function emptyQueryFrame(overrides: Partial<QueryFrame> = {}): QueryFrame {
 }
 
 const INTERNAL_CONTEXT: RequestContext = { audience: 'internal', now: REVIEWED_AT };
+
+describe('necessary-condition proof', () => {
+  it('accepts conservative source markers and rejects generic sufficient if-then wording', () => {
+    expect(hasSourceBackedNecessaryCondition('Действие разрешено только при согласии.', [])).toBe(true);
+    expect(hasSourceBackedNecessaryCondition('Действие разрешено.', ['лишь после проверки'])).toBe(true);
+    expect(hasSourceBackedNecessaryCondition('Если согласие есть, действие разрешено.', ['если есть согласие'])).toBe(false);
+    expect(hasSourceBackedNecessaryCondition('Действие разрешено не только при согласии.', [])).toBe(false);
+    expect(hasSourceBackedNecessaryCondition('Действие разрешено не только после проверки.', [])).toBe(false);
+    expect(hasSourceBackedNecessaryCondition('Действие разрешено не лишь при согласии.', [])).toBe(false);
+    expect(hasSourceBackedNecessaryCondition('Действие разрешено не лишь после проверки.', [])).toBe(false);
+    expect(hasSourceBackedNecessaryCondition('Возможно, действие разрешено только при согласии.', [])).toBe(false);
+    expect(hasSourceBackedNecessaryCondition('Действие разрешено не всегда только при согласии.', [])).toBe(false);
+  });
+});
+
+function queryWithFacts(facts: Partial<QueryFrame['triggerFacts']>): QueryFrame {
+  return emptyQueryFrame({ triggerFacts: { ...UNKNOWN_TRIGGER_FACTS, ...facts } });
+}
+
+function knownFact<T>(value: T) {
+  return { state: 'KNOWN' as const, value, evidence: [{ source: 'CURRENT_MESSAGE' as const, quote: String(value) }] };
+}
 
 describe('buildEvaluationApplicabilityProfile', () => {
   it('reviewStatus=REVIEWED, reviewedBy=EVALUATION_HARNESS_UNREVIEWED — unmistakably synthetic, never a real human decision', () => {
@@ -136,6 +161,59 @@ describe('buildEvaluatedCandidate', () => {
     expect(candidate.trigger).toBeNull();
   });
 
+  it.each([
+    ['PUBLIC', 'ACTIVE', 'ANSWER'],
+    ['PRIVATE', 'INACTIVE', 'HOLD'],
+  ] as const)(
+    'PROCEDURE_STEP with PUBLIC trigger and query=%s -> %s, resolution=%s',
+    (privacy, triggerVerdict, disposition) => {
+      const query = emptyQueryFrame({
+        triggerFacts: {
+          ...UNKNOWN_TRIGGER_FACTS,
+          privacyContext: { state: 'KNOWN', value: privacy, evidence: [] },
+        },
+      });
+      const candidate = buildEvaluatedCandidate(
+        unit({
+          unitId: `public-step-${privacy}`,
+          kind: 'PROCEDURE_STEP',
+          triggerCondition: { all: [{ fact: 'privacyContext', equals: 'PUBLIC' }] },
+        }),
+        query,
+        INTERNAL_CONTEXT,
+        REVIEWED_AT
+      );
+      expect(candidate.trigger?.verdict).toBe(triggerVerdict);
+      const resolution = resolveKnowledgeSet([candidate], query);
+      expect(resolution.disposition).toBe(disposition);
+      if (privacy === 'PUBLIC') expect(resolution.selected).toEqual([`public-step-${privacy}`]);
+      else expect(resolution.excluded).toContainEqual({
+        unitId: `public-step-${privacy}`, reason: 'exception_trigger_inactive',
+      });
+    }
+  );
+
+  it('PROCEDURE_STEP with unknown PUBLIC trigger reaches synthesis as conditional evidence', () => {
+    const query = emptyQueryFrame();
+    const candidate = buildEvaluatedCandidate(
+      unit({
+        unitId: 'public-step-unknown',
+        kind: 'PROCEDURE_STEP',
+        triggerCondition: { all: [{ fact: 'privacyContext', equals: 'PUBLIC' }] },
+      }),
+      query,
+      INTERNAL_CONTEXT,
+      REVIEWED_AT
+    );
+    expect(candidate.trigger?.verdict).toBe('UNKNOWN');
+    const resolution = resolveKnowledgeSet([candidate], query);
+    expect(resolution.disposition).toBe('ANSWER');
+    expect(resolution.selected).toEqual(['public-step-unknown']);
+    expect(resolution.selectedApplicability).toContainEqual(
+      expect.objectContaining({ unitId: 'public-step-unknown', mode: 'CONDITIONAL' })
+    );
+  });
+
   it('numericConstraint и parentRuleRef переносятся из unit как есть, supersedes всегда [] (ничто в extraction не производит эту связь)', () => {
     const candidate = buildEvaluatedCandidate(
       unit({ numericConstraint: { factKey: 'x', value: 15, unit: 'секунда' }, parentRuleRef: 'parent-1' }),
@@ -146,5 +224,127 @@ describe('buildEvaluatedCandidate', () => {
     expect(candidate.numericConstraint).toEqual({ factKey: 'x', value: 15, unit: 'секунда' });
     expect(candidate.parentRuleRef).toBe('parent-1');
     expect(candidate.supersedes).toEqual([]);
+  });
+});
+
+describe('buildEvaluatedCandidates — effective trigger inheritance', () => {
+  const publicCondition = { all: [{ fact: 'privacyContext' as const, equals: 'PUBLIC' as const }] };
+
+  function publicExceptionGraph() {
+    const base = unit({ unitId: 'base' });
+    const parent = unit({
+      unitId: 'public-exception',
+      kind: 'EXCEPTION_RULE',
+      parentRuleRef: 'base',
+      triggerCondition: publicCondition,
+    });
+    const child = unit({
+      unitId: 'count-fragment',
+      parentRuleRef: 'public-exception',
+      numericConstraint: { factKey: 'maximum actions', value: 1, unit: 'times' },
+    });
+    const all = [base, parent, child];
+    return { all, byId: new Map(all.map((item) => [item.unitId, item])) };
+  }
+
+  it.each([
+    ['PUBLIC', 'ACTIVE', 'ANSWER', ['public-exception', 'count-fragment']],
+    ['PRIVATE', 'INACTIVE', 'ANSWER', ['base']],
+  ] as const)('PUBLIC exception child with null trigger: query=%s => child %s', (privacy, verdict, disposition, selected) => {
+    const graph = publicExceptionGraph();
+    const query = queryWithFacts({ privacyContext: knownFact(privacy) });
+    const evaluated = buildEvaluatedCandidates(graph.all, graph.byId, query, INTERNAL_CONTEXT, REVIEWED_AT);
+    expect(evaluated.find((item) => item.unitId === 'count-fragment')?.trigger?.verdict).toBe(verdict);
+    const resolution = resolveKnowledgeSet(evaluated, query);
+    expect(resolution.disposition).toBe(disposition);
+    expect(resolution.selected).toEqual(selected);
+  });
+
+  it('unknown inherited PUBLIC trigger holds both exception and fragment and asks once for privacy', () => {
+    const graph = publicExceptionGraph();
+    const query = emptyQueryFrame();
+    const evaluated = buildEvaluatedCandidates(graph.all, graph.byId, query, INTERNAL_CONTEXT, REVIEWED_AT);
+    expect(evaluated.slice(1).map((item) => item.trigger?.verdict)).toEqual(['UNKNOWN', 'UNKNOWN']);
+    const resolution = resolveKnowledgeSet(evaluated, query);
+    expect(resolution.disposition).toBe('CLARIFY');
+    expect(resolution.clarificationNeeds.triggerFacts).toEqual(['privacyContext']);
+  });
+
+  it('inherits transitively and independently of candidate order', () => {
+    const parent = unit({ unitId: 'parent', triggerCondition: publicCondition });
+    const child = unit({ unitId: 'child', parentRuleRef: 'parent' });
+    const grandchild = unit({ unitId: 'grandchild', parentRuleRef: 'child' });
+    const full = new Map([grandchild, child, parent].map((item) => [item.unitId, item]));
+    const query = queryWithFacts({ privacyContext: knownFact('PRIVATE') });
+    const evaluated = buildEvaluatedCandidates([grandchild, child, parent], full, query, INTERNAL_CONTEXT, REVIEWED_AT);
+    expect(evaluated.map((item) => item.trigger?.verdict)).toEqual(['INACTIVE', 'INACTIVE', 'INACTIVE']);
+  });
+
+  it('carries the parent source quote as inherited presentation evidence', () => {
+    const parent = unit({
+      unitId: 'parent',
+      triggerCondition: publicCondition,
+      evidenceByField: {
+        statement: span('anchor-1', 'step'),
+        triggerCondition: span('anchor-1', 'only in a public setting'),
+      },
+    });
+    const child = unit({ unitId: 'child', parentRuleRef: 'parent' });
+    const full = new Map([parent, child].map((item) => [item.unitId, item]));
+    const [evaluated] = buildEvaluatedCandidates([child], full, emptyQueryFrame(), INTERNAL_CONTEXT, REVIEWED_AT);
+    expect(evaluated.triggerPresentationConditions).toEqual(['only in a public setting']);
+    const resolution = resolveKnowledgeSet([evaluated], emptyQueryFrame());
+    expect(resolution.selectedApplicability).toContainEqual({
+      unitId: 'child', mode: 'CONDITIONAL', presentationConditions: ['only in a public setting'],
+    });
+  });
+
+  it('ANDs a narrower own trigger with inherited applicability', () => {
+    const parent = unit({ unitId: 'parent', triggerCondition: publicCondition });
+    const child = unit({
+      unitId: 'child',
+      parentRuleRef: 'parent',
+      triggerCondition: { all: [{ fact: 'helperPresent', equals: true }] },
+    });
+    const full = new Map([parent, child].map((item) => [item.unitId, item]));
+    const verdict = (privacy: 'PUBLIC' | 'PRIVATE', helper: boolean | null) => {
+      const query = queryWithFacts({
+        privacyContext: knownFact(privacy),
+        ...(helper === null ? {} : { helperPresent: knownFact(helper) }),
+      });
+      return buildEvaluatedCandidates([child], full, query, INTERNAL_CONTEXT, REVIEWED_AT)[0]?.trigger?.verdict;
+    };
+    expect(verdict('PUBLIC', true)).toBe('ACTIVE');
+    expect(verdict('PUBLIC', null)).toBe('UNKNOWN');
+    expect(verdict('PRIVATE', true)).toBe('INACTIVE');
+  });
+
+  it('does not inherit an EXCEPTION_RULE parent trigger: its own trigger remains the override condition', () => {
+    const parent = unit({ unitId: 'parent', triggerCondition: publicCondition });
+    const exception = unit({
+      unitId: 'exception', kind: 'EXCEPTION_RULE', parentRuleRef: 'parent',
+      triggerCondition: { all: [{ fact: 'helperPresent', equals: true }] },
+    });
+    const full = new Map([parent, exception].map((item) => [item.unitId, item]));
+    const query = queryWithFacts({ privacyContext: knownFact('PRIVATE'), helperPresent: knownFact(true) });
+    const [evaluated] = buildEvaluatedCandidates([exception], full, query, INTERNAL_CONTEXT, REVIEWED_AT);
+    expect(evaluated.trigger?.verdict).toBe('ACTIVE');
+    expect(evaluated.trigger?.clauseVerdicts.map((clause) => clause.fact)).toEqual(['helperPresent']);
+  });
+
+  it.each(['dangling', 'cycle', 'contradiction'] as const)('%s structural graph fails closed as UNKNOWN', (shape) => {
+    const parent = unit({ unitId: 'parent', triggerCondition: publicCondition, parentRuleRef: shape === 'cycle' ? 'child' : null });
+    const child = unit({
+      unitId: 'child',
+      parentRuleRef: shape === 'dangling' ? 'missing' : 'parent',
+      triggerCondition: shape === 'contradiction'
+        ? { all: [{ fact: 'privacyContext', equals: 'PRIVATE' }] }
+        : null,
+    });
+    const full = new Map([parent, child].map((item) => [item.unitId, item]));
+    const query = queryWithFacts({ privacyContext: knownFact('PUBLIC') });
+    const [evaluated] = buildEvaluatedCandidates([child], full, query, INTERNAL_CONTEXT, REVIEWED_AT);
+    expect(evaluated.trigger?.verdict).toBe('UNKNOWN');
+    expect(resolveKnowledgeSet([evaluated], query).disposition).toBe('HOLD');
   });
 });

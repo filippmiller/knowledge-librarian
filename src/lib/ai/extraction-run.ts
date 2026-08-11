@@ -91,6 +91,9 @@ export function resolveExtractionRunConfig(
     ...(overrides.beforeProviderAttempt && {
       beforeProviderAttempt: overrides.beforeProviderAttempt,
     }),
+    ...(overrides.onCompletionAttempts && {
+      onCompletionAttempts: overrides.onCompletionAttempts,
+    }),
   });
 
   return {

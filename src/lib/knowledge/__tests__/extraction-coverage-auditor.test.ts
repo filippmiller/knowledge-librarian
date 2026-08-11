@@ -38,6 +38,166 @@ describe('buildCoverageAuditPromptMessages — pure, no network', () => {
     expect(user.content).toContain('с правилом');
   });
 
+  it('передаёт аудитору полную applicability/numeric/identity структуру, не только statement', () => {
+    const messages = buildCoverageAuditPromptMessages('Вне дома допускается исключение не более трёх циклов.', [{
+      kind: 'EXCEPTION_RULE',
+      statement: 'Вне дома действует исключение.',
+      quote: 'Вне дома допускается исключение',
+      extractionRef: 'exception',
+      parentExtractionRef: 'base',
+      triggerCondition: { all: [{ fact: 'privacyContext', equals: 'PUBLIC' }] },
+      numericConstraint: { factKey: 'maximum cycles', value: 3, unit: 'cycles' },
+    }]);
+    const user = messages.find((message) => message.role === 'user')!.content;
+
+    expect(user).toContain('"kind":"EXCEPTION_RULE"');
+    expect(user).toContain('"parentExtractionRef":"base"');
+    expect(user).toContain('"fact":"privacyContext","equals":"PUBLIC"');
+    expect(user).toContain('"value":3,"unit":"cycles"');
+  });
+
+  it.each([
+    ['b9 privacy', 'В транспорте разрешено узкое послабление.', 'privacyContext=PUBLIC'],
+    ['b13 consent', 'Помощь разрешена только после ясного согласия.', 'consentStatus=EXPLICIT'],
+    ['b14 reachability', 'Если человек не может дотянуться рукой, допускается помощь.', 'reachability=LIMITED'],
+  ])('%s: structural audit требует trigger field, даже если условие пересказано statement', (_name, text, expected) => {
+    const messages = buildCoverageAuditPromptMessages(text, [{
+      kind: 'PROCEDURE_STEP',
+      statement: text,
+      quote: text,
+      extractionRef: 'u1',
+      parentExtractionRef: null,
+      triggerCondition: null,
+      numericConstraint: null,
+    }]);
+    const system = messages.find((message) => message.role === 'system')!.content;
+
+    expect(system).toContain(expected);
+    expect(system).toContain('structured field отсутствует');
+    expect(system).toContain('UNREPRESENTED_CLAUSE');
+  });
+
+  it('Q04 cycles: structural audit закрепляет canonical unit cycles, а не times', () => {
+    const system = buildCoverageAuditPromptMessages('Не более трёх циклов.', []).find((message) => message.role === 'system')!.content;
+    expect(system).toContain('canonical unit — "cycles" (не "times")');
+  });
+
+  it('b3 lexical cardinality: одно короткое действие в TERM_DEFINITION не требует numericConstraint', () => {
+    const messages = buildCoverageAuditPromptMessages('«Почесание» — одно короткое действие.', [{
+      kind: 'TERM_DEFINITION',
+      statement: '«Почесание» — это одно короткое действие.',
+      quote: '«Почесание» — одно короткое действие',
+      extractionRef: 'term', parentExtractionRef: null,
+      triggerCondition: null, numericConstraint: null,
+    }]);
+    const system = messages.find((message) => message.role === 'system')!.content;
+    expect(system).toContain('ТОЛЬКО для определения лексического аспекта термина');
+    expect(system).toContain('не возвращай omission из-за numericConstraint=null');
+    expect(system).toContain('почесание — одно короткое действие');
+  });
+
+  it('b9 operational occurrence count remains auditable as times', () => {
+    const system = buildCoverageAuditPromptMessages(
+      'Разрешено один раз прижать ладонь.', []
+    ).find((message) => message.role === 'system')!.content;
+    expect(system).toContain('допустимое количество действий/случаев');
+    expect(system).toContain('«прижать один раз»');
+    expect(system).toContain('корректно использует "times"');
+  });
+
+  it('b6 presentation-only no-water alternative is explicitly covered when verbatim condition and exact uncertainty survive', () => {
+    const text = 'При отсутствии воды допустим кожный антисептик.';
+    const messages = buildCoverageAuditPromptMessages(text, [{
+      kind: 'PROCEDURE_STEP',
+      statement: text,
+      quote: text,
+      extractionRef: 'antiseptic',
+      parentExtractionRef: null,
+      triggerCondition: null,
+      numericConstraint: null,
+      uncertainties: [{
+        kind: 'UNRECOGNIZED_TRIGGER_CONDITION',
+        description: 'условие отсутствия воды не входит в закрытый каталог trigger-фактов',
+        quote: 'При отсутствии воды',
+      }],
+    }]);
+    const system = messages.find((message) => message.role === 'system')!.content;
+    const user = messages.find((message) => message.role === 'user')!.content;
+
+    expect(system).toContain('PRESENTATION-ONLY условие');
+    expect(system).toContain('«При отсутствии воды допустим кожный антисептик»');
+    expect(system).toContain('не требуй для него выдуманный trigger или parent');
+    expect(user).toContain('"kind":"UNRECOGNIZED_TRIGGER_CONDITION"');
+    expect(user).toContain('"quote":"При отсутствии воды"');
+  });
+
+  it('true override without executable trigger remains a gap despite uncertainty', () => {
+    const system = buildCoverageAuditPromptMessages(
+      'Вместо обязательного мытья рук можно всегда использовать антисептик.',
+      [{
+        kind: 'PROCEDURE_STEP',
+        statement: 'Вместо обязательного мытья рук можно всегда использовать антисептик.',
+        quote: 'Вместо обязательного мытья рук можно всегда использовать антисептик.',
+        extractionRef: 'override', parentExtractionRef: null,
+        triggerCondition: null, numericConstraint: null,
+        uncertainties: [{
+          kind: 'UNRECOGNIZED_TRIGGER_CONDITION',
+          description: 'условие не структурировано',
+          quote: 'Вместо обязательного мытья рук',
+        }],
+      }]
+    ).find((message) => message.role === 'system')!.content;
+
+    expect(system).toContain('настоящим override');
+    expect(system).toContain('без исполнимого каталогизированного triggerCondition');
+    expect(system).toContain('это всё ещё структурный пробел');
+    expect(system).toContain('uncertainty не превращает неисполняемое исключение в доверенное');
+  });
+
+  it('TERM_DEFINITION with an operational maximum is not exempt from numeric completeness', () => {
+    const system = buildCoverageAuditPromptMessages(
+      'Термин «короткая серия» означает не более трёх действий за эпизод.', []
+    ).find((message) => message.role === 'system')!.content;
+    expect(system).toContain('определение одновременно устанавливает применимый рабочий предел/порог');
+    expect(system).toContain('не более трёх действий за эпизод');
+    expect(system).toContain('по-прежнему обязан иметь numericConstraint');
+  });
+
+  it('b3 mixed definition + prohibition deterministically requires a sibling PROCEDURE_STEP', () => {
+    const messages = buildCoverageAuditPromptMessages(
+      '«Расчёсывание» означает чрезмерное воздействие и не допускается.',
+      [{
+        kind: 'TERM_DEFINITION',
+        statement: 'Расчёсывание означает чрезмерное воздействие и не допускается.',
+        quote: '«Расчёсывание» означает чрезмерное воздействие и не допускается',
+        extractionRef: 'term', parentExtractionRef: null,
+        triggerCondition: null, numericConstraint: null,
+      }]
+    );
+    const system = messages.find((message) => message.role === 'system')!.content;
+    expect(system).toContain('требует двух sibling units');
+    expect(system).toContain('отдельный PROCEDURE_STEP');
+    expect(system).toContain('верни UNREPRESENTED_CLAUSE');
+    expect(system).toContain('НИКОГДА не AMBIGUOUS');
+    expect(system).toContain('совместное расположение в одной фразе не создаёт parent');
+    expect(system).not.toContain('kind="PROHIBITION"');
+  });
+
+  it('pure definition without normative semantics stays eligible for COVERED', () => {
+    const system = buildCoverageAuditPromptMessages(
+      '«Почёсывание» — несколько мягких повторяющихся движений.',
+      [{
+        kind: 'TERM_DEFINITION',
+        statement: 'Почёсывание — несколько мягких повторяющихся движений.',
+        quote: '«Почёсывание» — несколько мягких повторяющихся движений',
+        extractionRef: 'term', parentExtractionRef: null,
+        triggerCondition: null, numericConstraint: null,
+      }]
+    ).find((message) => message.role === 'system')!.content;
+    expect(system).toContain('одновременно определяет термин И устанавливает самостоятельный нормативный');
+    expect(system).toContain('Если ничего не пропущено, верни РОВНО ОДНУ находку с verdict "COVERED"');
+  });
+
   it('НЕ содержит ничего похожего на вопрос/ожидаемый ответ — это чисто источник+извлечение', () => {
     const messages = buildCoverageAuditPromptMessages('Текст.', []);
     const full = messages.map((m) => m.content).join(' ');

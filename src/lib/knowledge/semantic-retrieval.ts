@@ -85,12 +85,50 @@ export interface RetrieveUnitsOptions {
   readonly rrfK?: number;
   /** Сколько кандидатов после RRF идёт в reranker — небольшой пул, не всё. */
   readonly rerankPoolSize?: number;
+  /** @deprecated Positional limiting was replaced by calibrated score-band
+   * selection. `0` remains a diagnostic off switch; positive values enable
+   * the band and the rerank pool is its hard cardinality bound. */
   readonly finalLimit?: number;
 }
 
 const DEFAULT_RRF_K = 60;
 const DEFAULT_RERANK_POOL_SIZE = 20;
 const DEFAULT_FINAL_LIMIT = 5;
+/** Absolute calibration floor: scores below this are treated as reranker
+ * noise even when every candidate in the pool is weak. */
+export const RERANK_SCORE_ABSOLUTE_FLOOR = 0.25;
+/** Relative calibration floor keeps candidates within a meaningful score
+ * band of the best result while allowing multi-clause rules beyond rank 5. */
+export const RERANK_SCORE_BEST_RATIO = 0.4;
+
+export function selectRerankScoreBand(
+  reranked: readonly { readonly id: string; readonly score: number }[],
+  enabled: boolean = true
+): string[] {
+  if (!enabled || reranked.length === 0) return [];
+  const bestScore = reranked[0].score;
+  const qualityFloor = Math.max(
+    RERANK_SCORE_ABSOLUTE_FLOOR,
+    bestScore * RERANK_SCORE_BEST_RATIO
+  );
+  return reranked
+    .filter((candidate) => candidate.score >= qualityFloor)
+    .map((candidate) => candidate.id);
+}
+
+export function retrievalContractProbe(): unknown {
+  return {
+    rrfK: DEFAULT_RRF_K,
+    rerankPoolSize: DEFAULT_RERANK_POOL_SIZE,
+    legacyDisableLimit: 0,
+    scoreBand: {
+      absoluteFloor: RERANK_SCORE_ABSOLUTE_FLOOR,
+      bestRatio: RERANK_SCORE_BEST_RATIO,
+    },
+    behavior: selectRerankScoreBand.toString(),
+    algorithm: retrieveUnits.toString(),
+  };
+}
 
 export async function retrieveUnits(
   query: string,
@@ -200,7 +238,12 @@ export async function retrieveUnits(
     rerankerScore: rerankScoreById.get(c.unitId) ?? null,
   }));
 
-  const topK = reranked.slice(0, finalLimit).map((r) => r.id);
+  // Score-band selection replaces the arbitrary positional cut. It admits
+  // independently necessary clauses beyond rank 5 when their scores remain
+  // credible, while a low-score tie cannot amplify noise. `finalLimit=0`
+  // retains the established diagnostic "return nothing" switch; otherwise
+  // the hard bound is the already-small rerank pool.
+  const topK = selectRerankScoreBand(reranked, finalLimit !== 0);
 
   return { topK, candidatesBeforeRerank, trace, artifact };
 }

@@ -31,6 +31,16 @@ export const VERIFICATION_VIOLATION_CODES = [
   'forbidden_answer_source',
   /** Пустой текст ответа. */
   'empty_answer',
+  /** Presentation-only applicability condition was dropped or ambiguous. */
+  'condition_not_preserved',
+  /** The answer cites only non-operative overridden-parent context. */
+  'context_only_answer',
+  /** Supporting parent was cited without its operative overriding child. */
+  'context_without_overrider_citation',
+  /** A hand-built pack contains context not bound to operative evidence. */
+  'invalid_context_edge',
+  /** User-facing prose exposed a known internal unit/reference token. */
+  'internal_reference_leak',
 ] as const;
 
 export type VerificationViolationCode = (typeof VERIFICATION_VIOLATION_CODES)[number];
@@ -66,8 +76,28 @@ export interface VerificationResult {
  * а в его statement чисел может быть несколько, и добросовестный пересказ
  * наказывался бы за использование единственного доступного ему текста.
  */
-function groundingSourcesOf(pack: EvidencePack): string[] {
-  return pack.items.flatMap((item) => [item.statement, item.citation.quote]);
+function groundingSourcesOf(pack: EvidencePack, citedUnitIds: ReadonlySet<string>): string[] {
+  return [
+    ...pack.items.flatMap((item) => [item.statement, item.citation.quote]),
+    ...(pack.supportingContext ?? [])
+      .filter((item) => citedUnitIds.has(item.unitId))
+      .flatMap((item) => [item.statement, item.citation.quote]),
+  ];
+}
+
+function containsKnownInternalToken(text: string, token: string): boolean {
+  if (token.length === 0) return false;
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}_])${escaped}(?=$|[^\\p{L}\\p{N}_])`, 'iu').test(text);
+}
+
+export function internalReferenceLeakPolicyProbe(): unknown {
+  return {
+    version: '2026-08-11-known-evidence-token-v1',
+    forbiddenInText: ['selected-unit-id', 'supporting-context-unit-id', 'known-citation-anchor'],
+    structuredCitationField: 'citedUnitIds',
+    unrelatedHumanIdentifiers: 'allowed',
+  };
 }
 
 export function verifyAnswerClaims(
@@ -87,7 +117,22 @@ export function verifyAnswerClaims(
     });
   }
 
-  const knownUnitIds = new Set(pack.items.map((item) => item.unitId));
+  const operativeUnitIds = new Set(pack.items.map((item) => item.unitId));
+  const contextItems = pack.supportingContext ?? [];
+  const knownUnitIds = new Set([...operativeUnitIds, ...contextItems.map((item) => item.unitId)]);
+  const citedUnitIds = new Set(draft.citedUnitIds);
+  const knownAnchors = new Set([
+    ...pack.items.map((item) => item.citation.anchor),
+    ...contextItems.map((item) => item.citation.anchor),
+  ]);
+  for (const token of [...knownUnitIds, ...knownAnchors]) {
+    if (containsKnownInternalToken(draft.text, token)) {
+      violations.push({
+        code: 'internal_reference_leak',
+        detail: `user-facing answer contains internal evidence token «${token}»`,
+      });
+    }
+  }
   if (draft.citedUnitIds.length === 0) {
     violations.push({
       code: 'uncited_answer',
@@ -103,7 +148,28 @@ export function verifyAnswerClaims(
     }
   }
 
-  const grounding = checkClaimGrounding(draft.text, groundingSourcesOf(pack));
+  if (draft.citedUnitIds.length > 0 && !draft.citedUnitIds.some((id) => operativeUnitIds.has(id))) {
+    violations.push({
+      code: 'context_only_answer',
+      detail: 'ответ сослался только на неоперативный контекст отменённых родительских правил',
+    });
+  }
+  for (const context of contextItems) {
+    if (!operativeUnitIds.has(context.overriddenByUnitId)) {
+      violations.push({
+        code: 'invalid_context_edge',
+        detail: `контекст «${context.unitId}» не привязан к оперативному overrider «${context.overriddenByUnitId}»`,
+      });
+    }
+    if (citedUnitIds.has(context.unitId) && !citedUnitIds.has(context.overriddenByUnitId)) {
+      violations.push({
+        code: 'context_without_overrider_citation',
+        detail: `контекст «${context.unitId}» процитирован без управляющего исключения «${context.overriddenByUnitId}»`,
+      });
+    }
+  }
+
+  const grounding = checkClaimGrounding(draft.text, groundingSourcesOf(pack, citedUnitIds));
   for (const claim of grounding.ungrounded) {
     violations.push({
       code: 'unsupported_number',

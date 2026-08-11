@@ -24,7 +24,7 @@
  *   npx tsx scripts/run-aurora-fixture.ts --mode=e2e --extraction-runs=2 --out=path/to/dir [--doc=path/to/source.docx]
  */
 import 'dotenv/config';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
@@ -39,8 +39,15 @@ import {
   type ExtractKnowledgeUnitsResult,
   type SourceBlock,
 } from '../src/lib/knowledge/knowledge-unit-extractor';
-import type { ExtractedKnowledgeUnit } from '../src/lib/knowledge/applicability/extraction';
 import {
+  EXTRACTION_UNCERTAINTY_KINDS,
+  extractedKnowledgeUnitSchema,
+  type ExtractedKnowledgeUnit,
+} from '../src/lib/knowledge/applicability/extraction';
+import { validateParentRefs } from '../src/lib/knowledge/applicability/extraction-parent-refs';
+import { triggerFactCatalog } from '../src/lib/knowledge/prompt-catalogs';
+import {
+  FOCUSED_REPAIR_MAX_ROUNDS,
   extractFocusedRepairUnits,
   extractKnowledgeUnitsWithCompletenessAudit,
   type FocusedRepairOptions,
@@ -56,7 +63,9 @@ import {
 import {
   ChatCompletionError,
   isRetryableChatCompletionError,
+  type ChatMessage,
   type CompletionAttempt,
+  type Provider,
 } from '../src/lib/ai/chat-provider';
 import {
   CostBudgetExceededError,
@@ -79,32 +88,61 @@ import {
 import { buildRetrievalText } from '../src/lib/knowledge/applicability/retrieval-text';
 import {
   embedCandidates,
+  retrievalContractProbe,
   retrieveUnits,
   type EmbeddedCandidate,
   type RetrievalResult,
 } from '../src/lib/knowledge/semantic-retrieval';
 import { OpenAIEmbeddingProvider } from '../src/lib/ai/embedding-provider';
-import { LlmRerankerProvider } from '../src/lib/ai/reranker-provider';
-import { extractQueryFrame } from '../src/lib/knowledge/query-frame-extractor';
-import type { ConversationMessage } from '../src/lib/knowledge/applicability/query-frame-builder';
+import { buildRerankPromptMessages, LlmRerankerProvider, rerankResponseSchema } from '../src/lib/ai/reranker-provider';
+import { buildExtractionMessages, extractQueryFrame } from '../src/lib/knowledge/query-frame-extractor';
+import { buildQueryFrame, rawQueryExtractionSchema, type ConversationMessage } from '../src/lib/knowledge/applicability/query-frame-builder';
 import type { QueryFrame } from '../src/lib/knowledge/applicability/query-frame';
-import { buildEvaluatedCandidate } from '../src/lib/eval/knowledge-unit-adapter';
+import { buildEvaluatedCandidates, effectiveTriggerInheritanceBehaviorProbe } from '../src/lib/eval/knowledge-unit-adapter';
 import { resolveKnowledgeSet, type ResolutionDecision } from '../src/lib/knowledge/applicability/resolution';
 import {
   applyDecisionRelevanceGate,
+  buildBatchDecisionRelevancePromptMessages,
+  batchDecisionRelevanceResponseSchema,
   evaluateDecisionRelevanceBatch,
+  evaluateChallengeCounterfactuals,
+  type DecisionRelevanceBatchTelemetry,
   type GateCandidateInput,
   type GatedCandidate,
 } from '../src/lib/knowledge/applicability/decision-relevance';
-import { buildEvidencePack, type EvidencePack } from '../src/lib/knowledge/synthesis/evidence-pack';
+import {
+  buildChallengeCompatibilityMessages,
+  challengeCompatibilityResponseSchema,
+  resolveProbabilisticExclusionSafety,
+  selectChallengeRecoveryCandidates,
+  verifyChallengesAfterBasicVerification,
+  type ChallengeCompatibilityDecision,
+} from '../src/lib/knowledge/synthesis/challenge-compatibility';
+import {
+  buildEvidencePack,
+  overriddenParentContextBehaviorProbe,
+  type EvidencePack,
+} from '../src/lib/knowledge/synthesis/evidence-pack';
 import {
   synthesizeFromSelectedUnits,
   type AnswerGenerator,
 } from '../src/lib/knowledge/synthesis/synthesize';
 import type { DraftAnswer } from '../src/lib/knowledge/synthesis/draft-answer';
-import { verifyAnswerClaims, type VerificationResult } from '../src/lib/knowledge/synthesis/verify-answer-claims';
+import {
+  internalReferenceLeakPolicyProbe,
+  verifyAnswerClaims,
+  type VerificationResult,
+} from '../src/lib/knowledge/synthesis/verify-answer-claims';
+import {
+  buildConditionPreservationMessages,
+  conditionPreservationResponseSchema,
+  conditionedEvidenceOf,
+  mergeConditionPreservationVerification,
+  verifyConditionsAfterBasicVerification,
+  type ConditionPreservationDecision,
+} from '../src/lib/knowledge/synthesis/condition-preservation';
 import { resolveExtractionRunConfig } from '../src/lib/ai/extraction-run';
-import { structured, StructuredOutputError } from '../src/lib/ai/structured-output';
+import { PaidStructuredSemanticError, structured, StructuredOutputError } from '../src/lib/ai/structured-output';
 import type { RequestContext } from '../src/lib/knowledge/applicability/eligibility';
 
 import { buildEvaluationSnapshot, type EvaluationKnowledgeSnapshot } from '../src/lib/eval/evaluation-snapshot';
@@ -124,36 +162,50 @@ import {
   buildRawExtractionFingerprint,
   RawExtractionCheckpointStore,
 } from '../src/lib/eval/raw-extraction-checkpoint';
+import { buildQuestionJournalFingerprint, QuestionResultJournal } from '../src/lib/eval/question-result-journal';
+import { computeQuestionBehaviorProbes } from '../src/lib/eval/question-behavior-probes';
+import {
+  buildDependencyGraphArtifact,
+  buildDependencyGraphArtifactFingerprint,
+  loadCompatibleDependencyGraphArtifact,
+  writeDependencyGraphArtifact,
+  type DependencyGraphArtifact,
+  type DependencyGraphArtifactConfig,
+} from '../src/lib/eval/dependency-graph-artifact';
+import {
+  expandDependencyClosure,
+  hydrateDependencyGraph,
+  serializeDependencyGraph,
+  type DependencyGraph,
+  type DependencyGraphDocument,
+} from '../src/lib/knowledge/dependency-graph';
+import {
+  buildAuditedDependencyGraph,
+  dependencyAuditSchema,
+  dependencyGraphBuilderContractProbe,
+  dependencyGraphSchema,
+  FileDependencyGraphCheckpoint,
+  type DependencyGraphStage,
+} from '../src/lib/knowledge/dependency-graph-builder';
 import { loadSemanticRuleOracle, ORACLE_PACK_DIR, SOURCE_DOCX_FILENAME } from '../src/lib/eval/semantic-rule-oracle';
 import { loadNegativeCaseOracle } from '../src/lib/eval/negative-case-oracle';
 import { loadSourceRulesFromDocx, type SourceRule } from '../src/lib/eval/source-rule-segmentation';
 import { resolveSourceRuleId } from '../src/lib/eval/source-rule-mapping';
-import { buildOracleTaintDetector, OracleTaintError, type OracleTaintDetector } from '../src/lib/eval/oracle-taint';
-
-/**
- * Purposes this ledger deliberately does NOT cover yet (Task 37, 2026-08-09).
- * Both are real spend, excluded here for a concrete reason, not an oversight
- * — listed explicitly so `ledger.totalUsd()` is never mistaken for the whole
- * run's cost. Single source of truth for the disclaimer printed to console
- * AND written into run-summary.json.
- */
-const UNMETERED_PURPOSES: readonly { purpose: string; reason: string }[] = [
-  {
-    purpose: 'decision-relevance',
-    reason:
-      'LLM classifier calls reserve --max-paid-calls slots before starting, but their result shape does not expose attempts/usage, so dollar cost remains absent from CostLedger totals',
-  },
-  {
-    purpose: 'embeddings',
-    reason:
-      'OpenAIEmbeddingProvider calls generateEmbeddings() (@/lib/openai) directly, not through chat-provider.ts — different token-accounting shape, and at $0.02/1M tokens the smallest cost driver by far',
-  },
-];
+import {
+  assertOracleTaintPolicy,
+  buildOracleTaintDetector,
+  ORACLE_TAINT_POLICY_VERSION,
+  oracleTaintPolicyBehaviorProbe,
+  OracleTaintError,
+  type OracleTaintDetector,
+} from '../src/lib/eval/oracle-taint';
 
 // ─────────────────────────────────── CLI ────────────────────────────────────
 
 const SUPPORTED_MODES = ['e2e'] as const;
 type Mode = (typeof SUPPORTED_MODES)[number];
+const ENGINE_PROFILES = ['quality', 'balanced', 'economy'] as const;
+type EngineProfile = (typeof ENGINE_PROFILES)[number];
 
 interface CliArgs {
   readonly mode: Mode;
@@ -163,14 +215,87 @@ interface CliArgs {
   readonly batchSize: number;
   readonly maxCostUsd: number;
   readonly maxPaidCalls: number;
+  /** Model for question-frame/reranker/relevance/synthesis only. Extraction
+   * remains pinned independently in the reusable artifact fingerprint. */
+  readonly questionModel?: string;
+  readonly questionProvider?: Provider;
+  readonly engineProfile: EngineProfile;
   /** Путь к сохранённому артефакту извлечения. Задан — фаза извлечения не
    *  делает НИ ОДНОГО платного вызова (см. `--reuse-extraction` ниже);
    *  `undefined` — сегодняшнее поведение, свежее извлечение. */
   readonly reuseExtraction?: string;
 }
 
+export const DEPENDENCY_CLOSURE_BOUNDS = { maxUnits: 64, maxDepth: 6 } as const;
+
+export interface DependencyExpansion {
+  readonly retrievalSeedUnitIds: readonly string[];
+  readonly expandedUnitIds: readonly string[];
+  /** Units reached through only TRUSTED REQUIRES/CO_REQUIRED edges. */
+  readonly trustedMandatoryUnitIds: readonly string[];
+}
+
+/** Expands retrieval before probabilistic relevance. Alternatives enter the
+ * candidate pool but remain classifier-controlled; mandatory dependencies
+ * are protected from a probabilistic drop. Any bound hit fails closed. */
+export function expandRetrievedDependencies(
+  retrievalSeedUnitIds: readonly string[],
+  graph: DependencyGraph,
+  bounds: { readonly maxUnits: number; readonly maxDepth: number } = DEPENDENCY_CLOSURE_BOUNDS
+): DependencyExpansion {
+  const seeds = [...new Set(retrievalSeedUnitIds)];
+  const complete = expandDependencyClosure(graph, seeds, bounds);
+  if (complete.truncated) {
+    throw new Error(
+      `Dependency closure exceeded bounds maxUnits=${bounds.maxUnits}, maxDepth=${bounds.maxDepth}; refusing incomplete retrieval.`
+    );
+  }
+
+  const mandatory = new Set<string>();
+  for (const seed of seeds) {
+    const closure = expandDependencyClosure(graph, [seed], {
+      ...bounds,
+      relations: ['REQUIRES', 'CO_REQUIRED'],
+    });
+    if (closure.truncated) {
+      throw new Error(
+        `Mandatory dependency closure exceeded bounds maxUnits=${bounds.maxUnits}, maxDepth=${bounds.maxDepth}; refusing incomplete retrieval.`
+      );
+    }
+    for (const entry of closure.entries) {
+      if (entry.depth > 0) mandatory.add(entry.unitId);
+    }
+  }
+
+  const expandedUnitIds = [...seeds];
+  const seen = new Set(seeds);
+  for (const entry of complete.entries) {
+    if (seen.has(entry.unitId)) continue;
+    seen.add(entry.unitId);
+    expandedUnitIds.push(entry.unitId);
+  }
+  return {
+    retrievalSeedUnitIds: seeds,
+    expandedUnitIds,
+    trustedMandatoryUnitIds: expandedUnitIds.filter((unitId) => mandatory.has(unitId)),
+  };
+}
+
+export function dependencyGraphQuestionFingerprint(
+  dependencyGraphArtifactContentDigest: string,
+  dependencyGraph: DependencyGraph
+): unknown {
+  return {
+    dependencyGraphArtifactContentDigest,
+    dependencyGraphFingerprint: dependencyGraph.fingerprint,
+    bounds: DEPENDENCY_CLOSURE_BOUNDS,
+    traversal: expandDependencyClosure.toString(),
+    retrievalExpansion: expandRetrievedDependencies.toString(),
+  };
+}
+
 const USAGE =
-  'Usage: npx tsx scripts/run-aurora-fixture.ts --mode=e2e --extraction-runs=N --out=path/to/dir --max-cost-usd=N --max-paid-calls=N [--doc=path/to/source.docx] [--batch-size=N]';
+  'Usage: npx tsx scripts/run-aurora-fixture.ts --mode=e2e --extraction-runs=N --out=path/to/dir --max-cost-usd=N --max-paid-calls=N [--engine-profile=quality|balanced|economy] [--question-provider=anthropic|openai] [--question-model=MODEL] [--doc=path/to/source.docx] [--batch-size=N]';
 
 export function parseArgs(argv: readonly string[]): CliArgs {
   // Опции со значением проверяются по префиксу, голые флаги — ТОЧНЫМ
@@ -187,6 +312,9 @@ export function parseArgs(argv: readonly string[]): CliArgs {
     '--batch-size=',
     '--max-cost-usd=',
     '--max-paid-calls=',
+    '--question-model=',
+    '--question-provider=',
+    '--engine-profile=',
     '--reuse-extraction=',
   ];
   const knownFlags = ['--fresh-extraction'];
@@ -204,6 +332,13 @@ export function parseArgs(argv: readonly string[]): CliArgs {
   const batchSizeArg = argv.find((a) => a.startsWith('--batch-size='))?.slice('--batch-size='.length);
   const maxCostUsdArg = argv.find((a) => a.startsWith('--max-cost-usd='))?.slice('--max-cost-usd='.length);
   const maxPaidCallsArg = argv.find((a) => a.startsWith('--max-paid-calls='))?.slice('--max-paid-calls='.length);
+  const questionModelArg = argv.find((a) => a.startsWith('--question-model='))?.slice('--question-model='.length);
+  const questionProviderArg = argv.find((a) => a.startsWith('--question-provider='))?.slice('--question-provider='.length);
+  const engineProfileRaw = (
+    argv.find((a) => a.startsWith('--engine-profile='))?.slice('--engine-profile='.length) ??
+    process.env.AURORA_ENGINE_PROFILE ??
+    'quality'
+  ).trim().toLowerCase();
   const reuseArg = argv.find((a) => a.startsWith('--reuse-extraction='))?.slice('--reuse-extraction='.length);
   const freshFlag = argv.includes('--fresh-extraction');
 
@@ -214,6 +349,20 @@ export function parseArgs(argv: readonly string[]): CliArgs {
   }
   if (reuseArg !== undefined && reuseArg.length === 0) {
     throw new Error(`--reuse-extraction требует путь к артефакту.\n${USAGE}`);
+  }
+  if (questionModelArg !== undefined && questionModelArg.trim().length === 0) {
+    throw new Error(`--question-model требует непустой model ID.\n${USAGE}`);
+  }
+  const questionProviderRaw = (questionProviderArg ?? process.env.AURORA_QUESTION_PROVIDER)?.trim().toLowerCase();
+  const questionModelRaw = (questionModelArg ?? process.env.AURORA_QUESTION_MODEL)?.trim();
+  if (questionProviderRaw !== undefined && questionProviderRaw !== 'anthropic' && questionProviderRaw !== 'openai') {
+    throw new Error(`--question-provider принимает anthropic|openai, получено "${questionProviderRaw}".\n${USAGE}`);
+  }
+  if (!(ENGINE_PROFILES as readonly string[]).includes(engineProfileRaw)) {
+    throw new Error(`--engine-profile принимает ${ENGINE_PROFILES.join('|')}, получено "${engineProfileRaw}".\n${USAGE}`);
+  }
+  if ((questionProviderRaw === undefined) !== (questionModelRaw === undefined)) {
+    throw new Error(`question-stage override требует одновременно provider и model.\n${USAGE}`);
   }
 
   if (!modeArg || !outArg) {
@@ -265,6 +414,11 @@ export function parseArgs(argv: readonly string[]): CliArgs {
     batchSize,
     maxCostUsd,
     maxPaidCalls,
+    ...(questionModelRaw && {
+      questionModel: questionModelRaw,
+    }),
+    ...(questionProviderRaw && { questionProvider: questionProviderRaw as Provider }),
+    engineProfile: engineProfileRaw as EngineProfile,
     ...(reuseArg !== undefined && { reuseExtraction: reuseArg }),
   };
 }
@@ -315,19 +469,35 @@ interface EngineQuestionResult {
   /** True means the answer path depended on an LLM-only IRRELEVANT verdict
    * and therefore may not be delivered as DIRECT_ANSWER. */
   readonly answerDependsOnProbabilisticExclusion: boolean | null;
+  readonly challengeCompatibility: readonly ChallengeCompatibilityDecision[] | null;
+  readonly probabilisticExclusionBlockingUnitIds: readonly string[] | null;
+  readonly conditionPreservation: readonly ConditionPreservationDecision[] | null;
+  readonly conditionPreservationBlockingUnitIds: readonly string[] | null;
+  /** Retrieval seeds plus deterministic graph expansion used by the gate. */
+  readonly dependencyExpansion: DependencyExpansion | null;
+  readonly engineProvider: Provider;
+  readonly engineModel: string;
+  readonly engineProfile: EngineProfile;
 }
 
 interface EngineContext {
   readonly runId: string;
+  readonly engineProfile: EngineProfile;
   readonly embeddedCandidates: readonly EmbeddedCandidate[];
   readonly unitsById: ReadonlyMap<string, PersistedKnowledgeUnit>;
+  readonly dependencyGraph: DependencyGraph;
   readonly embeddingProvider: OpenAIEmbeddingProvider;
   readonly rerankerProvider: LlmRerankerProvider;
   readonly requestContext: RequestContext;
   readonly reviewedAt: string;
   readonly queryFrameRunConfig: ReturnType<typeof resolveExtractionRunConfig>;
   readonly answerGeneratorForCase: (caseId: string) => AnswerGenerator;
+  readonly recoveryAnswerGeneratorForCase: (caseId: string) => AnswerGenerator;
   readonly decisionRelevanceRunConfig: ReturnType<typeof resolveExtractionRunConfig>;
+  readonly challengeCompatibilityRunConfig: ReturnType<typeof resolveExtractionRunConfig>;
+  readonly conditionPreservationRunConfig: ReturnType<typeof resolveExtractionRunConfig>;
+  readonly recoveryChallengeCompatibilityRunConfig: ReturnType<typeof resolveExtractionRunConfig>;
+  readonly recoveryConditionPreservationRunConfig: ReturnType<typeof resolveExtractionRunConfig>;
   readonly taintDetector: OracleTaintDetector;
   readonly ledger: CostLedger;
   readonly traceLog: CallTraceLog;
@@ -361,6 +531,7 @@ export function classifyStructuredError(error: unknown): ExtractionAttemptLog['o
 function attemptsFromError(error: unknown): readonly CompletionAttempt[] | null {
   if (error instanceof StructuredOutputError) return error.attempts;
   if (error instanceof ChatCompletionError) return error.attempts;
+  if (error instanceof PaidStructuredSemanticError) return error.attempts;
   return null;
 }
 
@@ -389,6 +560,9 @@ function traceFromError(error: unknown): TraceInfo | null {
   }
   if (error instanceof ChatCompletionError) {
     return { requestMessages: error.requestMessages ?? [], responseText: null };
+  }
+  if (error instanceof PaidStructuredSemanticError) {
+    return { requestMessages: error.requestMessages, responseText: error.responseText };
   }
   return null;
 }
@@ -422,6 +596,46 @@ function recordTrace(
   });
 }
 
+/** Single reconciliation point for the one batched Decision Relevance call:
+ * the same attempts feed both trace and ledger exactly once. */
+export function recordDecisionRelevanceTelemetry(
+  ledger: CostLedger,
+  traceLog: CallTraceLog,
+  telemetry: DecisionRelevanceBatchTelemetry,
+  correlation: CallTraceCorrelation
+): void {
+  recordTrace(
+    traceLog,
+    'decision-relevance',
+    telemetry.attempts,
+    { requestMessages: telemetry.requestMessages, responseText: telemetry.responseText },
+    'SUCCESS',
+    null,
+    correlation
+  );
+  ledger.record('decision-relevance', telemetry.attempts);
+}
+
+export function recordEmbeddingAttempt(
+  purpose: 'corpus-embedding' | 'query-embedding',
+  ledger: CostLedger,
+  traceLog: CallTraceLog,
+  attempt: CompletionAttempt,
+  texts: readonly string[],
+  correlation: CallTraceCorrelation
+): void {
+  recordTrace(
+    traceLog,
+    purpose,
+    [attempt],
+    { requestMessages: [{ role: 'user', content: `[embedding batch: ${texts.length} text(s)]` }], responseText: null },
+    attempt.outcome === 'SUCCESS' ? 'SUCCESS' : 'ERROR',
+    attempt.outcome === 'SUCCESS' ? null : attempt.errorCode ?? `HTTP ${attempt.statusCode ?? 'transport error'}`,
+    correlation
+  );
+  ledger.record(purpose, [attempt]);
+}
+
 /**
  * Counterpart to `withStructuredRetry`'s catch-path discipline, for the
  * three call sites that don't go through it: query-frame, reranker, and
@@ -436,7 +650,7 @@ function recordTrace(
  * `ledger.record()` can itself throw (budget), and the tripping call must
  * still land in call-trace.jsonl.
  */
-async function recordOnFailure<T>(
+export async function recordOnFailure<T>(
   purpose: string,
   ledger: CostLedger,
   traceLog: CallTraceLog,
@@ -607,11 +821,125 @@ export interface TaintResampleLog {
   readonly round: number;
 }
 
+export interface MalformedExceptionFinding {
+  readonly unitId: string;
+  readonly blockAnchor: string;
+  readonly missingFields: readonly ('parentRuleRef' | 'triggerCondition')[];
+}
+
+export interface ExceptionRepairLog {
+  readonly blockAnchor: string;
+  readonly round: number;
+  readonly malformed: readonly MalformedExceptionFinding[];
+}
+
+export interface ExceptionRepairOptions extends Omit<ExtractKnowledgeUnitsOptions, 'blocks'> {
+  readonly block: SourceBlock;
+  readonly malformed: readonly MalformedExceptionFinding[];
+}
+
+export const exceptionRepairResponseSchema = z.strictObject({
+  units: z.array(extractedKnowledgeUnitSchema).readonly(),
+});
+
+const EXCEPTION_REPAIR_SYSTEM_PROMPT = `Ты заново извлекаешь ВСЕ единицы знания из одного блока, потому что предыдущее извлечение создало структурно неполные EXCEPTION_RULE.
+
+Верни полный replacement для блока, не только исправленные units.
+kind — СТРОГО одно из: "PROCEDURE_STEP", "EXCEPTION_RULE", "TERM_DEFINITION", "DELIVERY_RULE", "PRICE_RULE".
+Каждый unit обязан иметь ТОЧНО эту объектную форму (без дополнительных ключей):
+{"kind":"PROCEDURE_STEP","statement":"...","facets":{},"triggerCondition":null,"numericConstraint":null,"extractionRef":"u1","parentExtractionRef":null,"sourceSpan":{"anchor":"ДАННЫЙ_ANCHOR","quote":"ДОСЛОВНАЯ ЦИТАТА"},"evidenceByField":{"statement":{"anchor":"ДАННЫЙ_ANCHOR","quote":"ДОСЛОВНАЯ ЦИТАТА"}},"uncertainties":[]}
+Ключи id, type, content и evidence ЗАПРЕЩЕНЫ. Не переименовывай kind/statement/sourceSpan/evidenceByField в эти или другие альтернативы.
+facets — объект допустимых фасет, не массив. triggerCondition — null либо {"all":[{"fact":"helperPresent","equals":true}]}.
+В triggerCondition разрешён ТОЛЬКО этот единый каталог фактов и значений:
+${triggerFactCatalog({ booleanAsJsonLiteral: true })}
+Никаких других fact нет. Каталогизированное условие ОБЯЗАНО быть в triggerCondition у unit ЛЮБОГО kind, включая PROCEDURE_STEP и TERM_DEFINITION; добавь для него evidenceByField.triggerCondition.
+В частности, отсутствие воды НЕ является каталогизированным trigger: water_unavailable и любые похожие имена ЗАПРЕЩЕНЫ. Самостоятельное условное действие при отсутствии воды классифицируй как PROCEDURE_STEP с triggerCondition=null, а не EXCEPTION_RULE; условие сохрани словами в statement и добавь uncertainty {"kind":"UNRECOGNIZED_TRIGGER_CONDITION","description":"условие отсутствия воды не входит в закрытый каталог trigger-фактов","quote":"ДОСЛОВНАЯ ЦИТАТА УСЛОВИЯ"}.
+numericConstraint — null либо {"factKey":"...","value":1,"unit":"..."}.
+extractionRef каждого unit уникален в этом ответе. parentExtractionRef — null либо extractionRef ДРУГОГО существующего unit из этого же ответа.
+sourceSpan и каждое evidenceByField.* — объекты {"anchor":"...","quote":"..."}; evidenceByField.statement обязателен, а evidence для facets/triggerCondition/numericConstraint обязателен, когда поле заполнено.
+uncertainties — всегда массив объектов ТОЧНО формы {"kind":"ОДИН_ИЗ_РАЗРЕШЁННЫХ_KIND","description":"...","quote":"ДОСЛОВНАЯ ЦИТАТА"}; строки и произвольные объекты запрещены. uncertainty.kind — СТРОГО одно из: ${EXTRACTION_UNCERTAINTY_KINDS.map((kind) => `"${kind}"`).join(', ')}. Для самостоятельного условия, которого нет в trigger-каталоге, используй именно "UNRECOGNIZED_TRIGGER_CONDITION", не "OTHER".
+Таксономия обязательна:
+- настоящий EXCEPTION_RULE является оговоркой, изменяющей отдельное базовое правило, и обязан иметь parentExtractionRef на существующий unit этого же ответа и известный triggerCondition;
+- самостоятельное условное действие (если X, сделать Y) — PROCEDURE_STEP, parentExtractionRef=null; если X выражается закрытым каталогом, triggerCondition обязателен, иначе triggerCondition=null и обязательна uncertainty kind=UNRECOGNIZED_TRIGGER_CONDITION с дословной цитатой X;
+- поясняющая семантика или значение термина — TERM_DEFINITION, parentExtractionRef=null, triggerCondition=null.
+Не сохраняй EXCEPTION_RULE без родителя или без известного triggerCondition. Не изобретай родителя либо trigger: переклассифицируй по функции текста.
+Все sourceSpan/evidence quote должны быть дословными фрагментами исходного блока, а anchor должен точно совпадать с данным anchor.
+Ответ СТРОГО JSON: {"units": [...]}`;
+
+// The malformed-exception policy originally shared RawCheckpoint's focused
+// repair contract. Keep its old digest component frozen so upgrading this
+// prompt invalidates only the newly split exception-repair stages, not
+// already-paid focused-repair calls.
+const LEGACY_EXCEPTION_REPAIR_POLICY_FINGERPRINT =
+  '8afd25c2324514d0573c5d419852122c2f03e27686d853d8933d902e383893bd';
+
+export function findMalformedExceptions(
+  units: readonly PersistedKnowledgeUnit[]
+): MalformedExceptionFinding[] {
+  return units.flatMap((unit) => {
+    if (unit.kind !== 'EXCEPTION_RULE') return [];
+    const missingFields: ('parentRuleRef' | 'triggerCondition')[] = [];
+    if (unit.parentRuleRef === null) missingFields.push('parentRuleRef');
+    if (unit.triggerCondition === null) missingFields.push('triggerCondition');
+    return missingFields.length === 0
+      ? []
+      : [{ unitId: unit.unitId, blockAnchor: unit.sourceSpan.anchor, missingFields }];
+  });
+}
+
+export function buildExceptionRepairPromptMessages(
+  options: Pick<ExceptionRepairOptions, 'block' | 'malformed'>
+): ChatMessage[] {
+  const defects = options.malformed.map((finding) => ({
+    malformedUnitRef: finding.unitId,
+    missingFields: finding.missingFields,
+  }));
+  return [
+    { role: 'system', content: EXCEPTION_REPAIR_SYSTEM_PROMPT },
+    {
+      role: 'user',
+      content: `Anchor: ${options.block.anchor}\n\nИсходный блок:\n${options.block.text}\n\nСтруктурные дефекты предыдущего результата:\n${JSON.stringify(defects)}\n\nВерни полный исправленный replacement этого блока.`,
+    },
+  ];
+}
+
+export function exceptionRepairPolicyFingerprint(): string {
+  return createHash('sha256').update(JSON.stringify(buildExceptionRepairPromptMessages({
+    block: { anchor: '__probe__', text: '__source__' },
+    malformed: [{
+      unitId: '__unit__',
+      blockAnchor: '__probe__',
+      missingFields: ['parentRuleRef', 'triggerCondition'],
+    }],
+  })), 'utf8').digest('hex');
+}
+
+export async function extractExceptionRepairUnits(
+  options: ExceptionRepairOptions
+): Promise<ExtractKnowledgeUnitsResult> {
+  const structuredResult = await structured<{ units: readonly ExtractedKnowledgeUnit[] }>({
+    schema: exceptionRepairResponseSchema,
+    messages: buildExceptionRepairPromptMessages(options),
+    runConfig: options.runConfig,
+    ...(options.maxTokens !== undefined && { maxTokens: options.maxTokens }),
+    ...(options.temperature !== undefined && { temperature: options.temperature }),
+    ...(options.signal && { signal: options.signal }),
+  });
+  return { units: validateParentRefs(structuredResult.data.units), structuredResult };
+}
+
 interface TaintResampleCheckpoint {
   loadTaintExtraction(round: number, block: SourceBlock): readonly ExtractedKnowledgeUnit[] | undefined;
   saveTaintExtraction(round: number, block: SourceBlock, units: readonly ExtractedKnowledgeUnit[]): void;
   loadTaintAudit(round: number, options: AuditBlockCoverageOptions): BlockCoverageAuditResult | undefined;
   saveTaintAudit(round: number, options: AuditBlockCoverageOptions, result: BlockCoverageAuditResult): void;
+}
+
+interface ExceptionRepairCheckpoint {
+  loadExceptionRepair(round: number, block: SourceBlock, requestMessages: readonly ChatMessage[]): readonly ExtractedKnowledgeUnit[] | undefined;
+  saveExceptionRepair(round: number, block: SourceBlock, requestMessages: readonly ChatMessage[], units: readonly ExtractedKnowledgeUnit[]): void;
+  loadExceptionRepairAudit(round: number, options: AuditBlockCoverageOptions): BlockCoverageAuditResult | undefined;
+  saveExceptionRepairAudit(round: number, options: AuditBlockCoverageOptions, result: BlockCoverageAuditResult): void;
 }
 
 /** Identity assignment may intentionally drop units whose evidence cannot be
@@ -682,7 +1010,7 @@ export async function resolveTaintedCandidates(
     const taintedUnitIds = new Set<string>();
     for (const candidate of candidates) {
       try {
-        taintDetector.assertClean([candidate], 'targeted taint probe');
+        assertOracleTaintPolicy(taintDetector, 'ARTIFACT', [candidate], 'targeted taint probe');
       } catch (err) {
         if (!(err instanceof OracleTaintError)) throw err;
         taintedUnitIds.add(candidate.unitId);
@@ -719,8 +1047,14 @@ export async function resolveTaintedCandidates(
         blockText: block.text,
         ...(block.kind !== undefined && { blockKind: block.kind }),
         extractedStatements: namespaced.map((u) => ({
+          kind: u.kind,
           statement: u.statement,
           quote: u.sourceSpan.quote,
+          extractionRef: u.extractionRef,
+          parentExtractionRef: u.parentExtractionRef,
+          triggerCondition: u.triggerCondition,
+          numericConstraint: u.numericConstraint,
+          uncertainties: u.uncertainties,
         })),
         runConfig: optionsPerBatch.runConfig,
       };
@@ -752,6 +1086,109 @@ export async function resolveTaintedCandidates(
   return { units, resampleLogs, auditResults };
 }
 
+/** Bounded structural repair before the trusted-artifact boundary. Each
+ * affected block is replaced wholesale, then coverage and identity are
+ * re-proven for the exact replacement. */
+export async function resolveMalformedExceptions(
+  initialUnits: readonly PersistedKnowledgeUnit[],
+  blocksByAnchor: ReadonlyMap<string, SourceBlockLocation>,
+  sourceRevisionHash: string,
+  repairExtractor: (options: ExceptionRepairOptions) => Promise<ExtractKnowledgeUnitsResult>,
+  auditor: (options: AuditBlockCoverageOptions) => Promise<BlockCoverageAuditResult>,
+  optionsPerCall: Omit<ExtractKnowledgeUnitsOptions, 'blocks'>,
+  maxRounds: number,
+  checkpoint?: ExceptionRepairCheckpoint
+): Promise<{
+  units: PersistedKnowledgeUnit[];
+  repairLogs: ExceptionRepairLog[];
+  auditResults: BlockCoverageAuditResult[];
+}> {
+  let units = [...initialUnits];
+  const repairLogs: ExceptionRepairLog[] = [];
+  const auditResults: BlockCoverageAuditResult[] = [];
+
+  for (let round = 1; round <= maxRounds; round++) {
+    const malformed = findMalformedExceptions(units);
+    if (malformed.length === 0) return { units, repairLogs, auditResults };
+    const byAnchor = new Map<string, MalformedExceptionFinding[]>();
+    for (const finding of malformed) {
+      byAnchor.set(finding.blockAnchor, [...(byAnchor.get(finding.blockAnchor) ?? []), finding]);
+    }
+
+    for (const [anchor, blockFindings] of byAnchor) {
+      const block = blocksByAnchor.get(anchor);
+      if (!block) throw new Error(`malformed exception repair: block "${anchor}" not found`);
+      const sourceBlock: SourceBlock = {
+        anchor: block.anchor,
+        text: block.text,
+        ...(block.kind !== undefined && { kind: block.kind }),
+      };
+      const repairOptions: ExceptionRepairOptions = {
+        ...optionsPerCall,
+        block: sourceBlock,
+        malformed: blockFindings,
+      };
+      const repairMessages = buildExceptionRepairPromptMessages(repairOptions);
+      const restored = checkpoint?.loadExceptionRepair(round, sourceBlock, repairMessages);
+      const result = restored === undefined
+        ? await repairExtractor(repairOptions)
+        : { units: [...restored], structuredResult: {} as never };
+      if (restored === undefined) checkpoint?.saveExceptionRepair(round, sourceBlock, repairMessages, result.units);
+
+      const prefix = `exception-repair-${round}-${anchor}-`;
+      const namespaced = result.units.map((unit) => ({
+        ...unit,
+        extractionRef: `${prefix}${unit.extractionRef}`,
+        parentExtractionRef:
+          unit.parentExtractionRef === null ? null : `${prefix}${unit.parentExtractionRef}`,
+      }));
+      const auditOptions: AuditBlockCoverageOptions = {
+        blockAnchor: block.anchor,
+        blockText: block.text,
+        ...(block.kind !== undefined && { blockKind: block.kind }),
+        extractedStatements: namespaced.map((unit) => ({
+          kind: unit.kind,
+          statement: unit.statement,
+          quote: unit.sourceSpan.quote,
+          extractionRef: unit.extractionRef,
+          parentExtractionRef: unit.parentExtractionRef,
+          triggerCondition: unit.triggerCondition,
+          numericConstraint: unit.numericConstraint,
+          uncertainties: unit.uncertainties,
+        })),
+        runConfig: optionsPerCall.runConfig,
+      };
+      const restoredAudit = checkpoint?.loadExceptionRepairAudit(round, auditOptions);
+      const audit = restoredAudit ?? await auditor(auditOptions);
+      if (restoredAudit === undefined) checkpoint?.saveExceptionRepairAudit(round, auditOptions, audit);
+      auditResults.push(audit);
+      if (coverageAuditNeedsReview(audit)) {
+        throw new Error(`malformed exception repair: replacement for block "${anchor}" did not pass coverage audit`);
+      }
+
+      const identity = assignIdentity(namespaced, blocksByAnchor, sourceRevisionHash);
+      assertTrustedIdentity(identity, `malformed exception repair for block "${anchor}"`);
+      units = [...units.filter((unit) => unit.sourceSpan.anchor !== anchor), ...identity.units];
+      const liveIds = new Set(units.map((unit) => unit.unitId));
+      units = units.map((unit) =>
+        unit.parentRuleRef !== null && !liveIds.has(unit.parentRuleRef)
+          ? { ...unit, parentRuleRef: null }
+          : unit
+      );
+      repairLogs.push({ blockAnchor: anchor, round, malformed: blockFindings });
+    }
+  }
+
+  const remaining = findMalformedExceptions(units);
+  if (remaining.length > 0) {
+    throw new Error(
+      `malformed exception repair did not converge after ${maxRounds} round(s): ` +
+        remaining.map((finding) => `${finding.unitId}[${finding.missingFields.join(',')}]`).join('; ')
+    );
+  }
+  return { units, repairLogs, auditResults };
+}
+
 const answerSchema = z.strictObject({
   text: z.string(),
   citedUnitIds: z.array(z.string()).readonly(),
@@ -762,14 +1199,27 @@ function buildRealAnswerGenerator(
   ledger: CostLedger,
   traceLog: CallTraceLog,
   runId: string,
-  caseId: string
+  caseId: string,
+  engineProfile: EngineProfile,
+  purpose = 'synthesis'
 ): AnswerGenerator {
   return async (prompt) => {
     const evidenceText = prompt.evidence
-      .map((e) => `[${e.unitId}] ${e.statement}${e.numericConstraint ? ` (${e.numericConstraint.factKey}: ${e.numericConstraint.value} ${e.numericConstraint.unit})` : ''}`)
+      .map((e) => `[${e.unitId}] ${e.statement}${e.numericConstraint ? ` (${e.numericConstraint.factKey}: ${e.numericConstraint.value} ${e.numericConstraint.unit})` : ''}${(e.presentationConditions?.length ?? 0) > 0 ? `\nУСЛОВИЯ ПРИМЕНИМОСТИ: ${e.presentationConditions!.map((condition) => `"${condition}"`).join('; ')}` : ''}${e.applicabilityMode === 'NEGATIVE' ? '\nРЕЖИМ: условие достоверно НЕ выполнено; используй правило только как основание для отказа/отрицания, никогда как разрешение.' : e.applicabilityMode === 'CONDITIONAL' ? '\nРЕЖИМ: условие неизвестно; правило можно сообщить только как явно условную ветку, никогда как безусловное разрешение.' : ''}`)
       .join('\n');
-    const correlation: CallTraceCorrelation = { runId, stage: 'synthesis', caseId };
-    const result = await recordOnFailure('synthesis', ledger, traceLog, correlation, () =>
+    const supportingContextText = prompt.supportingContext
+      .map((e) =>
+        `[${e.unitId}] ${e.statement}${e.numericConstraint ? ` (${e.numericConstraint.factKey}: ${e.numericConstraint.value} ${e.numericConstraint.unit})` : ''}\n` +
+        `РОЛЬ: OVERRIDDEN_PARENT_CONTEXT — это НЕ действующее правило. Оно переопределено выбранным исключением [${e.overriddenByUnitId}]. ` +
+        `Разрешено использовать только его дополнительные процедурные детали, не противоречащие [${e.overriddenByUnitId}]; выбранное исключение всегда имеет приоритет. ` +
+        `Если ответ использует этот контекст, citedUnitIds обязан включать и [${e.unitId}], и [${e.overriddenByUnitId}].`
+      )
+      .join('\n');
+    const correlation: CallTraceCorrelation = {
+      runId, stage: purpose, caseId, engineProvider: runConfig.provider, engineModel: runConfig.model,
+      engineProfile,
+    };
+    const result = await recordOnFailure(purpose, ledger, traceLog, correlation, () =>
       structured({
         schema: answerSchema,
         messages: [
@@ -778,23 +1228,33 @@ function buildRealAnswerGenerator(
             content:
               'Ты отвечаешь на вопрос СТРОГО на основе перечисленных unit\'ов знания — не добавляй ничего от себя. ' +
               'citedUnitIds обязан перечислять id ровно тех unit\'ов, на утверждениях которых построен ответ. ' +
+              'OVERRIDDEN_PARENT_CONTEXT никогда не является самостоятельным разрешением или запретом: выбранное исключение имеет безусловный приоритет, и контекст всегда цитируется вместе с ним. ' +
+              'Каждое УСЛОВИЕ ПРИМЕНИМОСТИ явно привяжи к соответствующему правилу; условное правило запрещено подавать как безусловное. ' +
+              `${prompt.answerTextPolicy} ` +
               'Ответ СТРОГО JSON: {"text": "...", "citedUnitIds": ["..."]}',
           },
-          { role: 'user', content: `Вопрос: "${prompt.question}"\n\nДоступное знание:\n${evidenceText}` },
+          {
+            role: 'user',
+            content:
+              `Вопрос: "${prompt.question}"\n\nДействующее выбранное знание:\n${evidenceText}` +
+              (supportingContextText.length > 0
+                ? `\n\nНеоперативный контекст переопределённых прямых родителей:\n${supportingContextText}`
+                : ''),
+          },
         ],
         runConfig,
       })
     );
     recordTrace(
       traceLog,
-      'synthesis',
+      purpose,
       result.attempts,
       { requestMessages: result.requestMessages ?? [], responseText: result.rawText ?? null },
       'SUCCESS',
       null,
       correlation
     );
-    ledger.record('synthesis', result.attempts);
+    ledger.record(purpose, result.attempts);
     return { text: result.data.text, citedUnitIds: result.data.citedUnitIds };
   };
 }
@@ -810,12 +1270,22 @@ async function runEngineOnQuestion(
   input: EngineQuestionInput,
   ctx: EngineContext
 ): Promise<EngineQuestionResult> {
-  const base = { caseId: input.caseId, question: input.question };
+  const base = {
+    caseId: input.caseId,
+    question: input.question,
+    engineProvider: ctx.queryFrameRunConfig.provider,
+    engineModel: ctx.queryFrameRunConfig.model,
+    engineProfile: ctx.engineProfile,
+  };
   try {
     const message: ConversationMessage = { id: `${input.caseId}-q`, role: 'user', text: input.question };
-    ctx.taintDetector.assertClean([message], `engine input (QueryFrame messages, ${input.caseId})`);
+    assertOracleTaintPolicy(ctx.taintDetector, 'ENGINE_INPUT', [message], `engine input (QueryFrame messages, ${input.caseId})`);
 
-    const queryCorrelation: CallTraceCorrelation = { runId: ctx.runId, stage: 'query-frame', caseId: input.caseId };
+    const queryCorrelation: CallTraceCorrelation = {
+      runId: ctx.runId, stage: 'query-frame', caseId: input.caseId,
+      engineProvider: ctx.queryFrameRunConfig.provider, engineModel: ctx.queryFrameRunConfig.model,
+      engineProfile: ctx.engineProfile,
+    };
     const { queryFrame, structuredResult: queryFrameResult } = await recordOnFailure(
       'query-frame',
       ctx.ledger,
@@ -834,7 +1304,11 @@ async function runEngineOnQuestion(
     );
     ctx.ledger.record('query-frame', queryFrameResult.attempts);
 
-    const rerankerCorrelation: CallTraceCorrelation = { runId: ctx.runId, stage: 'reranker', caseId: input.caseId };
+    const rerankerCorrelation: CallTraceCorrelation = {
+      runId: ctx.runId, stage: 'reranker', caseId: input.caseId,
+      engineProvider: ctx.queryFrameRunConfig.provider, engineModel: ctx.queryFrameRunConfig.model,
+      engineProfile: ctx.engineProfile,
+    };
     const retrieval = await recordOnFailure('reranker', ctx.ledger, ctx.traceLog, rerankerCorrelation, () =>
       retrieveUnits(input.question, ctx.embeddedCandidates, {
         embeddingProvider: ctx.embeddingProvider,
@@ -845,11 +1319,17 @@ async function runEngineOnQuestion(
     recordTrace(ctx.traceLog, 'reranker', rerankerAttempts, ctx.rerankerProvider.drainTrace(), 'SUCCESS', null, rerankerCorrelation);
     ctx.ledger.record('reranker', rerankerAttempts);
 
-    const candidateUnits = retrieval.topK
+    const dependencyExpansion = expandRetrievedDependencies(retrieval.topK, ctx.dependencyGraph);
+    const trustedMandatoryUnitIds = new Set(dependencyExpansion.trustedMandatoryUnitIds);
+    const candidateUnits = dependencyExpansion.expandedUnitIds
       .map((id) => ctx.unitsById.get(id))
       .filter((u): u is PersistedKnowledgeUnit => u !== undefined);
-    const evaluatedCandidates = candidateUnits.map((u) =>
-      buildEvaluatedCandidate(u, queryFrame, ctx.requestContext, ctx.reviewedAt)
+    const evaluatedCandidates = buildEvaluatedCandidates(
+      candidateUnits,
+      ctx.unitsById,
+      queryFrame,
+      ctx.requestContext,
+      ctx.reviewedAt
     );
 
     // Decision Relevance Gate (architectural correction, 2026-08-09): a
@@ -860,12 +1340,26 @@ async function runEngineOnQuestion(
       evaluated: evaluatedCandidates[i],
       statement: u.statement,
       quote: u.sourceSpan.quote,
+      trustedMandatoryDependency: trustedMandatoryUnitIds.has(u.unitId),
     }));
-    const decisionRelevance = await applyDecisionRelevanceGate(
-      gateInputs,
-      input.question,
-      ctx.decisionRelevanceRunConfig,
-      evaluateDecisionRelevanceBatch
+    const { result: decisionRelevance } = await withStructuredRetry(
+      () => applyDecisionRelevanceGate(
+        gateInputs,
+        input.question,
+        ctx.decisionRelevanceRunConfig,
+        evaluateDecisionRelevanceBatch
+      ),
+      3,
+      'decision relevance',
+      ctx.ledger,
+      ctx.traceLog,
+      'decision-relevance',
+      (result) => result.classifierTelemetry?.attempts ?? [],
+      (result) => ({
+        requestMessages: result.classifierTelemetry?.requestMessages ?? [],
+        responseText: result.classifierTelemetry?.responseText ?? null,
+      }),
+      { runId: ctx.runId, stage: 'decision-relevance', caseId: input.caseId }
     );
 
     const resolution = resolveKnowledgeSet(decisionRelevance.relevant, queryFrame);
@@ -885,42 +1379,186 @@ async function runEngineOnQuestion(
         decisionRelevanceTrace: decisionRelevance.trace,
         decisionRelevanceDroppedByClassifier: decisionRelevance.droppedByClassifier,
         answerDependsOnProbabilisticExclusion: decisionRelevance.answerDependsOnProbabilisticExclusion,
+        challengeCompatibility: null,
+        probabilisticExclusionBlockingUnitIds: null,
+        conditionPreservation: null,
+        conditionPreservationBlockingUnitIds: null,
+        dependencyExpansion,
       };
     }
 
-    const selectedUnits = resolution.selected
+    const evidenceUnitIds = new Set([
+      ...resolution.selected,
+      ...(resolution.negativeEvidence ?? []),
+      ...resolution.overridden.flatMap((edge) => [edge.unitId, edge.byUnitId]),
+    ]);
+    const selectedUnits = [...evidenceUnitIds]
       .map((id) => ctx.unitsById.get(id))
       .filter((u): u is PersistedKnowledgeUnit => u !== undefined);
     const evidencePack = buildEvidencePack(selectedUnits, resolution);
-    ctx.taintDetector.assertClean(evidencePack, `engine input (EvidencePack, ${input.caseId})`);
+    assertOracleTaintPolicy(ctx.taintDetector, 'ENGINE_INPUT', evidencePack, `engine input (EvidencePack, ${input.caseId})`);
 
     const draft = await synthesizeFromSelectedUnits(
       evidencePack,
       input.question,
       ctx.answerGeneratorForCase(input.caseId)
     );
-    ctx.taintDetector.assertClean(draft, `engine output (DraftAnswer, ${input.caseId})`);
+    assertOracleTaintPolicy(ctx.taintDetector, 'GENERATED_OUTPUT', draft, `engine output (DraftAnswer, ${input.caseId})`);
 
     const verification = verifyAnswerClaims(draft, evidencePack);
+    const conditionPreservation = await recordOnFailure(
+      'condition-preservation', ctx.ledger, ctx.traceLog,
+      { runId: ctx.runId, stage: 'condition-preservation', caseId: input.caseId },
+      () => verifyConditionsAfterBasicVerification(verification.verified, {
+        question: input.question, draft, pack: evidencePack, runConfig: ctx.conditionPreservationRunConfig,
+      })
+    );
+    if (conditionPreservation !== null && conditionPreservation.attempts.length > 0) {
+      recordTrace(ctx.traceLog, 'condition-preservation', conditionPreservation.attempts,
+        { requestMessages: conditionPreservation.requestMessages, responseText: conditionPreservation.responseText },
+        'SUCCESS', null, { runId: ctx.runId, stage: 'condition-preservation', caseId: input.caseId });
+      ctx.ledger.record('condition-preservation', conditionPreservation.attempts);
+    }
+    const finalVerification: VerificationResult = mergeConditionPreservationVerification(verification, conditionPreservation);
+    const counterfactuals = evaluateChallengeCounterfactuals(decisionRelevance, queryFrame);
+    const compatibility = await recordOnFailure(
+      'challenge-compatibility',
+      ctx.ledger,
+      ctx.traceLog,
+      { runId: ctx.runId, stage: 'challenge-compatibility', caseId: input.caseId },
+      () =>
+        verifyChallengesAfterBasicVerification(verification.verified, {
+          question: input.question,
+          draft,
+          challenges: decisionRelevance.challengeCandidates,
+          pack: evidencePack,
+          resolution,
+          counterfactuals,
+          runConfig: ctx.challengeCompatibilityRunConfig,
+        })
+    );
+    if (compatibility !== null && compatibility.attempts.length > 0) {
+      recordTrace(
+        ctx.traceLog,
+        'challenge-compatibility',
+        compatibility.attempts,
+        { requestMessages: compatibility.requestMessages, responseText: compatibility.responseText },
+        'SUCCESS',
+        null,
+        { runId: ctx.runId, stage: 'challenge-compatibility', caseId: input.caseId }
+      );
+      ctx.ledger.record('challenge-compatibility', compatibility.attempts);
+    }
+    let exclusionSafety = resolveProbabilisticExclusionSafety(
+      decisionRelevance,
+      counterfactuals,
+      compatibility
+    );
+
+    let finalResolution = resolution;
+    let finalEvidencePack = evidencePack;
+    let finalDraft = draft;
+    let deliveredVerification = finalVerification;
+    let finalCompatibility = compatibility;
+    let finalConditionPreservation = conditionPreservation;
+
+    // At most one bounded recovery round. Only deterministic prerequisites or
+    // an exact provider proof of omitted (but non-contradictory) required
+    // content may be promoted. Exceptions and genuine conflicts never enter.
+    const recoveryCandidates = selectChallengeRecoveryCandidates(decisionRelevance, compatibility);
+    if (recoveryCandidates.length > 0) {
+      const promotedIds = new Set(recoveryCandidates.map((candidate) => candidate.unitId));
+      const recoveredRelevant = [
+        ...decisionRelevance.relevant,
+        ...recoveryCandidates.map((candidate) => ({ ...candidate.evaluated, semanticRelevance: 'RELEVANT' as const })),
+      ];
+      const recoveredResolution = resolveKnowledgeSet(recoveredRelevant, queryFrame);
+      if (recoveredResolution.disposition === 'ANSWER') {
+        const recoveredUnits = [...recoveredResolution.selected, ...(recoveredResolution.negativeEvidence ?? [])]
+          .map((id) => ctx.unitsById.get(id))
+          .filter((unit): unit is PersistedKnowledgeUnit => unit !== undefined);
+        const recoveredPack = buildEvidencePack(recoveredUnits, recoveredResolution);
+        assertOracleTaintPolicy(ctx.taintDetector, 'ENGINE_INPUT', recoveredPack, `recovery engine input (EvidencePack, ${input.caseId})`);
+        const recoveredDraft = await synthesizeFromSelectedUnits(
+          recoveredPack, input.question, ctx.recoveryAnswerGeneratorForCase(input.caseId)
+        );
+        assertOracleTaintPolicy(ctx.taintDetector, 'GENERATED_OUTPUT', recoveredDraft, `recovery engine output (DraftAnswer, ${input.caseId})`);
+        const recoveredBasicVerification = verifyAnswerClaims(recoveredDraft, recoveredPack);
+        const recoveredCondition = await recordOnFailure(
+          'recovery-condition-preservation', ctx.ledger, ctx.traceLog,
+          { runId: ctx.runId, stage: 'recovery-condition-preservation', caseId: input.caseId },
+          () => verifyConditionsAfterBasicVerification(recoveredBasicVerification.verified, {
+            question: input.question, draft: recoveredDraft, pack: recoveredPack,
+            runConfig: ctx.recoveryConditionPreservationRunConfig,
+          })
+        );
+        if (recoveredCondition !== null && recoveredCondition.attempts.length > 0) {
+          recordTrace(ctx.traceLog, 'recovery-condition-preservation', recoveredCondition.attempts,
+            { requestMessages: recoveredCondition.requestMessages, responseText: recoveredCondition.responseText },
+            'SUCCESS', null, { runId: ctx.runId, stage: 'recovery-condition-preservation', caseId: input.caseId });
+          ctx.ledger.record('recovery-condition-preservation', recoveredCondition.attempts);
+        }
+        const recoveredVerification = mergeConditionPreservationVerification(
+          recoveredBasicVerification, recoveredCondition
+        );
+        const remainingGate = {
+          ...decisionRelevance,
+          relevant: recoveredRelevant,
+          droppedByClassifier: decisionRelevance.droppedByClassifier.filter((id) => !promotedIds.has(id)),
+          challengeCandidates: decisionRelevance.challengeCandidates.filter((item) => !promotedIds.has(item.unitId)),
+        };
+        const recoveredCounterfactuals = evaluateChallengeCounterfactuals(remainingGate, queryFrame);
+        const recoveredCompatibility = await recordOnFailure(
+          'recovery-challenge-compatibility', ctx.ledger, ctx.traceLog,
+          { runId: ctx.runId, stage: 'recovery-challenge-compatibility', caseId: input.caseId },
+          () => verifyChallengesAfterBasicVerification(recoveredBasicVerification.verified, {
+            question: input.question, draft: recoveredDraft,
+            challenges: remainingGate.challengeCandidates, pack: recoveredPack,
+            resolution: recoveredResolution, counterfactuals: recoveredCounterfactuals,
+            runConfig: ctx.recoveryChallengeCompatibilityRunConfig,
+          })
+        );
+        if (recoveredCompatibility !== null && recoveredCompatibility.attempts.length > 0) {
+          recordTrace(ctx.traceLog, 'recovery-challenge-compatibility', recoveredCompatibility.attempts,
+            { requestMessages: recoveredCompatibility.requestMessages, responseText: recoveredCompatibility.responseText },
+            'SUCCESS', null, { runId: ctx.runId, stage: 'recovery-challenge-compatibility', caseId: input.caseId });
+          ctx.ledger.record('recovery-challenge-compatibility', recoveredCompatibility.attempts);
+        }
+        finalResolution = recoveredResolution;
+        finalEvidencePack = recoveredPack;
+        finalDraft = recoveredDraft;
+        deliveredVerification = recoveredVerification;
+        finalConditionPreservation = recoveredCondition;
+        finalCompatibility = recoveredCompatibility;
+        exclusionSafety = resolveProbabilisticExclusionSafety(
+          remainingGate, recoveredCounterfactuals, recoveredCompatibility
+        );
+      }
+    }
 
     return {
       ...base,
       queryFrame,
       retrieval,
-      resolution,
-      evidencePack,
-      draft,
-      verification,
+      resolution: finalResolution,
+      evidencePack: finalEvidencePack,
+      draft: finalDraft,
+      verification: deliveredVerification,
       // НЕ безусловный 'DIRECT_ANSWER' (дыра в гарантии, закрытая W1-A):
       // ответ, провалившийся собственную проверку заземления, больше не
       // предъявляется как прямой ответ. Черновик и нарушения остаются в
       // артефакте целиком — провал должен быть ВИДЕН, а не спрятан.
-      actualDisposition: resolveAnswerDisposition(verification, decisionRelevance),
+      actualDisposition: resolveAnswerDisposition(deliveredVerification, exclusionSafety),
       errorMessage: null,
       errorRetryable: false,
       decisionRelevanceTrace: decisionRelevance.trace,
       decisionRelevanceDroppedByClassifier: decisionRelevance.droppedByClassifier,
-      answerDependsOnProbabilisticExclusion: decisionRelevance.answerDependsOnProbabilisticExclusion,
+      answerDependsOnProbabilisticExclusion: exclusionSafety.answerDependsOnProbabilisticExclusion,
+      challengeCompatibility: finalCompatibility?.decisions ?? null,
+      probabilisticExclusionBlockingUnitIds: exclusionSafety.blockingUnitIds,
+      conditionPreservation: finalConditionPreservation?.decisions ?? null,
+      conditionPreservationBlockingUnitIds: finalConditionPreservation?.blockingUnitIds ?? null,
+      dependencyExpansion,
     };
   } catch (err) {
     // A cost-budget trip must never be absorbed into a per-question ERROR
@@ -952,6 +1590,11 @@ async function runEngineOnQuestion(
       decisionRelevanceTrace: null,
       decisionRelevanceDroppedByClassifier: null,
       answerDependsOnProbabilisticExclusion: null,
+      challengeCompatibility: null,
+      probabilisticExclusionBlockingUnitIds: null,
+      conditionPreservation: null,
+      conditionPreservationBlockingUnitIds: null,
+      dependencyExpansion: null,
     };
   }
 }
@@ -997,6 +1640,10 @@ interface ExtractionRunOutcome {
   readonly batchLogs: readonly BatchExtractionLog[];
   readonly auditResults: readonly BlockCoverageAuditResult[];
   readonly focusedRetryLogs: readonly FocusedRetryLog[];
+  readonly dependencyGraphArtifactPath: string;
+  readonly dependencyGraphArtifactContentDigest: string;
+  readonly dependencyGraphFingerprint: string;
+  readonly dependencyGraphRestored: boolean;
   /** Артефакт извлечения. `null` в режиме `--reuse-extraction` — прогон
    *  ничего нового не извлекал, перезаписывать нечем и незачем. */
   readonly artifact: ExtractionArtifact | null;
@@ -1010,12 +1657,166 @@ const EXTRACTION_MAX_TOKENS = 16000;
 function budgetedRunConfig(
   ledger: CostLedger,
   purpose: string,
-  promptVersion: string
+  promptVersion: string,
+  provider: Provider,
+  model: string
 ): ReturnType<typeof resolveExtractionRunConfig> {
   return resolveExtractionRunConfig({
     promptVersion,
+    provider,
+    model,
     beforeProviderAttempt: () => ledger.reservePaidCall(purpose),
   });
+}
+
+const DEPENDENCY_GRAPH_STAGE_MAX_ATTEMPTS = 3;
+const DEPENDENCY_GRAPH_STAGE_MAX_TOKENS = 16_000;
+
+function sha256Json(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value), 'utf8').digest('hex');
+}
+
+function dependencyGraphArtifactConfig(
+  artifact: ExtractionArtifact
+): DependencyGraphArtifactConfig {
+  const contract = dependencyGraphBuilderContractProbe();
+  return {
+    provider: artifact.fingerprint.extractionProvider,
+    model: artifact.fingerprint.extractionModel,
+    prompt: sha256Json(contract),
+    schema: sha256Json({
+      proposal: dependencyGraphSchema._zod.def,
+      audit: dependencyAuditSchema._zod.def,
+    }),
+    policy: sha256Json({
+      contract,
+      maxStageAttempts: DEPENDENCY_GRAPH_STAGE_MAX_ATTEMPTS,
+      maxTokens: DEPENDENCY_GRAPH_STAGE_MAX_TOKENS,
+    }),
+  };
+}
+
+export function dependencyGraphSidecarPath(
+  extractionArtifactPath: string,
+  exactFingerprintDigest?: string
+): string {
+  const suffix = exactFingerprintDigest === undefined ? '' : `-${exactFingerprintDigest.slice(0, 16)}`;
+  return path.join(path.dirname(extractionArtifactPath), `dependency-graph-artifact${suffix}.json`);
+}
+
+interface ReadyDependencyGraph {
+  readonly graph: DependencyGraph;
+  readonly artifact: DependencyGraphArtifact;
+  readonly artifactPath: string;
+  readonly restored: boolean;
+}
+
+async function ensureDependencyGraph(
+  runId: string,
+  extractionArtifactPath: string,
+  extractionArtifact: ExtractionArtifact,
+  ledger: CostLedger,
+  traceLog: CallTraceLog
+): Promise<ReadyDependencyGraph> {
+  if (extractionArtifact.phase !== 'COMPLETE') {
+    throw new Error('Dependency graph requires a COMPLETE extraction artifact.');
+  }
+  const units = extractionArtifact.snapshot.units;
+  const config = dependencyGraphArtifactConfig(extractionArtifact);
+  const expectedFingerprint = buildDependencyGraphArtifactFingerprint(
+    extractionArtifact,
+    units,
+    config
+  );
+  // Versioned sidecars allow a graph-policy change to build a new exact graph
+  // without altering or invalidating the frozen COMPLETE-v6 extraction.
+  const artifactPath = dependencyGraphSidecarPath(
+    extractionArtifactPath,
+    sha256Json(expectedFingerprint)
+  );
+  const restored = loadCompatibleDependencyGraphArtifact(artifactPath, expectedFingerprint);
+  if (restored !== undefined) {
+    return {
+      graph: hydrateDependencyGraph(restored.graph, units),
+      artifact: restored,
+      artifactPath,
+      restored: true,
+    };
+  }
+
+  const provider = config.provider as Provider;
+  if (provider !== 'anthropic' && provider !== 'openai') {
+    throw new Error(`Unsupported dependency graph provider: ${config.provider}`);
+  }
+  const makeStage = <T>(purpose: string, stage: string): DependencyGraphStage<T> => {
+    const runConfig = budgetedRunConfig(
+      ledger,
+      purpose,
+      `aurora-fixture-${stage}-v1`,
+      provider,
+      config.model
+    );
+    return async (request) => {
+      const { result } = await withStructuredRetry(
+        () => structured({
+          schema: request.schema,
+          messages: [...request.messages],
+          runConfig,
+          maxTokens: DEPENDENCY_GRAPH_STAGE_MAX_TOKENS,
+        }),
+        DEPENDENCY_GRAPH_STAGE_MAX_ATTEMPTS,
+        stage,
+        ledger,
+        traceLog,
+        purpose,
+        (value) => value.attempts,
+        (value) => ({
+          requestMessages: value.requestMessages ?? [],
+          responseText: value.rawText ?? null,
+        }),
+        { runId, stage, engineProvider: provider, engineModel: config.model }
+      );
+      return result.data;
+    };
+  };
+
+  const graph = await buildAuditedDependencyGraph({
+    units,
+    proposer: makeStage('dependency-graph-proposal', 'dependency-graph-proposal'),
+    auditor: makeStage('dependency-graph-audit', 'dependency-graph-audit'),
+    repairer: makeStage('dependency-graph-repair', 'dependency-graph-repair'),
+    exactRequestFingerprint: {
+      extractionArtifactContentDigest: extractionArtifact.contentDigest,
+      config,
+      maxStageAttempts: DEPENDENCY_GRAPH_STAGE_MAX_ATTEMPTS,
+      maxTokens: DEPENDENCY_GRAPH_STAGE_MAX_TOKENS,
+    },
+    checkpoint: new FileDependencyGraphCheckpoint(`${artifactPath}.stage-journal.json`),
+  });
+  const graphDocument: DependencyGraphDocument = serializeDependencyGraph(graph);
+  const artifact = buildDependencyGraphArtifact(expectedFingerprint, graphDocument);
+  writeDependencyGraphArtifact(artifactPath, artifact);
+  return { graph, artifact, artifactPath, restored: false };
+}
+
+export function dependencyGraphStructuredCallCeiling(): number {
+  // proposal + initial/final audits around at most two focused repairs
+  return 1 + (2 + 1) + 2;
+}
+
+export function resolveQuestionStageTarget(
+  args: Pick<CliArgs, 'questionProvider' | 'questionModel' | 'engineProfile'>,
+  extraction: { readonly provider: Provider; readonly model: string }
+): { provider: Provider; model: string } {
+  const profileTarget = args.engineProfile === 'balanced'
+    ? { provider: 'anthropic' as const, model: 'claude-haiku-4-5' }
+    : args.engineProfile === 'economy'
+      ? { provider: 'openai' as const, model: 'gpt-4o-mini' }
+      : extraction;
+  return {
+    provider: args.questionProvider ?? profileTarget.provider,
+    model: args.questionModel ?? profileTarget.model,
+  };
 }
 
 /**
@@ -1029,35 +1830,148 @@ async function runQuestionsAgainstSnapshot(
   snapshot: EvaluationKnowledgeSnapshot,
   embeddedCandidates: readonly EmbeddedCandidate[],
   unitsById: ReadonlyMap<string, PersistedKnowledgeUnit>,
-  deps: ExtractionRunDeps
+  dependencyGraph: DependencyGraph,
+  dependencyGraphArtifactContentDigest: string,
+  deps: ExtractionRunDeps,
+  artifactContentDigest: string
 ): Promise<EngineQuestionResult[]> {
   const reviewedAt = new Date().toISOString();
+  const questionModel = deps.questionModel;
+  const questionProvider = deps.questionProvider;
   const rerankerProvider = new LlmRerankerProvider(
-    budgetedRunConfig(deps.ledger, 'reranker', 'aurora-fixture-reranker-v1')
+    budgetedRunConfig(deps.ledger, 'reranker', 'aurora-fixture-reranker-v1', questionProvider, questionModel)
   );
-  const queryEmbeddingProvider = new OpenAIEmbeddingProvider(() =>
-    deps.ledger.reservePaidCall('query-embedding')
+  let activeQuestionCaseId: string | undefined;
+  const queryEmbeddingProvider = new OpenAIEmbeddingProvider(
+    () => deps.ledger.reservePaidCall('query-embedding'),
+    (attempt, texts) => recordEmbeddingAttempt(
+      'query-embedding', deps.ledger, deps.traceLog, attempt, texts,
+      { runId, stage: 'query-embedding', ...(activeQuestionCaseId && { caseId: activeQuestionCaseId }) }
+    )
+  );
+  const journalFingerprint = buildQuestionJournalFingerprint(artifactContentDigest, {
+    dependencyGraph: dependencyGraphQuestionFingerprint(
+      dependencyGraphArtifactContentDigest,
+      dependencyGraph
+    ),
+    provider: questionProvider, model: questionModel,
+    queryFrame: buildExtractionMessages([{ id: 'probe', role: 'user', text: 'probe question' }]),
+    queryFrameSchema: rawQueryExtractionSchema._zod.def,
+    reranker: buildRerankPromptMessages('probe question', [{ id: 'probe-unit', text: 'probe statement' }]),
+    rerankerSchema: rerankResponseSchema._zod.def,
+    relevance: buildBatchDecisionRelevancePromptMessages('probe question', []),
+    relevanceSchema: batchDecisionRelevanceResponseSchema._zod.def,
+    challengeCompatibility: buildChallengeCompatibilityMessages(
+      'probe question',
+      { text: 'probe answer', citedUnitIds: ['probe-unit'], answerSource: 'knowledge_base' },
+      [{
+        unitId: 'probe-challenge',
+        mandatoryPrerequisite: false,
+        statement: 'probe challenge',
+        quote: 'probe challenge',
+        evaluated: { unitId: 'probe-challenge' } as never,
+      }],
+      { items: [{ unitId: 'probe-unit', kind: 'PROCEDURE_STEP', statement: 'selected probe rule', citation: { anchor: 'probe', quote: 'selected probe rule' }, numericConstraint: null }], numericFacts: [] },
+      { disposition: 'ANSWER', selected: ['probe-unit'], undetermined: [], excluded: [], overridden: [], numericConflicts: [], requiresHumanReview: false, clarificationNeeds: { facets: [], triggerFacts: [], ambiguities: [] }, reasons: [] },
+      { restoredDispositionByUnitId: { 'probe-challenge': 'ANSWER' }, blockingUnitIds: [] }
+    ),
+    challengeCompatibilitySchema: challengeCompatibilityResponseSchema._zod.def,
+    conditionPreservation: buildConditionPreservationMessages(
+      'probe question',
+      { text: 'probe answer', citedUnitIds: ['probe-unit'], answerSource: 'knowledge_base' },
+      [{ unitId: 'probe-unit', statement: 'conditional action', conditions: ['if probe condition'], applicabilityMode: 'CONDITIONAL' }]
+    ),
+    conditionPreservationSchema: conditionPreservationResponseSchema._zod.def,
+    conditionPreservationBehavior: conditionedEvidenceOf.toString(),
+    overriddenParentContext: overriddenParentContextBehaviorProbe(),
+    synthesis: buildRealAnswerGenerator.toString(),
+    synthesisSchema: answerSchema._zod.def,
+    oracleTaintPolicy: {
+      version: ORACLE_TAINT_POLICY_VERSION,
+      behavior: oracleTaintPolicyBehaviorProbe(),
+    },
+    retryPolicies: {
+      embedding: { maxRawAttempts: 3, sdkMaxRetriesWhenBudgeted: 0 },
+      decisionRelevance: { maxStageAttempts: 3, maxIdenticalSchemaFailures: 2 },
+      wholeQuestion: { maxAttempts: MAX_ENGINE_QUESTION_RETRY_ATTEMPTS },
+    },
+    queryEmbeddingModel: queryEmbeddingProvider.modelInfo(), retrievalContract: retrievalContractProbe(),
+    deterministicStages: {
+      buildQueryFrame: buildQueryFrame(
+        { facetMentions: [], triggerFactMentions: [{ fact: 'consentStatus', rawValue: 'EXPLICIT', messageId: 'probe', quote: 'согласен' }], questionAspects: ['REQUIREMENT'] },
+        [{ id: 'probe', role: 'user', text: 'согласен' }]
+      ),
+      decisionRelevanceGateAndCounterfactuals: [applyDecisionRelevanceGate.toString(), evaluateChallengeCounterfactuals.toString()],
+      effectiveTriggerInheritance: effectiveTriggerInheritanceBehaviorProbe(),
+      resolution: resolveKnowledgeSet.toString(),
+      verification: verifyAnswerClaims.toString(),
+      internalReferenceLeakPolicy: internalReferenceLeakPolicyProbe(),
+      probabilisticExclusionSafety: resolveProbabilisticExclusionSafety.toString(),
+      challengeRecovery: {
+        selector: selectChallengeRecoveryCandidates.toString(),
+        maxRounds: 1,
+        stages: ['resolution', 'synthesis', 'verification', 'condition-preservation', 'challenge-compatibility'],
+      },
+      answerDisposition: [
+        resolveAnswerDisposition({ verified: true }, { answerDependsOnProbabilisticExclusion: false }),
+        resolveAnswerDisposition({ verified: true }, { answerDependsOnProbabilisticExclusion: true }),
+        resolveAnswerDisposition(null),
+      ],
+    },
+    questionBehavior: computeQuestionBehaviorProbes(),
+  });
+  const questionJournal = new QuestionResultJournal<EngineQuestionResult>(
+    path.join(deps.args.outDir, `question-journal-${artifactContentDigest.slice(0, 16)}-${journalFingerprint.configDigest.slice(0, 16)}.json`), journalFingerprint
   );
   const ctx: EngineContext = {
     runId,
+    engineProfile: deps.engineProfile,
     embeddedCandidates,
     unitsById,
+    dependencyGraph,
     embeddingProvider: queryEmbeddingProvider,
     rerankerProvider,
     requestContext: { audience: 'internal', now: reviewedAt },
     reviewedAt,
-    queryFrameRunConfig: budgetedRunConfig(deps.ledger, 'query-frame', 'aurora-fixture-query-frame-v1'),
+    queryFrameRunConfig: budgetedRunConfig(deps.ledger, 'query-frame', 'aurora-fixture-query-frame-v1', questionProvider, questionModel),
     answerGeneratorForCase: (caseId) => buildRealAnswerGenerator(
-      budgetedRunConfig(deps.ledger, 'synthesis', 'aurora-fixture-synthesis-v1'),
+      budgetedRunConfig(deps.ledger, 'synthesis', 'aurora-fixture-synthesis-v1', questionProvider, questionModel),
       deps.ledger,
       deps.traceLog,
       runId,
-      caseId
+      caseId,
+      deps.engineProfile
+    ),
+    recoveryAnswerGeneratorForCase: (caseId) => buildRealAnswerGenerator(
+      budgetedRunConfig(deps.ledger, 'recovery-synthesis', 'aurora-fixture-recovery-synthesis-v1', questionProvider, questionModel),
+      deps.ledger, deps.traceLog, runId, caseId, deps.engineProfile, 'recovery-synthesis'
     ),
     decisionRelevanceRunConfig: budgetedRunConfig(
       deps.ledger,
       'decision-relevance',
-      'aurora-fixture-decision-relevance-v1'
+      'aurora-fixture-decision-relevance-v1',
+      questionProvider,
+      questionModel
+    ),
+    challengeCompatibilityRunConfig: budgetedRunConfig(
+      deps.ledger,
+      'challenge-compatibility',
+      'aurora-fixture-challenge-compatibility-v1',
+      questionProvider,
+      questionModel
+    ),
+    conditionPreservationRunConfig: budgetedRunConfig(
+      deps.ledger,
+      'condition-preservation',
+      'aurora-fixture-condition-preservation-v1',
+      questionProvider,
+      questionModel
+    ),
+    recoveryChallengeCompatibilityRunConfig: budgetedRunConfig(
+      deps.ledger, 'recovery-challenge-compatibility', 'aurora-fixture-recovery-challenge-compatibility-v1', questionProvider, questionModel
+    ),
+    recoveryConditionPreservationRunConfig: budgetedRunConfig(
+      deps.ledger, 'recovery-condition-preservation', 'aurora-fixture-recovery-condition-preservation-v1', questionProvider, questionModel
     ),
     taintDetector: deps.taintDetector,
     ledger: deps.ledger,
@@ -1066,8 +1980,11 @@ async function runQuestionsAgainstSnapshot(
 
   const results: EngineQuestionResult[] = [];
   for (const question of deps.questions) {
+    activeQuestionCaseId = question.caseId;
     console.log(`  [${runId}] ${question.caseId}: "${question.question.slice(0, 60)}..."`);
-    const result = await runEngineOnQuestionWithRetry(question, ctx);
+    const restored = questionJournal.load(question.caseId, question.question);
+    const result = restored ?? await runEngineOnQuestionWithRetry(question, ctx);
+    if (restored === undefined) questionJournal.save(question.caseId, question.question, result);
     console.log(`    -> ${result.actualDisposition}${result.errorMessage ? ` (${result.errorMessage})` : ''}`);
     results.push(result);
   }
@@ -1084,6 +2001,9 @@ interface ExtractionRunDeps {
   readonly traceLog: CallTraceLog;
   readonly embeddingProvider: OpenAIEmbeddingProvider;
   readonly embeddingModel: ReturnType<OpenAIEmbeddingProvider['modelInfo']>;
+  readonly questionModel: string;
+  readonly questionProvider: Provider;
+  readonly engineProfile: EngineProfile;
 }
 
 /** Previous invocation's write-through trace, retained only as an offline
@@ -1114,9 +2034,15 @@ async function runOneExtractionRun(
   const extractionRunConfig = resolveExtractionRunConfig({
     beforeProviderAttempt: () => ledger.reservePaidCall('extraction'),
   });
+  const { provider: questionProvider, model: questionModel } =
+    resolveQuestionStageTarget(args, extractionRunConfig);
   const focusedRepairRunConfig = {
     ...extractionRunConfig,
     beforeProviderAttempt: () => ledger.reservePaidCall('focused-repair'),
+  };
+  const exceptionRepairRunConfig = {
+    ...extractionRunConfig,
+    beforeProviderAttempt: () => ledger.reservePaidCall('exception-repair'),
   };
   const coverageAuditRunConfig = {
     ...extractionRunConfig,
@@ -1153,6 +2079,31 @@ async function runOneExtractionRun(
     allAttemptLogs.push(...attemptLog);
     return result;
   };
+  const retryingExceptionRepairExtractor = async (
+    options: ExceptionRepairOptions
+  ): Promise<ExtractKnowledgeUnitsResult> => {
+    const effective = { ...options, runConfig: exceptionRepairRunConfig };
+    const { result, attemptLog } = await withStructuredRetry(
+      () => extractExceptionRepairUnits(effective),
+      6,
+      'malformed exception repair',
+      ledger,
+      traceLog,
+      'exception-repair',
+      (value) => value.structuredResult.attempts,
+      (value) => ({
+        requestMessages: value.structuredResult.requestMessages ?? [],
+        responseText: value.structuredResult.rawText ?? null,
+      }),
+      {
+        runId,
+        stage: 'exception-repair',
+        blockAnchor: options.block.anchor,
+      }
+    );
+    allAttemptLogs.push(...attemptLog);
+    return result;
+  };
   const retryingFocusedRepairExtractor = async (options: FocusedRepairOptions): Promise<ExtractKnowledgeUnitsResult> => {
     const { result, attemptLog } = await extractFocusedRepairUnitsWithRetry(
       { ...options, runConfig: focusedRepairRunConfig },
@@ -1184,8 +2135,12 @@ async function runOneExtractionRun(
     return result;
   };
 
-  const embeddingProvider = new OpenAIEmbeddingProvider(() =>
-    ledger.reservePaidCall('corpus-embedding')
+  const embeddingProvider = new OpenAIEmbeddingProvider(
+    () => ledger.reservePaidCall('corpus-embedding'),
+    (attempt, texts) => recordEmbeddingAttempt(
+      'corpus-embedding', ledger, traceLog, attempt, texts,
+      { runId, stage: 'corpus-embedding' }
+    )
   );
   const embeddingModel = embeddingProvider.modelInfo();
   // Считается ДО любого платного вызова: в режиме переиспользования именно он
@@ -1214,6 +2169,8 @@ async function runOneExtractionRun(
     auditPromptFingerprint: probes.auditPromptFingerprint,
     auditPolicyFingerprint: probes.auditPolicyFingerprint,
     focusedRepairPolicyFingerprint: probes.focusedRepairPolicyFingerprint,
+    evidenceRefinementFingerprint: probes.evidenceRefinementFingerprint,
+    graphIntegrityPolicyFingerprint: probes.graphIntegrityPolicyFingerprint,
     identityAlgorithmFingerprint: probes.identityAlgorithmFingerprint,
     retrievalTextFingerprint: probes.retrievalTextFingerprint,
     embeddingProvider: embeddingModel.provider,
@@ -1231,6 +2188,9 @@ async function runOneExtractionRun(
       traceLog,
       embeddingProvider,
       embeddingModel,
+      questionProvider,
+      questionModel,
+      engineProfile: args.engineProfile,
     });
   }
 
@@ -1257,8 +2217,14 @@ async function runOneExtractionRun(
       policyFingerprint: probes.auditPolicyFingerprint,
     },
     repairContract: {
-      policyFingerprint: probes.focusedRepairPolicyFingerprint,
+      paidStageFingerprint: probes.focusedRepairPaidStageFingerprint,
+      malformedExceptionPolicyFingerprint: LEGACY_EXCEPTION_REPAIR_POLICY_FINGERPRINT,
       maxTokens: 4_000,
+      malformedExceptionMaxTokens: 8_000,
+    },
+    exceptionRepairContract: {
+      policyFingerprint: exceptionRepairPolicyFingerprint(),
+      maxTokens: 8_000,
     },
     legacyCombinedConfig: {
       promptVersion: extractionRunConfig.promptVersion,
@@ -1267,8 +2233,10 @@ async function runOneExtractionRun(
       auditPromptFingerprint: probes.auditPromptFingerprint,
       auditPolicyFingerprint: probes.auditPolicyFingerprint,
       focusedRepairPolicyFingerprint: probes.focusedRepairPolicyFingerprint,
+      malformedExceptionPolicyFingerprint: exceptionRepairPolicyFingerprint(),
       maxTokens: EXTRACTION_MAX_TOKENS,
       focusedRepairMaxTokens: 4_000,
+      malformedExceptionMaxTokens: 8_000,
       temperature: null,
       fallbackPolicy: extractionRunConfig.fallbackPolicy,
       requestTimeoutMs: extractionRunConfig.requestTimeoutMs ?? null,
@@ -1329,6 +2297,23 @@ async function runOneExtractionRun(
     );
   }
 
+  const exceptionRepaired = await resolveMalformedExceptions(
+    resampled.units,
+    blocksByAnchor,
+    canonical.sourceRevisionHash,
+    retryingExceptionRepairExtractor,
+    retryingAuditor,
+    { runConfig: exceptionRepairRunConfig, maxTokens: 8_000 },
+    MALFORMED_EXCEPTION_REPAIR_MAX_ROUNDS,
+    rawCheckpoint
+  );
+  if (exceptionRepaired.repairLogs.length > 0) {
+    console.log(
+      `malformed exception repair: ${exceptionRepaired.repairLogs.length} block replacement(s) ` +
+        `across ${new Set(exceptionRepaired.repairLogs.map((log) => log.blockAnchor)).size} block(s)`
+    );
+  }
+
   const snapshot = buildEvaluationSnapshot(
     {
       sourceRevisionHash: canonical.sourceRevisionHash,
@@ -1340,7 +2325,7 @@ async function runOneExtractionRun(
       extractionPromptVersion: extractionRunConfig.promptVersion,
       extractionSchemaVersion: extractionRunConfig.extractionSchemaVersion,
     },
-    resampled.units
+    exceptionRepaired.units
   );
 
   const unitsById = new Map(snapshot.units.map((u) => [u.unitId, u]));
@@ -1352,9 +2337,13 @@ async function runOneExtractionRun(
     unitId: u.unitId,
     retrievalText: buildRetrievalText(u, unitsById),
   }));
-  taintDetector.assertClean(candidates, `engine input (retrieval candidates, ${runId})`);
+  assertOracleTaintPolicy(taintDetector, 'ENGINE_INPUT', candidates, `engine input (retrieval candidates, ${runId})`);
 
-  const finalAuditResults = [...audited.auditResults, ...resampled.auditResults];
+  const finalAuditResults = [
+    ...audited.auditResults,
+    ...resampled.auditResults,
+    ...exceptionRepaired.auditResults,
+  ];
   const runDir = path.join(args.outDir, runId);
   mkdirSync(runDir, { recursive: true });
   const artifactPath = path.join(runDir, 'extraction-artifact.json');
@@ -1411,7 +2400,20 @@ async function runOneExtractionRun(
   writeExtractionArtifact(artifactPath, artifact);
   console.log(`  артефакт извлечения сохранён ДО вопросов: ${artifactPath} (для --reuse-extraction)`);
 
-  const results = await runQuestionsAgainstSnapshot(runId, snapshot, embeddedCandidates, unitsById, {
+  const readyDependencyGraph = await ensureDependencyGraph(runId, artifactPath, artifact, ledger, traceLog);
+  console.log(
+    `  граф зависимостей ${readyDependencyGraph.restored ? 'переиспользован' : 'построен и сохранён'}: ` +
+      `${readyDependencyGraph.artifactPath} (${readyDependencyGraph.graph.edges.length} edge(s))`
+  );
+
+  const results = await runQuestionsAgainstSnapshot(
+    runId,
+    snapshot,
+    embeddedCandidates,
+    unitsById,
+    readyDependencyGraph.graph,
+    readyDependencyGraph.artifact.contentDigest,
+    {
     args,
     questions,
     sourceRules,
@@ -1420,7 +2422,12 @@ async function runOneExtractionRun(
     traceLog,
     embeddingProvider,
     embeddingModel,
-  });
+    questionProvider,
+    questionModel,
+    engineProfile: args.engineProfile,
+    },
+    artifact.contentDigest
+  );
 
   return {
     runId,
@@ -1431,6 +2438,10 @@ async function runOneExtractionRun(
     batchLogs: audited.batchLogs,
     auditResults: finalAuditResults,
     focusedRetryLogs: audited.focusedRetryLogs,
+    dependencyGraphArtifactPath: readyDependencyGraph.artifactPath,
+    dependencyGraphArtifactContentDigest: readyDependencyGraph.artifact.contentDigest,
+    dependencyGraphFingerprint: readyDependencyGraph.graph.fingerprint,
+    dependencyGraphRestored: readyDependencyGraph.restored,
     artifact,
   };
 }
@@ -1475,7 +2486,7 @@ async function reuseExtractionRun(
     unitId: u.unitId,
     retrievalText: buildRetrievalText(u, unitsById),
   }));
-  deps.taintDetector.assertClean(candidates, `engine input (retrieval candidates, ${runId})`);
+  assertOracleTaintPolicy(deps.taintDetector, 'ENGINE_INPUT', candidates, `engine input (retrieval candidates, ${runId})`);
 
   let embeddedCandidates: EmbeddedCandidate[];
   if (artifact.phase === 'SEMANTIC_CHECKPOINT') {
@@ -1508,7 +2519,28 @@ async function reuseExtractionRun(
     );
   }
 
-  const results = await runQuestionsAgainstSnapshot(runId, snapshot, embeddedCandidates, unitsById, deps);
+  const readyDependencyGraph = await ensureDependencyGraph(
+    runId,
+    artifactPath,
+    artifact,
+    deps.ledger,
+    deps.traceLog
+  );
+  console.log(
+    `  граф зависимостей ${readyDependencyGraph.restored ? 'переиспользован' : 'построен и сохранён'}: ` +
+      `${readyDependencyGraph.artifactPath} (${readyDependencyGraph.graph.edges.length} edge(s))`
+  );
+
+  const results = await runQuestionsAgainstSnapshot(
+    runId,
+    snapshot,
+    embeddedCandidates,
+    unitsById,
+    readyDependencyGraph.graph,
+    readyDependencyGraph.artifact.contentDigest,
+    deps,
+    artifact.contentDigest
+  );
 
   return {
     runId,
@@ -1519,6 +2551,10 @@ async function reuseExtractionRun(
     batchLogs: artifact.batchLogs,
     auditResults: artifact.auditResults,
     focusedRetryLogs: artifact.focusedRetryLogs,
+    dependencyGraphArtifactPath: readyDependencyGraph.artifactPath,
+    dependencyGraphArtifactContentDigest: readyDependencyGraph.artifact.contentDigest,
+    dependencyGraphFingerprint: readyDependencyGraph.graph.fingerprint,
+    dependencyGraphRestored: readyDependencyGraph.restored,
     artifact: null,
   };
 }
@@ -1547,6 +2583,7 @@ const MAX_TAINT_RETRY_ATTEMPTS = 6;
  *  silently drift out of sync if this ever changes (Codex review, 2026-08-10,
  *  finding 4: the ceiling omitted this multiplier entirely). */
 const TAINT_RESAMPLE_MAX_ROUNDS = 3;
+const MALFORMED_EXCEPTION_REPAIR_MAX_ROUNDS = 2;
 
 /** Оборачивает `runOneExtractionRun` bounded-ретраем СПЕЦИФИЧНО на
  *  `OracleTaintError` — короткие формулировки в узком юридическом домене
@@ -1594,30 +2631,44 @@ async function runOneExtractionRunWithTaintRetry(
  * case" number would be worse than useless the one time a run actually hits
  * pathological retries, which is exactly when this estimate matters.
  */
+export function focusedRepairStructuredCallCeiling(
+  blockCount: number,
+  structuredRetryCeiling: number
+): number {
+  return blockCount * FOCUSED_REPAIR_MAX_ROUNDS * 2 * structuredRetryCeiling;
+}
+
 function printPreRunCeiling(blockCount: number, args: CliArgs, questionCount: number): void {
   const STRUCTURED_RETRY_CEILING = 6; // caller-level schema/transport retries
   const RAW_CHAT_ATTEMPTS_PER_STRUCTURED_CALL = 4; // primary + MAX_RETRIES=3; runner configs disable fallback
-  const MAX_DECISION_RELEVANCE_CALLS_PER_QUESTION = 5; // retrieval finalLimit
+  const EMBEDDING_RAW_ATTEMPT_CEILING = 3;
+  const DECISION_RELEVANCE_STAGE_ATTEMPT_CEILING = 3;
   const batchCount = Math.ceil(blockCount / args.batchSize);
   const structuredCallsPerExtractionAttempt =
     // initial extraction + initial audit
     (batchCount + blockCount) * STRUCTURED_RETRY_CEILING +
-    // focused repair extraction + mandatory repair re-audit for every block
-    blockCount * 2 * STRUCTURED_RETRY_CEILING +
+    // each focused repair round is one extraction + one mandatory full re-audit
+    focusedRepairStructuredCallCeiling(blockCount, STRUCTURED_RETRY_CEILING) +
     // every targeted taint replacement is both re-extracted and re-audited
-    blockCount * TAINT_RESAMPLE_MAX_ROUNDS * 2 * STRUCTURED_RETRY_CEILING;
+    blockCount * TAINT_RESAMPLE_MAX_ROUNDS * 2 * STRUCTURED_RETRY_CEILING +
+    // malformed EXCEPTION_RULE replacement + coverage audit, bounded by round
+    blockCount * MALFORMED_EXCEPTION_REPAIR_MAX_ROUNDS * 2 * STRUCTURED_RETRY_CEILING +
+    // global dependency proposal + up to two repair/re-audit rounds
+    dependencyGraphStructuredCallCeiling() * DEPENDENCY_GRAPH_STAGE_MAX_ATTEMPTS;
   const extractionRawCalls =
     structuredCallsPerExtractionAttempt *
     RAW_CHAT_ATTEMPTS_PER_STRUCTURED_CALL *
     MAX_TAINT_RETRY_ATTEMPTS;
-  const corpusEmbeddingCalls = MAX_TAINT_RETRY_ATTEMPTS;
+  const corpusEmbeddingCalls = MAX_TAINT_RETRY_ATTEMPTS * EMBEDDING_RAW_ATTEMPT_CEILING;
   const rawCallsPerQuestionAttempt =
-    // query-frame + reranker + synthesis
-    3 * RAW_CHAT_ATTEMPTS_PER_STRUCTURED_CALL +
-    // one query embedding
-    1 +
-    // classifier may run once for every retrieved candidate
-    MAX_DECISION_RELEVANCE_CALLS_PER_QUESTION * RAW_CHAT_ATTEMPTS_PER_STRUCTURED_CALL;
+    // query-frame + reranker + synthesis + worst-case
+    // challenge compatibility + condition preservation + one bounded recovery
+    // synthesis/condition/challenge round
+    8 * RAW_CHAT_ATTEMPTS_PER_STRUCTURED_CALL +
+    // decision relevance retries locally after retrieval
+    DECISION_RELEVANCE_STAGE_ATTEMPT_CEILING * RAW_CHAT_ATTEMPTS_PER_STRUCTURED_CALL +
+    // query embedding retries locally without rebuilding the query frame
+    EMBEDDING_RAW_ATTEMPT_CEILING;
   const questionCalls =
     rawCallsPerQuestionAttempt * MAX_ENGINE_QUESTION_RETRY_ATTEMPTS * questionCount;
   const paidCallCeiling =
@@ -1628,16 +2679,13 @@ function printPreRunCeiling(blockCount: number, args: CliArgs, questionCount: nu
   console.log(`  extraction-runs: ${args.extractionRuns}, questions: ${questionCount}`);
   console.log(
     `  worst-case paid provider-request ceiling: ${paidCallCeiling} ` +
-      `(includes repair re-audit, taint re-audit, decision relevance, corpus/query embeddings, reranking, and all chat-provider retries)`
+      `(includes coverage/focused/taint/exception/dependency-graph calls, decision relevance, challenge compatibility, condition preservation, corpus/query embeddings, reranking, and all chat-provider retries)`
   );
   console.log(
     `  --max-cost-usd=${args.maxCostUsd} — the run aborts the moment cumulative metered spend exceeds this, independent of the ceiling above`
   );
   console.log(
     `  --max-paid-calls=${args.maxPaidCalls} — hard raw-request reservation ceiling; no provider request starts after this many reservations`
-  );
-  console.log(
-    `  NOT included in dollar totals (but included in --max-paid-calls): ${UNMETERED_PURPOSES.map((p) => p.purpose).join(', ')}.`
   );
 }
 
@@ -1788,6 +2836,13 @@ async function main() {
         taintedShingleCount: taintDetector.taintedShingleCount,
         unguardedSecretCount: taintDetector.unguardedSecretCount,
         runIds: runs.map((r) => r.runId),
+        dependencyGraphsByRun: runs.map((run) => ({
+          runId: run.runId,
+          artifactPath: run.dependencyGraphArtifactPath,
+          artifactContentDigest: run.dependencyGraphArtifactContentDigest,
+          graphFingerprint: run.dependencyGraphFingerprint,
+          restored: run.dependencyGraphRestored,
+        })),
         dispositionCountsByRun: runs.map((r) => ({
           runId: r.runId,
           DIRECT_ANSWER: r.results.filter((x) => x.actualDisposition === 'DIRECT_ANSWER').length,
@@ -1804,12 +2859,6 @@ async function main() {
           reservedPaidCallCount: ledger.totalReservedPaidCalls(),
           maxPaidCalls: args.maxPaidCalls,
           byPurpose: ledger.summaryByPurpose(),
-          // Честно, а не молчаливым занижением: reranker и extraction/audit/
-          // query-frame/synthesis метрятся, но decision-relevance (LLM-путь
-          // для неопределённых EXCEPTION_RULE-кандидатов) и embeddings — ЕЩЁ
-          // нет (см. UNMETERED_PURPOSES). totalUsd — нижняя граница, не полная
-          // стоимость прогона, пока эти два пути не подключены.
-          unmeteredPurposes: UNMETERED_PURPOSES,
         },
         callTracePath,
         abortedBy: abortedBy instanceof Error ? abortedBy.message : abortedBy ? String(abortedBy) : null,
@@ -1820,7 +2869,7 @@ async function main() {
     'utf8'
   );
 
-  console.log('\n=== COST (Task 37 — нижняя граница, см. unmeteredPurposes ниже) ===');
+  console.log('\n=== COST (Task 37 — exact metered external usage) ===');
   for (const s of ledger.summaryByPurpose()) {
     console.log(
       `  ${s.purpose}: ${s.callCount} call(s), ${s.attemptCount} attempt(s), $${s.totalUsd.toFixed(4)}` +
@@ -1829,9 +2878,6 @@ async function main() {
   }
   console.log(`  TOTAL (metered): $${ledger.totalUsd().toFixed(4)} across ${ledger.totalAttemptCount()} attempt(s)`);
   console.log(`  PAID-CALL RESERVATIONS: ${ledger.totalReservedPaidCalls()}/${args.maxPaidCalls}`);
-  console.log(
-    `  NOT YET METERED: ${UNMETERED_PURPOSES.map((p) => `${p.purpose} (${p.reason})`).join('; ')} — real spend is higher than the total above.`
-  );
   console.log(`  full request/response trace (every call, incl. failed retries): ${callTracePath}`);
 
   if (abortedBy) {

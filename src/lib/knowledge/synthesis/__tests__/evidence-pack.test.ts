@@ -105,6 +105,38 @@ describe('buildEvidencePack — граница «только выбранное
 });
 
 describe('buildEvidencePack — цитаты и числа', () => {
+  it('carries recognized effective trigger evidence and negative mode into presentation conditions', () => {
+    const pack = buildEvidencePack(
+      [unit()],
+      resolution({
+        selectedApplicability: [{
+          unitId: 'u1',
+          mode: 'NEGATIVE',
+          presentationConditions: ['только при явном согласии'],
+        }],
+      })
+    );
+    expect(pack.items[0]).toMatchObject({
+      applicabilityMode: 'NEGATIVE',
+      presentationConditions: ['только при явном согласии'],
+    });
+  });
+
+  it('negative numeric evidence is visible for denial but cannot ground a positive numeric claim', () => {
+    const negative = unit({ numericConstraint: { factKey: 'maximum', value: 3, unit: 'times' } });
+    const pack = buildEvidencePack(
+      [negative],
+      resolution({
+        selected: [],
+        negativeEvidence: ['u1'],
+        selectedApplicability: [{ unitId: 'u1', mode: 'NEGATIVE', presentationConditions: ['только при согласии'] }],
+      })
+    );
+    expect(pack.items).toHaveLength(1);
+    expect(pack.items[0].numericConstraint?.value).toBe(3);
+    expect(pack.numericFacts).toEqual([]);
+  });
+
   it('цитата берётся из source anchor, а не из порядкового номера кандидата', () => {
     const pack = buildEvidencePack(
       [unit({ sourceSpan: span('anchor-42', 'цитата из источника') })],
@@ -160,5 +192,95 @@ describe('buildEvidencePack — цитаты и числа', () => {
     expect(() =>
       buildEvidencePack([unit(), unit({ statement: 'другое' })], resolution())
     ).toThrow(/u1/);
+  });
+});
+
+describe('buildEvidencePack — overridden direct-parent supporting context', () => {
+  const child = (id: string, parentRuleRef: string) => unit({
+    unitId: id,
+    kind: 'EXCEPTION_RULE',
+    parentRuleRef,
+    triggerCondition: { all: [{ fact: 'privacyContext', equals: 'PUBLIC' }] },
+    statement: `Исключение ${id}`,
+  });
+
+  it('keeps a direct overridden parent as non-operative context without reselecting it', () => {
+    const parent = unit({
+      unitId: 'parent',
+      statement: 'Не более 3 секунд, затем перейти в уединённое место; не повторять.',
+      numericConstraint: { factKey: 'max_seconds', value: 3, unit: 'seconds' },
+    });
+    const pack = buildEvidencePack(
+      [parent, child('exception', 'parent')],
+      resolution({ selected: ['exception'], overridden: [{ unitId: 'parent', byUnitId: 'exception' }] })
+    );
+
+    expect(pack.items.map((item) => item.unitId)).toEqual(['exception']);
+    expect(pack.supportingContext).toEqual([
+      expect.objectContaining({
+        role: 'OVERRIDDEN_PARENT_CONTEXT',
+        unitId: 'parent',
+        overriddenByUnitId: 'exception',
+      }),
+    ]);
+    expect(pack.numericFacts).toEqual([]);
+  });
+
+  it('excludes a grandparent when its overrider was itself overridden', () => {
+    const pack = buildEvidencePack(
+      [unit({ unitId: 'grandparent' }), child('parent-exception', 'grandparent'), child('selected-exception', 'parent-exception')],
+      resolution({
+        selected: ['selected-exception'],
+        overridden: [
+          { unitId: 'grandparent', byUnitId: 'parent-exception' },
+          { unitId: 'parent-exception', byUnitId: 'selected-exception' },
+        ],
+      })
+    );
+    expect(pack.supportingContext?.map((item) => item.unitId)).toEqual(['parent-exception']);
+  });
+
+  it.each([
+    {
+      name: 'dangling unit',
+      units: [child('exception', 'missing')],
+      edge: { unitId: 'missing', byUnitId: 'exception' },
+    },
+    {
+      name: 'non-exception child',
+      units: [unit({ unitId: 'parent' }), unit({ unitId: 'child', parentRuleRef: 'parent' })],
+      edge: { unitId: 'parent', byUnitId: 'child' },
+    },
+    {
+      name: 'wrong direct parent',
+      units: [unit({ unitId: 'parent' }), unit({ unitId: 'other' }), child('exception', 'other')],
+      edge: { unitId: 'parent', byUnitId: 'exception' },
+    },
+  ])('fails closed for fabricated $name edge', ({ units, edge }) => {
+    expect(() => buildEvidencePack(units, resolution({ selected: [edge.byUnitId], overridden: [edge] }))).toThrow();
+  });
+
+  it('fails closed for duplicate edges', () => {
+    const edge = { unitId: 'parent', byUnitId: 'exception' };
+    expect(() => buildEvidencePack(
+      [unit({ unitId: 'parent' }), child('exception', 'parent')],
+      resolution({ selected: ['exception'], overridden: [edge, edge] })
+    )).toThrow(/duplicate/);
+  });
+
+  it('fails closed instead of exposing a parent number contradicted by the selected child', () => {
+    const parent = unit({
+      unitId: 'parent',
+      numericConstraint: { factKey: 'max_seconds', value: 10, unit: 'seconds' },
+    });
+    const exception = child('exception', 'parent');
+    const conflictingChild = {
+      ...exception,
+      numericConstraint: { factKey: 'max_seconds', value: 3, unit: 'seconds' },
+    } satisfies PersistedKnowledgeUnit;
+    expect(() => buildEvidencePack(
+      [parent, conflictingChild],
+      resolution({ selected: ['exception'], overridden: [{ unitId: 'parent', byUnitId: 'exception' }] })
+    )).toThrow(/selected-child precedence/);
   });
 });

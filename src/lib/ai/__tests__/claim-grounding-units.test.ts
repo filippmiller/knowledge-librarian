@@ -21,6 +21,28 @@ const claimSet = (text: string) =>
   new Set(extractRiskyClaims(text).map((c) => `${c.unit}:${c.value}`));
 
 describe('единицы учебного домена', () => {
+  it('Q04-N1 prefers the nearest seconds unit and does not fabricate 30 cycles', () => {
+    const answer = 'Даже при соблюдении паузы в 30 секунд цикл нельзя повторять бесконечно; разрешено не более трёх таких циклов.';
+    const claims = claimSet(answer);
+    expect(claims).toContain('second:30');
+    expect(claims).toContain('cycle:3');
+    expect(claims).not.toContain('cycle:30');
+    expect(checkClaimGrounding(answer, [
+      'После непрерывного почёсывания требуется пауза не менее 30 секунд.',
+      'За один эпизод разрешено не более трёх таких циклов.',
+    ]).grounded).toBe(true);
+  });
+
+  it.each([
+    ['После 5 минут часов ожидания.', 'minute:5', 'hour:5'],
+    ['После 2 дней недель ожидания.', 'day:2', 'week:2'],
+    ['После 4 часов минут ожидания.', 'hour:4', 'minute:4'],
+  ])('recognized unit cannot be swallowed as GAP: %s', (text, nearest, fabricated) => {
+    const claims = claimSet(text);
+    expect(claims).toContain(nearest);
+    expect(claims).not.toContain(fabricated);
+  });
+
   it('распознаёт секунды', () => {
     expect(claimSet('не дольше 15 секунд подряд')).toContain('second:15');
   });
@@ -77,6 +99,10 @@ describe('числительные словами', () => {
 });
 
 describe('числительные словами не создают ложных утверждений', () => {
+  it('date and clock syntax remain non-claims without an adjacent unit', () => {
+    expect(extractRiskyClaims('Встреча 07.08.2026 в 15:30.')).toEqual([]);
+  });
+
   it('«один из способов» — не количественное утверждение', () => {
     expect(extractRiskyClaims('Один из способов — перейти в уединённое место.')).toEqual([]);
   });

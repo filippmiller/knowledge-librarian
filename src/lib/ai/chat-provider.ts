@@ -43,6 +43,8 @@ export interface CompletionRunConfig {
    *  raw provider request, including transport retries and fallback. Throwing
    *  prevents that request from starting. Runtime-only; never persisted. */
   beforeProviderAttempt?: (attempt: { provider: Provider; model: string }) => void;
+  /** Structured-output observer for exact post-call usage accounting. */
+  onCompletionAttempts?: (attempts: readonly CompletionAttempt[]) => void;
 }
 
 export interface ChatCompletionOptions extends Partial<CompletionRunConfig> {
@@ -432,6 +434,9 @@ export function resolveRunConfig(
     totalDeadlineMs: options.totalDeadlineMs,
     ...(options.beforeProviderAttempt && {
       beforeProviderAttempt: options.beforeProviderAttempt,
+    }),
+    ...(options.onCompletionAttempts && {
+      onCompletionAttempts: options.onCompletionAttempts,
     }),
   };
 }

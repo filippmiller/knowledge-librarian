@@ -83,6 +83,68 @@ export interface OracleTaintDetector {
   readonly unguardedSecretCount: number;
 }
 
+/**
+ * Versioned information-flow policy. It is deliberately part of the question
+ * journal fingerprint: changing which boundaries are guarded must invalidate
+ * terminal cached results produced under the old policy.
+ *
+ * Generated answers are not a taint boundary. Matching the oracle there is
+ * the goal of the benchmark, and a source-grounded paraphrase cannot be
+ * distinguished from oracle access by lexical comparison. Oracle data is
+ * instead stopped before it can enter the engine or a trusted artifact.
+ */
+export const ORACLE_TAINT_POLICY_VERSION = 'oracle-taint-input-artifact-boundaries-v2';
+
+export type OracleTaintBoundary = 'ENGINE_INPUT' | 'ARTIFACT' | 'GENERATED_OUTPUT';
+
+export function assertOracleTaintPolicy(
+  detector: OracleTaintDetector,
+  boundary: OracleTaintBoundary,
+  payload: unknown,
+  label: string
+): void {
+  if (boundary === 'GENERATED_OUTPUT') return;
+  detector.assertClean(payload, label);
+}
+
+/** Executes the real boundary policy on a deterministic oracle-only phrase.
+ * The result is embedded in resumable-journal fingerprints, so changing
+ * boundary behavior invalidates cached terminal answers even if a developer
+ * forgets to bump the descriptive version string. */
+export function oracleTaintPolicyBehaviorProbe(): Readonly<{
+  engineInputRejects: boolean;
+  artifactRejects: boolean;
+  generatedOutputRejects: boolean;
+}> {
+  const oracle: OracleCase[] = [{
+    id: '__taint_policy_probe__',
+    question: 'public probe question',
+    expectedRuleIds: [1],
+    expectedAnswer: 'alphaonly betaonly gammaonly deltaonly epsilononly zetaonly etaonly thetaonly',
+    matchReason: 'iotaonly kappaonly lambdaonly muonly nuonly xionly omicrononly pionly',
+    negativeCases: [],
+  }];
+  const detector = buildOracleTaintDetector({
+    oracle,
+    sourceText: 'unrelated public source words that contain no protected probe phrase',
+  });
+  const payload = { text: oracle[0].expectedAnswer };
+  const rejects = (boundary: OracleTaintBoundary): boolean => {
+    try {
+      assertOracleTaintPolicy(detector, boundary, payload, `policy probe ${boundary}`);
+      return false;
+    } catch (error) {
+      if (error instanceof OracleTaintError) return true;
+      throw error;
+    }
+  };
+  return {
+    engineInputRejects: rejects('ENGINE_INPUT'),
+    artifactRejects: rejects('ARTIFACT'),
+    generatedOutputRejects: rejects('GENERATED_OUTPUT'),
+  };
+}
+
 /** Регистр, пунктуация и кратные пробелы не должны служить обходом проверки. */
 function normalize(text: string): string[] {
   return text
