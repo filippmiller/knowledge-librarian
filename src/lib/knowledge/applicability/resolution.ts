@@ -39,6 +39,27 @@ export interface EvaluatedCandidate {
   /** Source-backed proof that this trigger is a necessary (not merely
    * sufficient) condition, so its falsity can justify a denial. */
   readonly negativeInferenceAllowed?: boolean;
+  /**
+   * Identity of the structural source block this unit was extracted from
+   * (`PersistedKnowledgeUnit.sourceBlockAnchor`, `identity-assignment.ts`).
+   * Optional here — NOT because a real persisted unit can lack one (it can't:
+   * `persistedKnowledgeUnitSchema` requires a non-blank string) — but because
+   * `EvaluatedCandidate` is also hand-built by tests/callers that predate
+   * this field. Two candidates count as "siblings" for the sibling veto in
+   * `resolveKnowledgeSet` ONLY when both carry the SAME defined anchor;
+   * `undefined` never matches another `undefined`, so an unset anchor means
+   * "no block linkage available", not "same block as every other unset
+   * candidate".
+   *
+   * Anchor over `parentRuleRef` for this check because a live evaluation run
+   * measured `parentRuleRef` as unreliable across extraction runs (an
+   * umbrella parent invented to link co-mandatory siblings is exactly what
+   * disciplined extraction stopped fabricating — translation-rw3, audit
+   * 2026-08-08-extraction-stability-fragmentation-report.md §4), while
+   * `sourceBlockAnchor` — derived from source position, not from a
+   * potentially-missing extraction link — stays stable.
+   */
+  readonly sourceBlockAnchor?: string;
   /** На какое правило это исключение навешано (§2.1, обязательно для исключений). */
   readonly parentRuleRef: string | null;
   /** Явная замена: единственный способ разрешить конфликт чисел без человека. */
@@ -279,6 +300,104 @@ export function resolveKnowledgeSet(
   }
 
   const byId = new Map(candidates.map((candidate) => [candidate.unitId, candidate]));
+
+  // ── Шаг 1.5. Вето соседа по блоку (`sourceBlockAnchor`) ────────────────────
+  //
+  // Ни один шаг выше не смотрит на соседей по source-блоку — только на цепочку
+  // `parentRuleRef` (шаг 3) или на собственный `triggerCondition` юнита (шаг 1
+  // выше). Пока экстракция ошибочно выдумывала общего родителя для совместно
+  // обязательных фрагментов, это было случайной страховкой. Реальный сбой
+  // (goal-shift benchmark, регрессия 6/6 → 3/6 негативных случаев после
+  // дисциплинированной реэкстракции; см. `translation-rw3` и
+  // `.claude/audits/2026-08-08-extraction-stability-fragmentation-report.md`
+  // §4 — там же измерено, что `parentRuleRef` НЕНАДЁЖЕН между прогонами, а
+  // `sourceBlockAnchor` стабилен): вопрос «муж может почесать спящей жене,
+  // раз она раньше не возражала?» — consent-гейт `a40ffc867393ca19`
+  // достоверно решён НЕГАТИВНО (`consentStatus_violated`, ушёл в
+  // `negativeEvidenceIds` на шаге 1 выше), а его сосед по тому же блоку
+  // `e1218dd9d534e665` («наденьте чистые перчатки, соблюдайте лимиты силы и
+  // времени, остановитесь по первой просьбе») не несёт СОБСТВЕННОГО условия
+  // (`trigger === null`) и молча падал в `selectedIds` — операционная
+  // инструкция «как делать» подавалась как основание для ситуации, которую
+  // движок только что признал недопустимой.
+  //
+  // Кто ГОЛОСУЕТ «вето» — только кандидат, реально попавший в
+  // `negativeEvidenceIds` по итогам шага 1. Это самое узкое достоверное
+  // прочтение «соседа, достоверно определённого как отрицательный»:
+  // `negativeEvidenceIds` уже само по себе означает «trigger.verdict ===
+  // INACTIVE, И источник доказывает, что это условие НЕОБХОДИМОЕ»
+  // (`negativeInferenceAllowed`, см. `hasSourceBackedNecessaryCondition` в
+  // `knowledge-unit-adapter.ts`) — то есть именно то место, где решатель уже
+  // согласился использовать отрицание для обоснования отказа. В частности НЕ
+  // голосуют:
+  //   • сосед, выбывший по `scope_conflict`/`candidate_ineligible`/UNKNOWN —
+  //     причина вообще не связана с отрицанием триггера («excluded for an
+  //     unrelated reason»);
+  //   • сосед-`EXCEPTION_RULE` с INACTIVE-триггером (excluded
+  //     `exception_trigger_inactive`) — «это исключение не сработало» не
+  //     доказывает ничего про весь блок, общее правило просто действует как
+  //     обычно;
+  //   • сосед с `semanticRelevance === 'IRRELEVANT'` (excluded
+  //     `exception_trigger_inactive`) — причина заведомо не относится к
+  //     текущему запросу;
+  //   • сосед с INACTIVE-триггером, но БЕЗ `negativeInferenceAllowed`
+  //     (excluded `exception_trigger_inactive`; см. тест "false generic
+  //     sufficient condition ... cannot prove a denial") — сам движок уже
+  //     решил, что на этом отрицании нельзя строить отказ, и вето по нему
+  //     доверяло бы сигналу больше, чем доверяет ему сам resolveKnowledgeSet.
+  // Сосед, который лишь УДЕРЖАН (`scope_unknown_held`/`exception_trigger_unknown`)
+  // или которого просто нет среди кандидатов, тоже не голосует — это
+  // «отсутствует/неопределено», а не «достоверно отрицательно».
+  //
+  // Множество-причина (`provenNegativeSiblingIds`) — СНИМОК состояния ДО этого
+  // цикла, а не то, что читается по ходу: кандидат, ставший negativeEvidence
+  // ТОЛЬКО из-за этого самого вето, сам никогда не проходит критерий
+  // «достоверно отрицательный» (у него `trigger === null` — он in principle не
+  // может попасть в `negativeEvidenceIds` шага 1) и потому не может быть
+  // причиной чужого вето. Снимок делает этот факт структурным гарантом, а не
+  // зависимостью от порядка обхода `[...selectedIds]` ниже — результат
+  // одинаков при любом порядке `candidates` на входе.
+  //
+  // Кандидат уходит в `negativeEvidenceIds`, а НЕ в `excluded` и НЕ в
+  // `undetermined`. `excluded` — про кандидатов, выбывших по достоверному
+  // основанию ИХ САМИХ (§3 conflict, негодность и т.п.); этот кандидат не
+  // ложен и не негоден сам по себе — `ResolutionDecision.negativeEvidence`
+  // прямо документирован как «Non-operative evidence usable only to explain a
+  // denial», ровно то, чем этот кандидат становится. `undetermined` — про
+  // судьбу, которая ДЕЙСТВИТЕЛЬНО неизвестна и может решиться вопросом
+  // пользователю; здесь неизвестности нет — сосед уже дал достоверный ответ,
+  // спрашивать нечего, и `isDecisive`/clarification-логика шага 5 не должна
+  // на этот кандидат реагировать (он и не должен быть виден в `viableIds`).
+  //
+  // `EXCEPTION_RULE` исключён из вето целиком: у него собственная, отдельно
+  // проверяемая семантика активации (§4.1 п.2, шаг 3 ниже) — вето по соседям
+  // дублировало бы её или ей противоречило.
+  const siblingsByAnchor = new Map<string, string[]>();
+  for (const candidate of candidates) {
+    if (candidate.sourceBlockAnchor === undefined) continue;
+    const list = siblingsByAnchor.get(candidate.sourceBlockAnchor);
+    if (list) list.push(candidate.unitId);
+    else siblingsByAnchor.set(candidate.sourceBlockAnchor, [candidate.unitId]);
+  }
+  const provenNegativeSiblingIds = new Set(negativeEvidenceIds);
+  for (const unitId of [...selectedIds]) {
+    const candidate = byId.get(unitId);
+    if (candidate === undefined) continue;
+    if (candidate.trigger !== null) continue;
+    if (candidate.kind === 'EXCEPTION_RULE') continue;
+    if (candidate.sourceBlockAnchor === undefined) continue;
+
+    const siblingIds = siblingsByAnchor.get(candidate.sourceBlockAnchor) ?? [];
+    const hasProvenNegativeSibling = siblingIds.some(
+      (siblingId) => siblingId !== unitId && provenNegativeSiblingIds.has(siblingId)
+    );
+    if (!hasProvenNegativeSibling) continue;
+
+    const position = selectedIds.indexOf(unitId);
+    if (position >= 0) selectedIds.splice(position, 1);
+    negativeEvidenceIds.push(unitId);
+    addReason('vetoed_by_negative_sibling');
+  }
 
   // ── Шаг 2. Явная замена (`supersedes`) ────────────────────────────────────
   //
@@ -535,12 +654,27 @@ export function resolveKnowledgeSet(
       ? 'HOLD'
       : 'ANSWER';
 
+  // Членство в `negativeEvidenceIds` проверяется ПЕРВЫМ и решает `mode`
+  // самостоятельно. Нужно для шага 1.5: кандидат, попавший туда через вето
+  // соседа, не имеет СОБСТВЕННОГО `trigger.verdict === 'INACTIVE'` (у него
+  // `trigger === null`), поэтому старая формула (условие по
+  // `candidate.trigger?.verdict`) присвоила бы ему `NORMAL` внутри массива
+  // негативных доказательств — то есть `applicabilityMode`, по которому
+  // `buildEvidencePack` решает, можно ли называть числа кандидата фактами
+  // (`numericFacts`, фильтр `applicabilityMode !== 'NEGATIVE'`), молчаливо
+  // соврал бы. Для исходного (шага 1) пути в `negativeEvidenceIds` порядок
+  // проверок ничего не меняет: кандидат с `trigger.verdict === 'INACTIVE'` и
+  // `kind !== 'EXCEPTION_RULE'` либо уже находится в `negativeEvidenceIds`,
+  // либо выбыл в `excluded` — самостоятельно в `selectedIds` он остаться не
+  // может (шаг 1 выше), так что этот кандидат никогда не встречает первую
+  // ветку по ошибке.
+  const negativeEvidenceIdSet = new Set(negativeEvidenceIds);
   const selectedApplicability = [...selectedIds, ...negativeEvidenceIds].map((unitId) => {
     const candidate = byId.get(unitId)!;
-    const mode = candidate.kind !== 'EXCEPTION_RULE' && candidate.trigger?.verdict === 'UNKNOWN'
-      ? 'CONDITIONAL' as const
-      : candidate.kind !== 'EXCEPTION_RULE' && candidate.trigger?.verdict === 'INACTIVE'
-        ? 'NEGATIVE' as const
+    const mode = negativeEvidenceIdSet.has(unitId)
+      ? 'NEGATIVE' as const
+      : candidate.kind !== 'EXCEPTION_RULE' && candidate.trigger?.verdict === 'UNKNOWN'
+        ? 'CONDITIONAL' as const
         : 'NORMAL' as const;
     return {
       unitId,

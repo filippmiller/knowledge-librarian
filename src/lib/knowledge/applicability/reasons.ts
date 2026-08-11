@@ -212,6 +212,22 @@ export const RESOLUTION_REASON_CODES = [
   'candidate_requires_human_review',
   /** Выбирать не из чего — но удержанные кандидаты остаются видимыми. */
   'no_selected_candidates',
+  /**
+   * Кандидат БЕЗ собственного `triggerCondition` (кроме `EXCEPTION_RULE` — у
+   * него отдельная семантика активации, §4.1 п.2) не попал в `selected`,
+   * потому что ДРУГОЙ кандидат, делящий с ним `sourceBlockAnchor`, достоверно
+   * определён как отрицательный: реально попал в `negativeEvidence` по
+   * итогам шага 1 (`trigger.verdict === 'INACTIVE'` И источник доказывает
+   * необходимость условия — `negativeInferenceAllowed`). Сам кандидат при
+   * этом не ложен и не негоден — он уходит в `negativeEvidence` вместе с
+   * соседом, а не в `excluded`: его нельзя предъявлять как самостоятельную
+   * операционную инструкцию, пока сосед доказывает, что действие в целом не
+   * разрешено, но как часть объяснения отказа он остаётся полезен. Сосед,
+   * лишь удержанный/отсутствующий/исключённый по несвязанной причине
+   * (scope, eligibility, недоказанное отрицание), голоса не имеет — см.
+   * комментарий у шага 1.5 в `resolveKnowledgeSet`.
+   */
+  'vetoed_by_negative_sibling',
 ] as const;
 
 export type ResolutionReasonCode = (typeof RESOLUTION_REASON_CODES)[number];

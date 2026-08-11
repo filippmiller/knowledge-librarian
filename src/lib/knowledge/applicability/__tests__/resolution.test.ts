@@ -955,3 +955,175 @@ describe('решение объясняет себя', () => {
     ]);
   });
 });
+
+describe('вето соседа по блоку (`sourceBlockAnchor`) — Fix 1, 2026-08-11', () => {
+  /**
+   * Точная форма реального сбоя (goal-shift benchmark, регрессия негативных
+   * случаев 6/6 → 3/6 после дисциплинированной реэкстракции): вопрос "муж
+   * может почесать спящей жене, раз она раньше не возражала?". Consent-гейт
+   * (`triggerCondition`: требуется явное согласие) без согласия достоверно
+   * НЕГАТИВЕН — попадает в `negativeEvidence`. Его сосед по тому же
+   * `sourceBlockAnchor` — "наденьте перчатки, соблюдайте лимиты силы и
+   * времени, остановитесь по первой просьбе" — не несёт СОБСТВЕННОГО условия
+   * (`trigger: null`) и раньше молча уходил в `selected`, подавая
+   * операционную инструкцию как основание для ситуации, которую движок уже
+   * признал недопустимой.
+   */
+  const consentAbsent = () => triggerFactDecision('consentStatus', 'EXPLICIT', 'ABSENT');
+
+  it('кандидат без триггера, чей сосед по блоку достоверно отрицателен (в negativeEvidence), НЕ выбирается — уходит в negativeEvidence вместе с ним', () => {
+    const gate = candidate({
+      unitId: 'consent-gate',
+      trigger: consentAbsent(),
+      negativeInferenceAllowed: true,
+      sourceBlockAnchor: 'block-help',
+    });
+    const howTo = candidate({
+      unitId: 'how-to-help',
+      sourceBlockAnchor: 'block-help',
+    });
+
+    const decision = resolveKnowledgeSet([gate, howTo], QUERY);
+
+    expect(decision.selected).toEqual([]);
+    expect(decision.negativeEvidence).toEqual(['consent-gate', 'how-to-help']);
+    expect(decision.excluded).toEqual([]);
+    expect(decision.undetermined).toEqual([]);
+    expect(decision.reasons).toContain('vetoed_by_negative_sibling');
+    expect(decision.selectedApplicability).toContainEqual(
+      expect.objectContaining({ unitId: 'how-to-help', mode: 'NEGATIVE' })
+    );
+    // Отказ остаётся уверенным ANSWER (с negativeEvidence как основанием), а
+    // не вырождается в HOLD: система ЗНАЕТ, почему отказывает.
+    expect(decision.disposition).toBe('ANSWER');
+  });
+
+  it('тот же кандидат БЕЗ соседа вообще — выбирается как прежде (ветировать нечем)', () => {
+    const howTo = candidate({ unitId: 'how-to-help', sourceBlockAnchor: 'block-help' });
+
+    const decision = resolveKnowledgeSet([howTo], QUERY);
+
+    expect(decision.selected).toEqual(['how-to-help']);
+    expect(decision.reasons).not.toContain('vetoed_by_negative_sibling');
+  });
+
+  it('сосед лишь УДЕРЖАН (scope неизвестен) — не голосует, кандидат выбирается как прежде', () => {
+    const howTo = candidate({ unitId: 'how-to-help', sourceBlockAnchor: 'block-help' });
+    const heldSibling = candidate({
+      unitId: 'held-sibling',
+      sourceBlockAnchor: 'block-help',
+      scope: evaluateScope(buildProfile('PROCEDURE_STEP', { scenario: { state: 'UNKNOWN' } }), QUERY),
+    });
+
+    const decision = resolveKnowledgeSet([howTo, heldSibling], QUERY);
+
+    expect(decision.selected).toEqual(['how-to-help']);
+    expect(decision.undetermined).toEqual([{ unitId: 'held-sibling', reason: 'scope_unknown_held' }]);
+    expect(decision.disposition).toBe('ANSWER');
+    expect(decision.reasons).not.toContain('vetoed_by_negative_sibling');
+  });
+
+  it('сосед выбыл по НЕСВЯЗАННОЙ причине (scope CONFLICT) — не голосует, кандидат выбирается как прежде', () => {
+    const howTo = candidate({ unitId: 'how-to-help', sourceBlockAnchor: 'block-help' });
+    const conflicting = candidate({
+      unitId: 'conflicting-sibling',
+      sourceBlockAnchor: 'block-help',
+      scope: evaluateScope(
+        buildProfile('PROCEDURE_STEP', { scenario: scoped(['apostille.min_justice']) }),
+        buildQuery({ facets: { scenario: known(['apostille.zags.spb']) } })
+      ),
+    });
+
+    const decision = resolveKnowledgeSet([howTo, conflicting], QUERY);
+
+    expect(decision.selected).toEqual(['how-to-help']);
+    expect(decision.excluded).toEqual([{ unitId: 'conflicting-sibling', reason: 'scope_conflict' }]);
+    expect(decision.reasons).not.toContain('vetoed_by_negative_sibling');
+  });
+
+  it('сосед с INACTIVE-триггером, но БЕЗ доказанной необходимости условия — не голосует ("cannot prove a denial")', () => {
+    const howTo = candidate({ unitId: 'how-to-help', sourceBlockAnchor: 'block-help' });
+    const unprovenNegative = candidate({
+      unitId: 'unproven-negative-sibling',
+      trigger: consentAbsent(),
+      // negativeInferenceAllowed сознательно НЕ true: движок сам не считает
+      // это отрицание доказательством необходимого условия (см. "false
+      // generic sufficient condition ... cannot prove a denial" выше).
+      sourceBlockAnchor: 'block-help',
+    });
+
+    const decision = resolveKnowledgeSet([howTo, unprovenNegative], QUERY);
+
+    expect(decision.selected).toEqual(['how-to-help']);
+    expect(decision.excluded).toEqual([{ unitId: 'unproven-negative-sibling', reason: 'exception_trigger_inactive' }]);
+    expect(decision.negativeEvidence).toEqual([]);
+    expect(decision.reasons).not.toContain('vetoed_by_negative_sibling');
+  });
+
+  it('сосед-EXCEPTION_RULE с INACTIVE-триггером ("не сработало") — не голосует: это не доказывает ничего про блок', () => {
+    const howTo = candidate({ unitId: 'how-to-help', sourceBlockAnchor: 'block-help' });
+    const inactiveException = candidate({
+      unitId: 'inactive-exception-sibling',
+      kind: 'EXCEPTION_RULE',
+      scope: scopeOf('EXCEPTION_RULE'),
+      trigger: triggerIn('PRIVATE'),
+      parentRuleRef: 'rule-elsewhere',
+      sourceBlockAnchor: 'block-help',
+    });
+
+    const decision = resolveKnowledgeSet([howTo, inactiveException], QUERY);
+
+    expect(decision.selected).toEqual(['how-to-help']);
+    expect(decision.excluded).toEqual([{ unitId: 'inactive-exception-sibling', reason: 'exception_trigger_inactive' }]);
+    expect(decision.reasons).not.toContain('vetoed_by_negative_sibling');
+  });
+
+  it('сосед, снятый как IRRELEVANT (Decision Relevance), — не голосует: причина не относится к текущему запросу', () => {
+    const howTo = candidate({ unitId: 'how-to-help', sourceBlockAnchor: 'block-help' });
+    const irrelevant = candidate({
+      unitId: 'irrelevant-sibling',
+      trigger: consentAbsent(),
+      negativeInferenceAllowed: true,
+      semanticRelevance: 'IRRELEVANT',
+      sourceBlockAnchor: 'block-help',
+    });
+
+    const decision = resolveKnowledgeSet([howTo, irrelevant], QUERY);
+
+    expect(decision.selected).toEqual(['how-to-help']);
+    expect(decision.excluded).toEqual([{ unitId: 'irrelevant-sibling', reason: 'exception_trigger_inactive' }]);
+    expect(decision.negativeEvidence).toEqual([]);
+    expect(decision.reasons).not.toContain('vetoed_by_negative_sibling');
+  });
+
+  it('EXCEPTION_RULE ведёт себя как прежде: само не ветируется соседом и продолжает переопределять родителя', () => {
+    const parent = candidate({ unitId: 'parent-rule', sourceBlockAnchor: 'block-other' });
+    const exception = candidate({
+      unitId: 'active-exception',
+      kind: 'EXCEPTION_RULE',
+      scope: scopeOf('EXCEPTION_RULE'),
+      trigger: triggerIn('PUBLIC'),
+      parentRuleRef: 'parent-rule',
+      // Тот же блок, что и у достоверно негативного соседа ниже — проверяем
+      // именно ИСКЛЮЧЕНИЕ ИЗ вето, не отсутствие повода для него.
+      sourceBlockAnchor: 'block-help',
+    });
+    const negativeSibling = candidate({
+      unitId: 'negative-sibling',
+      trigger: consentAbsent(),
+      negativeInferenceAllowed: true,
+      sourceBlockAnchor: 'block-help',
+    });
+
+    const decision = resolveKnowledgeSet([parent, exception, negativeSibling], QUERY);
+
+    expect(decision.selected).toEqual(['active-exception']);
+    expect(decision.overridden).toEqual([{ unitId: 'parent-rule', byUnitId: 'active-exception' }]);
+    expect(decision.negativeEvidence).toEqual(['negative-sibling']);
+    expect(decision.reasons).not.toContain('vetoed_by_negative_sibling');
+  });
+
+  it('reasons-реестр знает новый код (типовая проверка на замкнутость)', () => {
+    expect(RESOLUTION_REASON_CODES).toContain('vetoed_by_negative_sibling');
+  });
+});
