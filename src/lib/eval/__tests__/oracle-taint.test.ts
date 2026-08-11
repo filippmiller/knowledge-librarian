@@ -269,6 +269,14 @@ describe('buildOracleTaintDetector — per-secret coverage (pre-retrieval harden
  * проверено (`_scratch-hook-timeout-probe`, вручную, не оставлено в
  * репозитории): 6-секундный `beforeAll` проходит без таймаута, то есть
  * бюджет заметно щедрее дефолтного `testTimeout`.
+ *
+ * Допущение выше оказалось неверным на полном прогоне 2026-08-11: дефолтный
+ * `hookTimeout` vitest — те же 10000мс, и холодный `mammoth.extractRawText`
+ * под параллельной нагрузкой всех 92 файлов сьюта в них не укладывается
+ * (`Hook timed out in 10000ms`). Поэтому хук получает явный бюджет: работа
+ * тут ограничена дисковым I/O и разогревом CPU, а не логикой, и её нельзя
+ * оставлять на дефолте, который зависит от того, сколько ещё файлов
+ * молотит vitest в соседних воркерах.
  */
 describe('buildOracleTaintDetector на реальном пакете', () => {
   let detector: OracleTaintDetector;
@@ -284,7 +292,7 @@ describe('buildOracleTaintDetector на реальном пакете', () => {
       oracle,
       sourceText: rules.map((r) => r.text).join('\n'),
     });
-  });
+  }, 60_000);
 
   it('словарь «только-oracle» непустой — иначе проверка ничего не стережёт', () => {
     expect(detector.taintedShingleCount).toBeGreaterThan(0);
