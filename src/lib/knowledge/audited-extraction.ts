@@ -93,6 +93,7 @@ const FOCUSED_REPAIR_SYSTEM_PROMPT = `Ты исправляешь КОНКРЕТ
 Верни ТОЛЬКО units, необходимые для findings. Обычно это новые units. Но если finding требует исправить structured fields существующего unit (kind, triggerCondition, parentExtractionRef или numericConstraint), ОБЯЗАТЕЛЬНО повторно используй extractionRef именно этого существующего unit и верни полную исправленную версию; statement можно уточнить/перефразировать при том же доказательстве. Новый самостоятельный unit обязан получить новый extractionRef, которого нет в списке «Уже извлечено». При исправлении ОБЯЗАТЕЛЬНО скопируй без изменений каждый уже заполненный field, который finding не требует менять: facets, triggerCondition, numericConstraint, parentExtractionRef и соответствующий evidenceByField. null/{} не означает удалить старое значение. Удаление заполненного structured field этим repair-контрактом не поддерживается. Одно существующее правило можно исправить в несколько units: ровно первый повторно использует existing extractionRef для замены, дополнительные получают новые refs, самостоятельные отличающиеся statements и evidence. Одинаковый ref с другим anchor или непересекающимся evidence будет отклонён fail-closed.
 kind — СТРОГО одно из: "PROCEDURE_STEP", "EXCEPTION_RULE", "TERM_DEFINITION", "DELIVERY_RULE", "PRICE_RULE". Значения "fact", "disclaimer", "rule", "note" и любые другие ЗАПРЕЩЕНЫ. Если текст является оговоркой или фактом, выбери ближайший допустимый kind по функции знания; не изобретай новый enum.
 Если finding указывает самостоятельный запрет/обязанность внутри фразы с определением, добавь отдельный sibling kind="PROCEDURE_STEP" для нормативной семантики; существующий TERM_DEFINITION не заменяй и искусственный parent к нему не создавай.
+Finding с verdict "AMBIGUOUS" означает, что аудитор не уверен, нужен ли для этого содержания отдельный unit — не оставляй такой finding без ответа: либо верни новый самостоятельный unit на то содержание, в котором сомневался аудитор (новый extractionRef, evidence именно на эту часть текста), либо, если оно уже по существу покрыто существующим unit'ом, верни его исправленную версию (тем же extractionRef), чтобы это содержание однозначно отражалось в его statement/evidence.
 
 numericConstraint — null либо ТОЧНО объект {"factKey":"что измеряется","value":2,"unit":"fingers"}. Ключи min/max/from/to/range/values ЗАПРЕЩЕНЫ. Наблюдавшийся неверный ответ {"min":2,"max":3,"unit":"..."} повторять ЗАПРЕЩЕНО. Для диапазона или альтернативы («два или три пальца») верни отдельный unit на КАЖДОЕ значение: один с value=2 и один с value=3, у каждого ровно один factKey/value/unit. Первый исправленный unit может повторить statement существующего unit для безопасной замены; каждый дополнительный unit обязан иметь отличающийся statement и точную отдельную sourceSpan.quote для своего числового токена (например «двух» и «трёх»), чтобы identity не столкнулась. evidenceByField.statement при этом может цитировать полную общую фразу. Если разделение исказило бы смысл, numericConstraint=null и добавь UNRECOGNIZED_NUMERIC_CONSTRAINT; никогда не кодируй диапазон через min/max.
 Для unit: "cycles" используй ТОЛЬКО когда исходный текст прямо считает циклы или целые повторяющиеся последовательности. Количество отдельных действий/случаев (например «прижать один раз») имеет unit="times", не "cycles".
@@ -324,6 +325,34 @@ export function focusedRepairDuplicatesExistingUnit(
   );
 }
 
+/** A finding the focused-repair loop can act on: a confirmed gap (auditor is
+ * sure something is missing) or an AMBIGUOUS verdict (auditor is unsure
+ * whether something is missing). COVERED is never actionable by definition.
+ * One predicate shared by "what to hand the repair extractor" and "what to
+ * log as having triggered this round" so the two can never silently drift
+ * apart. */
+function isActionableCoverageFinding(finding: CoverageFinding): boolean {
+  return (
+    finding.verdict === 'POSSIBLE_OMISSION' ||
+    finding.verdict === 'UNREPRESENTED_CLAUSE' ||
+    finding.verdict === 'AMBIGUOUS'
+  );
+}
+
+/** True iff at least one finding is AMBIGUOUS. Derived directly from
+ * `findings`, deliberately never from the optional `unresolved` flag on
+ * `BlockCoverageAuditResult`: hand-built fixtures for the `auditor`
+ * dependency (this file's own tests, and any other caller's) predate
+ * `unresolved` and may leave it `undefined` even when an AMBIGUOUS finding
+ * is present -- the same reasoning `coverageAuditNeedsReview` documents for
+ * itself in extraction-coverage-auditor.ts applies here. Deliberately does
+ * NOT read or set `hasGap`/`unresolved` themselves: those two fields keep
+ * exactly their existing meaning for every other caller (extraction-artifact
+ * persistence, raw-extraction-checkpoint replay, etc.). */
+function hasUnresolvedAmbiguity(findings: readonly CoverageFinding[]): boolean {
+  return findings.some((finding) => finding.verdict === 'AMBIGUOUS');
+}
+
 export async function extractKnowledgeUnitsWithCompletenessAudit(
   blocks: readonly SourceBlock[],
   batchSize: number,
@@ -376,7 +405,20 @@ export async function extractKnowledgeUnitsWithCompletenessAudit(
       continue;
     }
 
-    if (!audit.hasGap) {
+    // AMBIGUOUS alone leaves hasGap false (it is not a confirmed gap -- see
+    // extraction-coverage-auditor.ts), but "I'm not sure whether something
+    // is missing" is not silence either, and is exactly the kind of question
+    // a focused repair round exists to resolve. Previously this was
+    // instant-fatal here with no repair attempt at all (goal-shift
+    // continuation, 2026-08-11: block b4's AMBIGUOUS verdict aborted the
+    // whole run outright, asking only "does this need its own unit, or is it
+    // already covered?" -- precisely answerable by a repair round). Route it
+    // into the same repair loop as a confirmed gap. Only a block with
+    // neither a gap nor an ambiguity to act on -- per
+    // interpretCoverageAuditResponse, that means the auditor returned no
+    // findings at all -- still fails immediately here, unchanged from
+    // before: there is nothing to hand the repair extractor.
+    if (!audit.hasGap && !hasUnresolvedAmbiguity(audit.findings)) {
       throw new Error(`Coverage audit did not clear block ${block.anchor}: explicit COVERED verdict required`);
     }
 
@@ -387,9 +429,7 @@ export async function extractKnowledgeUnitsWithCompletenessAudit(
     const repairOptions: FocusedRepairOptions = {
       ...optionsPerBatch,
       block,
-      findings: pendingAudit.findings.filter(
-        (finding) => finding.verdict === 'POSSIBLE_OMISSION' || finding.verdict === 'UNREPRESENTED_CLAUSE'
-      ),
+      findings: pendingAudit.findings.filter(isActionableCoverageFinding),
       existingUnits: repairRound === 1
         ? initialUnits
         : initialUnits.map((unit) => replacementsByExtractionRef.get(unit.extractionRef) ?? unit).concat(additionalUnits),
@@ -561,9 +601,7 @@ export async function extractKnowledgeUnitsWithCompletenessAudit(
     additionalUnits.push(...namespaced);
     focusedRetryLogs.push({
       blockAnchor: block.anchor,
-      triggeredBy: pendingAudit.findings.filter(
-        (f) => f.verdict === 'POSSIBLE_OMISSION' || f.verdict === 'UNREPRESENTED_CLAUSE'
-      ),
+      triggeredBy: pendingAudit.findings.filter(isActionableCoverageFinding),
       additionalUnitCount: namespaced.length,
     });
 
@@ -586,12 +624,25 @@ export async function extractKnowledgeUnitsWithCompletenessAudit(
       [...repairedUnitsForBlock, ...namespaced]
     );
     if (coverageAuditNeedsReview(finalAudit)) {
-      if (!finalAudit.hasGap) {
+      // Same routing as the initial-audit gate above, and for the same
+      // reason: an AMBIGUOUS-only result here is not covered, but it is also
+      // not yet a reason to give up while repair rounds remain.
+      const stillAmbiguous = hasUnresolvedAmbiguity(finalAudit.findings);
+      if (!finalAudit.hasGap && !stillAmbiguous) {
         throw new Error(`Focused repair did not clear block ${block.anchor}: final explicit COVERED verdict required`);
       }
       if (repairRound === FOCUSED_REPAIR_MAX_ROUNDS) {
+        // FOCUSED_REPAIR_MAX_ROUNDS is not raised for AMBIGUOUS: the bar
+        // stays "every finding COVERED" -- this only makes the failure say
+        // truthfully which kind of non-coverage survived every round,
+        // instead of always calling it a gap.
+        const reason = finalAudit.hasGap && stillAmbiguous
+          ? 'unresolved gap and unresolved ambiguity'
+          : stillAmbiguous
+            ? 'unresolved ambiguity'
+            : 'unresolved gap';
         throw new Error(
-          `Focused repair did not clear block ${block.anchor}: ${FOCUSED_REPAIR_MAX_ROUNDS}-round limit exhausted`
+          `Focused repair did not clear block ${block.anchor}: ${FOCUSED_REPAIR_MAX_ROUNDS}-round limit exhausted (${reason})`
         );
       }
       pendingAudit = finalAudit;

@@ -1139,18 +1139,65 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
     expect(result.focusedRetryLogs[0].additionalUnitCount).toBe(1);
   });
 
-  it.each([
-    [[{ verdict: 'AMBIGUOUS' as const, quote: 'спорный текст', explanation: 'не уверен', quoteVerified: true }]],
-    [[]],
-  ])('не выпускает блок без явного COVERED: findings=%j', async (findings) => {
+  it('не выпускает блок без явного COVERED: аудитор не вернул ни одной находки', async () => {
     const extractor = async () => ({ units: [], structuredResult: {} as never });
-    const auditor = async (): Promise<BlockCoverageAuditResult> => ({ blockAnchor: 'b0', findings, hasGap: false });
+    const auditor = async (): Promise<BlockCoverageAuditResult> => ({ blockAnchor: 'b0', findings: [], hasGap: false });
 
     await expect(
       extractKnowledgeUnitsWithCompletenessAudit(
         [block('b0', 'спорный текст')], 5, { runConfig: {} as never }, {} as never, { extractor, auditor }
       )
     ).rejects.toThrow(/coverage audit did not clear block b0/i);
+  });
+
+  // Previously AMBIGUOUS-only was grouped with the empty-findings case above
+  // and instant-failed identically -- no repair attempt at all. That was the
+  // structural flaw: "I'm not sure whether something is missing" is not the
+  // same claim as "nothing is missing", and it is not the same as "the
+  // auditor returned nothing at all" either -- it is exactly the situation a
+  // focused repair round exists to resolve. Live evidence: block b4
+  // (fresh-extraction run, 2026-08-11) aborted the whole run on a single
+  // AMBIGUOUS verdict asking "does this need its own unit, or is it already
+  // covered by unit 4?".
+  it('AMBIGUOUS-only initial audit enters focused repair instead of failing immediately, and repair receives that finding', async () => {
+    const text = 'разрешённое краткое действие в общественном месте не превращается в разрешение на большее.';
+    const extractor = async () => ({
+      units: [unit({ sourceSpan: { anchor: 'b4', quote: text } })],
+      structuredResult: {} as never,
+    });
+    let repairExtractorCalls = 0;
+    const repairExtractor = async (options: { findings: readonly CoverageFinding[]; existingUnits: readonly ExtractedKnowledgeUnit[] }) => {
+      repairExtractorCalls += 1;
+      // Repair must receive the AMBIGUOUS finding itself, not an empty list
+      // -- an empty list is exactly what the OLD filter (POSSIBLE_OMISSION |
+      // UNREPRESENTED_CLAUSE only) would have produced here, which would
+      // have hit the "no actionable findings" guard instead of this call.
+      expect(options.findings).toHaveLength(1);
+      expect(options.findings[0].verdict).toBe('AMBIGUOUS');
+      expect(options.findings[0].explanation).toBe('не уверен, нужен ли отдельный unit');
+      return {
+        units: [unit({ extractionRef: 'clarified', sourceSpan: { anchor: 'b4', quote: text } })],
+        structuredResult: {} as never,
+      };
+    };
+    let auditCalls = 0;
+    const auditor = async (): Promise<BlockCoverageAuditResult> =>
+      ++auditCalls === 1
+        ? {
+            blockAnchor: 'b4',
+            findings: [{ verdict: 'AMBIGUOUS', quote: text, explanation: 'не уверен, нужен ли отдельный unit', quoteVerified: true }],
+            hasGap: false,
+          }
+        : { blockAnchor: 'b4', findings: [{ verdict: 'COVERED', quote: '', explanation: 'clean', quoteVerified: false }], hasGap: false };
+
+    const result = await extractKnowledgeUnitsWithCompletenessAudit(
+      [block('b4', text)], 5, { runConfig: {} as never }, {} as never, { extractor, repairExtractor, auditor }
+    );
+
+    expect(repairExtractorCalls).toBe(1);
+    expect(auditCalls).toBe(2);
+    expect(result.auditResults).toHaveLength(1);
+    expect(result.auditResults[0].findings[0].verdict).toBe('COVERED');
   });
 
   it('не выпускает блок, если focused repair не прошёл повторный аудит', async () => {
@@ -1183,6 +1230,70 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
     ).rejects.toThrow(/focused repair did not clear block b0: 3-round limit exhausted/i);
     expect(auditCalls).toBe(4);
     expect(repairCalls).toBe(3);
+  });
+
+  // Same shape as the gap-round-exhaustion test above, but the auditor keeps
+  // returning AMBIGUOUS (never a confirmed gap, never COVERED) every round,
+  // including when repair itself proposes no changes at all -- a legitimate
+  // "I looked, existing coverage already handles it" response, since the
+  // repair schema never required a non-empty units array. The run must still
+  // fail loudly after FOCUSED_REPAIR_MAX_ROUNDS (the round cap is NOT
+  // raised), and the failure must say so was an unresolved AMBIGUITY, not
+  // silently pass and not misreport a gap that was never actually found.
+  it('AMBIGUOUS finding surviving every repair round still fails the run, labeled as an unresolved ambiguity', async () => {
+    let auditCalls = 0;
+    let repairCalls = 0;
+    const extractor = async () => ({
+      units: [unit({ sourceSpan: { anchor: 'b4', quote: 'спорное правило' } })],
+      structuredResult: {} as never,
+    });
+    const repairExtractor = async () => {
+      repairCalls += 1;
+      return { units: [], structuredResult: {} as never };
+    };
+    const auditor = async (): Promise<BlockCoverageAuditResult> => {
+      auditCalls++;
+      return {
+        blockAnchor: 'b4',
+        findings: [{ verdict: 'AMBIGUOUS', quote: 'спорное правило', explanation: 'по-прежнему не уверен', quoteVerified: true }],
+        hasGap: false,
+      };
+    };
+
+    await expect(
+      extractKnowledgeUnitsWithCompletenessAudit(
+        [block('b4', 'спорное правило')], 5, { runConfig: {} as never }, {} as never,
+        { extractor, repairExtractor, auditor }
+      )
+    ).rejects.toThrow(/focused repair did not clear block b4: 3-round limit exhausted \(unresolved ambiguity\)/i);
+    expect(auditCalls).toBe(4);
+    expect(repairCalls).toBe(3);
+  });
+
+  // Differentiation check in the other direction: a genuine gap (never
+  // AMBIGUOUS) that survives every round must still be labeled a gap, not an
+  // ambiguity -- proving the new reason text actually inspects the surviving
+  // verdict rather than defaulting to one label regardless of cause. This is
+  // the "no regression in the existing path" guarantee made explicit: same
+  // scenario as the pre-existing test above, same round/repair counts implied,
+  // now additionally pinning the exact reason suffix.
+  it('genuine gap surviving every repair round is labeled a gap, not an ambiguity, in the failure message', async () => {
+    const extractor = async () => ({
+      units: [unit({ sourceSpan: { anchor: 'b0', quote: 'правило' } })],
+      structuredResult: {} as never,
+    });
+    const auditor = async (): Promise<BlockCoverageAuditResult> => ({
+      blockAnchor: 'b0',
+      findings: [{ verdict: 'UNREPRESENTED_CLAUSE', quote: 'правило', explanation: 'всё ещё пропущено', quoteVerified: true }],
+      hasGap: true,
+    });
+
+    await expect(
+      extractKnowledgeUnitsWithCompletenessAudit(
+        [block('b0', 'правило')], 5, { runConfig: {} as never }, {} as never,
+        { extractor, repairExtractor: repairUsing(extractor), auditor }
+      )
+    ).rejects.toThrow(/focused repair did not clear block b0: 3-round limit exhausted \(unresolved gap\)/i);
   });
 
   it('блок без ни одного extracted unit\'а всё равно проходит аудит (пустой extractedStatements)', async () => {
