@@ -40,13 +40,46 @@ const EVIDENCE_GROUPS_BY_RULE: Record<number, RequiredEvidenceGroup> = {
   10: RULE_10_EVIDENCE_GROUP,
 };
 
-function parseArgs(argv: readonly string[]): { inDir: string; outPath: string } {
+function parseArgs(argv: readonly string[]): { inDir: string; outPath: string; acceptSkippedGraph: boolean } {
   const inArg = argv.find((a) => a.startsWith('--in='))?.slice('--in='.length);
   const outArg = argv.find((a) => a.startsWith('--out='))?.slice('--out='.length);
+  const acceptSkippedGraph = argv.includes('--accept-skipped-graph');
   if (!inArg || !outArg) {
-    throw new Error('Usage: npx tsx scripts/grade-aurora-fixture.ts --in=<dir> --out=<report.json>');
+    throw new Error('Usage: npx tsx scripts/grade-aurora-fixture.ts --in=<dir> --out=<report.json> [--accept-skipped-graph]');
   }
-  return { inDir: inArg, outPath: outArg };
+  return { inDir: inArg, outPath: outArg, acceptSkippedGraph };
+}
+
+/** run-summary.json's minimal shape this grader cares about. A run-summary
+ * with no `dependencyGraphStage` field predates the --dependency-graph switch
+ * entirely (e.g. the committed `.claude/audits/2026-08-11-aurora-baseline/
+ * run-summary.json`) and MUST grade exactly as a REQUIRED run always did —
+ * absence is never treated as SKIPPED. */
+export interface RunSummaryDependencyGraphFields {
+  readonly dependencyGraphStage?: 'REQUIRED' | 'SKIPPED';
+  readonly dependencyGraphSkipReason?: string;
+}
+
+/**
+ * The single gate deciding whether a run is acceptable to grade. Refuses
+ * (throws, no report produced) a SKIPPED run unless the caller explicitly
+ * passed `--accept-skipped-graph` -- a skipped dependency-graph stage means
+ * `expandRetrievedDependencies` never ran, so the resulting score is not
+ * comparable to one measured with the graph in place, and must never be
+ * quoted as an ordinary acceptance number without deliberate, visible opt-in.
+ */
+export function resolveDependencyGraphGate(
+  summary: RunSummaryDependencyGraphFields,
+  acceptSkippedGraph: boolean
+): { readonly dependencyGraphSkipped: boolean } {
+  const dependencyGraphSkipped = summary.dependencyGraphStage === 'SKIPPED';
+  if (dependencyGraphSkipped && !acceptSkippedGraph) {
+    throw new Error(
+      'Run used a skipped dependency graph. Pass --accept-skipped-graph to grade this as a non-acceptance measurement.' +
+        (summary.dependencyGraphSkipReason ? ` (${summary.dependencyGraphSkipReason})` : '')
+    );
+  }
+  return { dependencyGraphSkipped };
 }
 
 export interface EngineQuestionResultLike {
@@ -97,6 +130,12 @@ export interface CaseVerdict {
   readonly actualDisposition: 'DIRECT_ANSWER' | 'UNVERIFIED_ANSWER' | 'HOLD' | 'ERROR';
   readonly primaryFailureStage: FailureStage;
   readonly diagnosticFlags: readonly string[];
+  /** Present (`true`) only when this verdict was graded from a run whose
+   *  dependency-graph stage was skipped (`--accept-skipped-graph`) — stamped
+   *  on every verdict so an individual result can never be quoted out of
+   *  context. Absent entirely for an ordinary REQUIRED run: same shape as
+   *  before this field existed. */
+  readonly dependencyGraphSkipped?: true;
 }
 
 function ruleIdsOf(unitIds: readonly string[], sourceRuleIdByUnitId: ReadonlyMap<string, number | null>): Set<number> {
@@ -111,15 +150,15 @@ function ruleIdsOf(unitIds: readonly string[], sourceRuleIdByUnitId: ReadonlyMap
 const numericKey = (value: number, unit: string): string =>
   `${value}::${unit.trim().toLowerCase().replace(/s$/, '')}`;
 
-export function gradePositiveCase(oracleCase: OracleCase, run: RunArtifacts): CaseVerdict {
+export function gradePositiveCase(oracleCase: OracleCase, run: RunArtifacts, dependencyGraphSkipped = false): CaseVerdict {
   const result = run.results.find((r) => r.caseId === oracleCase.id);
   const flags: string[] = [];
 
   if (result === undefined) {
-    return { runId: run.runId, caseId: oracleCase.id, pass: false, expectedDisposition: 'DIRECT_ANSWER', actualDisposition: 'ERROR', primaryFailureStage: 'ENGINE_ERROR', diagnosticFlags: ['no engine result recorded'] };
+    return { runId: run.runId, caseId: oracleCase.id, pass: false, expectedDisposition: 'DIRECT_ANSWER', actualDisposition: 'ERROR', primaryFailureStage: 'ENGINE_ERROR', diagnosticFlags: ['no engine result recorded'], ...(dependencyGraphSkipped && { dependencyGraphSkipped: true as const }) };
   }
   if (result.actualDisposition === 'ERROR') {
-    return { runId: run.runId, caseId: oracleCase.id, pass: false, expectedDisposition: 'DIRECT_ANSWER', actualDisposition: 'ERROR', primaryFailureStage: 'ENGINE_ERROR', diagnosticFlags: [result.errorMessage ?? 'unknown error'] };
+    return { runId: run.runId, caseId: oracleCase.id, pass: false, expectedDisposition: 'DIRECT_ANSWER', actualDisposition: 'ERROR', primaryFailureStage: 'ENGINE_ERROR', diagnosticFlags: [result.errorMessage ?? 'unknown error'], ...(dependencyGraphSkipped && { dependencyGraphSkipped: true as const }) };
   }
 
   const expectedRuleIds = new Set(oracleCase.expectedRuleIds);
@@ -183,18 +222,18 @@ export function gradePositiveCase(oracleCase: OracleCase, run: RunArtifacts): Ca
   const ruleCoverageOk = missingFromExtraction.length === 0 && missingFromCandidates.length === 0 && missingFromTopK.length === 0 && missingFromSelected.length === 0 && evidenceGroupUncovered.length === 0;
   const pass = ruleCoverageOk && result.actualDisposition === 'DIRECT_ANSWER' && (result.verification?.verified ?? false);
 
-  return { runId: run.runId, caseId: oracleCase.id, pass, expectedDisposition: 'DIRECT_ANSWER', actualDisposition: result.actualDisposition, primaryFailureStage, diagnosticFlags: flags };
+  return { runId: run.runId, caseId: oracleCase.id, pass, expectedDisposition: 'DIRECT_ANSWER', actualDisposition: result.actualDisposition, primaryFailureStage, diagnosticFlags: flags, ...(dependencyGraphSkipped && { dependencyGraphSkipped: true as const }) };
 }
 
-export function gradeNegativeCase(neg: NegativeCaseApplicabilityOracle, run: RunArtifacts): CaseVerdict {
+export function gradeNegativeCase(neg: NegativeCaseApplicabilityOracle, run: RunArtifacts, dependencyGraphSkipped = false): CaseVerdict {
   const result = run.results.find((r) => r.caseId === neg.id);
   const flags: string[] = [];
 
   if (result === undefined) {
-    return { runId: run.runId, caseId: neg.id, pass: false, expectedDisposition: neg.expectedDisposition, actualDisposition: 'ERROR', primaryFailureStage: 'ENGINE_ERROR', diagnosticFlags: ['no engine result recorded (question text missing from oracle cross-reference)'] };
+    return { runId: run.runId, caseId: neg.id, pass: false, expectedDisposition: neg.expectedDisposition, actualDisposition: 'ERROR', primaryFailureStage: 'ENGINE_ERROR', diagnosticFlags: ['no engine result recorded (question text missing from oracle cross-reference)'], ...(dependencyGraphSkipped && { dependencyGraphSkipped: true as const }) };
   }
   if (result.actualDisposition === 'ERROR') {
-    return { runId: run.runId, caseId: neg.id, pass: false, expectedDisposition: neg.expectedDisposition, actualDisposition: 'ERROR', primaryFailureStage: 'ENGINE_ERROR', diagnosticFlags: [result.errorMessage ?? 'unknown error'] };
+    return { runId: run.runId, caseId: neg.id, pass: false, expectedDisposition: neg.expectedDisposition, actualDisposition: 'ERROR', primaryFailureStage: 'ENGINE_ERROR', diagnosticFlags: [result.errorMessage ?? 'unknown error'], ...(dependencyGraphSkipped && { dependencyGraphSkipped: true as const }) };
   }
 
   const candidateRuleIds = result.retrieval ? ruleIdsOf(result.retrieval.candidatesBeforeRerank, run.sourceRuleIdByUnitId) : new Set<number>();
@@ -333,23 +372,35 @@ export function gradeNegativeCase(neg: NegativeCaseApplicabilityOracle, run: Run
     }
   }
 
-  return { runId: run.runId, caseId: neg.id, pass: ok, expectedDisposition: neg.expectedDisposition, actualDisposition: result.actualDisposition, primaryFailureStage, diagnosticFlags: flags };
+  return { runId: run.runId, caseId: neg.id, pass: ok, expectedDisposition: neg.expectedDisposition, actualDisposition: result.actualDisposition, primaryFailureStage, diagnosticFlags: flags, ...(dependencyGraphSkipped && { dependencyGraphSkipped: true as const }) };
 }
 
-async function main() {
-  const { inDir, outPath } = parseArgs(process.argv.slice(2));
+// `argv` defaults to real CLI args so `main()` at the bottom is unchanged;
+// the parameter exists solely so tests can drive the full read -> gate ->
+// grade -> write pipeline against a temp directory without a subprocess.
+export async function main(argv: readonly string[] = process.argv.slice(2)) {
+  const { inDir, outPath, acceptSkippedGraph } = parseArgs(argv);
 
   const positiveOracle = loadSemanticRuleOracle();
   const negativeOracle = loadNegativeCaseOracle();
 
-  const summary = JSON.parse(readFileSync(path.join(inDir, 'run-summary.json'), 'utf8')) as { runIds: readonly string[] };
+  const summary = JSON.parse(readFileSync(path.join(inDir, 'run-summary.json'), 'utf8')) as {
+    runIds: readonly string[];
+  } & RunSummaryDependencyGraphFields;
+  // Refuses (throws, writes nothing) before any grading work when the run
+  // was measured with the dependency-graph stage skipped and the caller did
+  // not pass --accept-skipped-graph. A run-summary.json with no
+  // dependencyGraphStage field (every run predating this switch) always
+  // passes through as REQUIRED.
+  const { dependencyGraphSkipped } = resolveDependencyGraphGate(summary, acceptSkippedGraph);
+
   const runDirs = readdirSync(inDir).filter((d) => summary.runIds.includes(d));
 
   const allVerdicts: CaseVerdict[] = [];
   for (const runId of summary.runIds) {
     const run = loadRunArtifacts(path.join(inDir, runId), runId);
-    for (const c of positiveOracle) allVerdicts.push(gradePositiveCase(c, run));
-    for (const n of negativeOracle) allVerdicts.push(gradeNegativeCase(n, run));
+    for (const c of positiveOracle) allVerdicts.push(gradePositiveCase(c, run, dependencyGraphSkipped));
+    for (const n of negativeOracle) allVerdicts.push(gradeNegativeCase(n, run, dependencyGraphSkipped));
   }
 
   const byRun = new Map<string, CaseVerdict[]>();
@@ -365,6 +416,7 @@ async function main() {
     positiveTotal: positiveOracle.length,
     negativePassed: verdicts.filter((v) => negativeOracle.some((n) => n.id === v.caseId) && v.pass).length,
     negativeTotal: negativeOracle.length,
+    ...(dependencyGraphSkipped && { dependencyGraphSkipped: true as const }),
   }));
 
   const casesFailingInAnyRun = [...new Set(allVerdicts.filter((v) => !v.pass).map((v) => v.caseId))].sort();
@@ -376,6 +428,7 @@ async function main() {
   const report = {
     gradedAt: new Date().toISOString(),
     runDirs,
+    ...(dependencyGraphSkipped && { dependencyGraphSkipped: true as const }),
     perRunSummary,
     passRateByCase,
     casesFailingInAnyRun,

@@ -169,10 +169,10 @@ import {
   buildDependencyGraphArtifactFingerprint,
   loadCompatibleDependencyGraphArtifact,
   writeDependencyGraphArtifact,
-  type DependencyGraphArtifact,
   type DependencyGraphArtifactConfig,
 } from '../src/lib/eval/dependency-graph-artifact';
 import {
+  createDependencyGraph,
   expandDependencyClosure,
   hydrateDependencyGraph,
   serializeDependencyGraph,
@@ -206,6 +206,12 @@ const SUPPORTED_MODES = ['e2e'] as const;
 type Mode = (typeof SUPPORTED_MODES)[number];
 const ENGINE_PROFILES = ['quality', 'balanced', 'economy'] as const;
 type EngineProfile = (typeof ENGINE_PROFILES)[number];
+const DEPENDENCY_GRAPH_STAGE_VALUES = ['required', 'skip'] as const;
+/** CLI-facing `--dependency-graph` value. Deliberately NOT named
+ *  `DependencyGraphStage` -- that identifier is already imported from
+ *  dependency-graph-builder.ts for the proposer/auditor/repairer call shape;
+ *  unrelated concepts that happen to share a word. */
+type DependencyGraphStageArg = (typeof DEPENDENCY_GRAPH_STAGE_VALUES)[number];
 
 interface CliArgs {
   readonly mode: Mode;
@@ -220,6 +226,14 @@ interface CliArgs {
   readonly questionModel?: string;
   readonly questionProvider?: Provider;
   readonly engineProfile: EngineProfile;
+  /** `required` (default) runs the dependency-graph stage exactly as today.
+   *  `skip` is an explicit, auditable measurement override: `ensureDependencyGraph`
+   *  short-circuits BEFORE any provider call to an empty-edge graph, so only
+   *  retrieval seeds reach the candidate pool. Never the default, never read
+   *  from an env var (unlike --engine-profile above) -- one explicit switch
+   *  only. See run-summary.json's dependencyGraphStage for how a skipped run
+   *  stays distinguishable from a real measurement. */
+  readonly dependencyGraphStage: DependencyGraphStageArg;
   /** Путь к сохранённому артефакту извлечения. Задан — фаза извлечения не
    *  делает НИ ОДНОГО платного вызова (см. `--reuse-extraction` ниже);
    *  `undefined` — сегодняшнее поведение, свежее извлечение. */
@@ -316,6 +330,7 @@ export function parseArgs(argv: readonly string[]): CliArgs {
     '--question-provider=',
     '--engine-profile=',
     '--reuse-extraction=',
+    '--dependency-graph=',
   ];
   const knownFlags = ['--fresh-extraction'];
   const unknown = argv.filter(
@@ -341,6 +356,12 @@ export function parseArgs(argv: readonly string[]): CliArgs {
   ).trim().toLowerCase();
   const reuseArg = argv.find((a) => a.startsWith('--reuse-extraction='))?.slice('--reuse-extraction='.length);
   const freshFlag = argv.includes('--fresh-extraction');
+  // Дефолт 'required' НЕ читается из env (в отличие от AURORA_ENGINE_PROFILE
+  // выше) — намеренно один явный флаг и ни одного скрытого способа его
+  // выставить (см. docstring CliArgs.dependencyGraphStage).
+  const dependencyGraphStageRaw = (
+    argv.find((a) => a.startsWith('--dependency-graph='))?.slice('--dependency-graph='.length) ?? 'required'
+  ).trim().toLowerCase();
 
   // Взаимоисключающие по смыслу — молча предпочесть один другому значило бы
   // сделать не то, что просили, на платном прогоне.
@@ -360,6 +381,9 @@ export function parseArgs(argv: readonly string[]): CliArgs {
   }
   if (!(ENGINE_PROFILES as readonly string[]).includes(engineProfileRaw)) {
     throw new Error(`--engine-profile принимает ${ENGINE_PROFILES.join('|')}, получено "${engineProfileRaw}".\n${USAGE}`);
+  }
+  if (!(DEPENDENCY_GRAPH_STAGE_VALUES as readonly string[]).includes(dependencyGraphStageRaw)) {
+    throw new Error(`--dependency-graph принимает ${DEPENDENCY_GRAPH_STAGE_VALUES.join('|')}, получено "${dependencyGraphStageRaw}".\n${USAGE}`);
   }
   if ((questionProviderRaw === undefined) !== (questionModelRaw === undefined)) {
     throw new Error(`question-stage override требует одновременно provider и model.\n${USAGE}`);
@@ -419,6 +443,7 @@ export function parseArgs(argv: readonly string[]): CliArgs {
     }),
     ...(questionProviderRaw && { questionProvider: questionProviderRaw as Provider }),
     engineProfile: engineProfileRaw as EngineProfile,
+    dependencyGraphStage: dependencyGraphStageRaw as DependencyGraphStageArg,
     ...(reuseArg !== undefined && { reuseExtraction: reuseArg }),
   };
 }
@@ -1640,7 +1665,8 @@ interface ExtractionRunOutcome {
   readonly batchLogs: readonly BatchExtractionLog[];
   readonly auditResults: readonly BlockCoverageAuditResult[];
   readonly focusedRetryLogs: readonly FocusedRetryLog[];
-  readonly dependencyGraphArtifactPath: string;
+  /** `null` only for `--dependency-graph=skip` — see ReadyDependencyGraph. */
+  readonly dependencyGraphArtifactPath: string | null;
   readonly dependencyGraphArtifactContentDigest: string;
   readonly dependencyGraphFingerprint: string;
   readonly dependencyGraphRestored: boolean;
@@ -1706,22 +1732,85 @@ export function dependencyGraphSidecarPath(
 
 interface ReadyDependencyGraph {
   readonly graph: DependencyGraph;
-  readonly artifact: DependencyGraphArtifact;
-  readonly artifactPath: string;
+  /** `null` only for `--dependency-graph=skip`: no sidecar artifact is ever
+   *  read or written for a skipped run, so there is no path to record. */
+  readonly artifactPath: string | null;
+  readonly artifactContentDigest: string;
   readonly restored: boolean;
 }
 
-async function ensureDependencyGraph(
+/** Reason recorded in run-summary.json's `dependencyGraphSkipReason` — the
+ *  only place a human auditing a skipped run's artifacts needs to look to
+ *  see WHY the stage didn't run. Named as a constant (not inlined) so
+ *  `resolveDependencyGraphSummaryFields`'s test can assert on it directly. */
+const DEPENDENCY_GRAPH_SKIP_REASON =
+  'Явный флаг --dependency-graph=skip: граф зависимостей пропущен, ни одного provider-вызова для proposal/audit/repair не сделано. ' +
+  'Граф — все units как изолированные конечные точки, edges пуст; expandRetrievedDependencies выродился в тождество, ' +
+  'в кандидатный пул попадают только retrieval seeds (поведение до commit a0a17ba). ' +
+  'grade-aurora-fixture.ts откажется засчитать этот прогон как acceptance score без --accept-skipped-graph.';
+
+/** Единственное место, решающее форму двух `dependencyGraph*` полей
+ *  run-summary.json — вынесено из полутора-тысячестрочного `main()`, чтобы
+ *  «пропуск виден в run-summary.json» проверялось тестом напрямую. REQUIRED
+ *  отдаёт РОВНО {dependencyGraphStage}: отсутствующий флаг обязан оставлять
+ *  форму run-summary.json байт-в-байт вчерашней (никакого лишнего ключа). */
+export function resolveDependencyGraphSummaryFields(
+  dependencyGraphStage: DependencyGraphStageArg
+): { readonly dependencyGraphStage: 'REQUIRED' } | { readonly dependencyGraphStage: 'SKIPPED'; readonly dependencyGraphSkipReason: string } {
+  return dependencyGraphStage === 'skip'
+    ? { dependencyGraphStage: 'SKIPPED', dependencyGraphSkipReason: DEPENDENCY_GRAPH_SKIP_REASON }
+    : { dependencyGraphStage: 'REQUIRED' };
+}
+
+/** Exported for tests only: production call sites are both inside this
+ *  module. Letting a test pass its own `buildGraph` is what makes it
+ *  possible to prove the REQUIRED path still invokes the graph stage and the
+ *  `skip` path invokes it zero times without either path ever reaching a
+ *  real provider (mirrors the extractor/auditor DI pattern already used by
+ *  `resolveTaintedCandidates`). */
+export async function ensureDependencyGraph(
   runId: string,
   extractionArtifactPath: string,
   extractionArtifact: ExtractionArtifact,
   ledger: CostLedger,
-  traceLog: CallTraceLog
+  traceLog: CallTraceLog,
+  dependencyGraphStage: DependencyGraphStageArg,
+  // Injectable purely for tests (mirrors the extractor/auditor DI pattern
+  // `resolveTaintedCandidates` already uses): lets a test prove the
+  // REQUIRED path still invokes the graph stage, and the skip path invokes
+  // it zero times, without EITHER path making a real provider call.
+  buildGraph: typeof buildAuditedDependencyGraph = buildAuditedDependencyGraph
 ): Promise<ReadyDependencyGraph> {
   if (extractionArtifact.phase !== 'COMPLETE') {
     throw new Error('Dependency graph requires a COMPLETE extraction artifact.');
   }
   const units = extractionArtifact.snapshot.units;
+
+  if (dependencyGraphStage === 'skip') {
+    // Short-circuits BEFORE any provider call and before any sidecar-artifact
+    // I/O: every unit becomes an isolated endpoint, edges stays empty. What
+    // keeps a skipped run from being mistaken for a real measurement lives
+    // downstream (run-summary.json's dependencyGraphStage, the grader's
+    // refusal without --accept-skipped-graph) — not here.
+    const graph = createDependencyGraph({
+      units: units.map((unit) => ({
+        unitId: unit.unitId,
+        sourceSpan: unit.sourceSpan,
+        evidenceByField: unit.evidenceByField,
+      })),
+      edges: [],
+    });
+    return {
+      graph,
+      artifactPath: null,
+      artifactContentDigest: sha256Json({
+        dependencyGraphStage: 'SKIPPED',
+        extractionArtifactContentDigest: extractionArtifact.contentDigest,
+      }),
+      restored: false,
+    };
+  }
+
   const config = dependencyGraphArtifactConfig(extractionArtifact);
   const expectedFingerprint = buildDependencyGraphArtifactFingerprint(
     extractionArtifact,
@@ -1738,8 +1827,8 @@ async function ensureDependencyGraph(
   if (restored !== undefined) {
     return {
       graph: hydrateDependencyGraph(restored.graph, units),
-      artifact: restored,
       artifactPath,
+      artifactContentDigest: restored.contentDigest,
       restored: true,
     };
   }
@@ -1780,7 +1869,7 @@ async function ensureDependencyGraph(
     };
   };
 
-  const graph = await buildAuditedDependencyGraph({
+  const graph = await buildGraph({
     units,
     proposer: makeStage('dependency-graph-proposal', 'dependency-graph-proposal'),
     auditor: makeStage('dependency-graph-audit', 'dependency-graph-audit'),
@@ -1796,7 +1885,23 @@ async function ensureDependencyGraph(
   const graphDocument: DependencyGraphDocument = serializeDependencyGraph(graph);
   const artifact = buildDependencyGraphArtifact(expectedFingerprint, graphDocument);
   writeDependencyGraphArtifact(artifactPath, artifact);
-  return { graph, artifact, artifactPath, restored: false };
+  return { graph, artifactPath, artifactContentDigest: artifact.contentDigest, restored: false };
+}
+
+/** Shared by both `ensureDependencyGraph` call sites so the skip/required
+ *  wording can't drift between the fresh-extraction and --reuse-extraction
+ *  paths. */
+function logDependencyGraphReady(ready: ReadyDependencyGraph): void {
+  if (ready.artifactPath === null) {
+    console.log(
+      `  граф зависимостей ПРОПУЩЕН (--dependency-graph=skip): ${ready.graph.units.size} unit(s) как изолированные конечные точки, edges: 0 — ни одного provider-вызова`
+    );
+    return;
+  }
+  console.log(
+    `  граф зависимостей ${ready.restored ? 'переиспользован' : 'построен и сохранён'}: ` +
+      `${ready.artifactPath} (${ready.graph.edges.length} edge(s))`
+  );
 }
 
 export function dependencyGraphStructuredCallCeiling(): number {
@@ -2400,11 +2505,10 @@ async function runOneExtractionRun(
   writeExtractionArtifact(artifactPath, artifact);
   console.log(`  артефакт извлечения сохранён ДО вопросов: ${artifactPath} (для --reuse-extraction)`);
 
-  const readyDependencyGraph = await ensureDependencyGraph(runId, artifactPath, artifact, ledger, traceLog);
-  console.log(
-    `  граф зависимостей ${readyDependencyGraph.restored ? 'переиспользован' : 'построен и сохранён'}: ` +
-      `${readyDependencyGraph.artifactPath} (${readyDependencyGraph.graph.edges.length} edge(s))`
+  const readyDependencyGraph = await ensureDependencyGraph(
+    runId, artifactPath, artifact, ledger, traceLog, args.dependencyGraphStage
   );
+  logDependencyGraphReady(readyDependencyGraph);
 
   const results = await runQuestionsAgainstSnapshot(
     runId,
@@ -2412,7 +2516,7 @@ async function runOneExtractionRun(
     embeddedCandidates,
     unitsById,
     readyDependencyGraph.graph,
-    readyDependencyGraph.artifact.contentDigest,
+    readyDependencyGraph.artifactContentDigest,
     {
     args,
     questions,
@@ -2439,7 +2543,7 @@ async function runOneExtractionRun(
     auditResults: finalAuditResults,
     focusedRetryLogs: audited.focusedRetryLogs,
     dependencyGraphArtifactPath: readyDependencyGraph.artifactPath,
-    dependencyGraphArtifactContentDigest: readyDependencyGraph.artifact.contentDigest,
+    dependencyGraphArtifactContentDigest: readyDependencyGraph.artifactContentDigest,
     dependencyGraphFingerprint: readyDependencyGraph.graph.fingerprint,
     dependencyGraphRestored: readyDependencyGraph.restored,
     artifact,
@@ -2524,12 +2628,10 @@ async function reuseExtractionRun(
     artifactPath,
     artifact,
     deps.ledger,
-    deps.traceLog
+    deps.traceLog,
+    deps.args.dependencyGraphStage
   );
-  console.log(
-    `  граф зависимостей ${readyDependencyGraph.restored ? 'переиспользован' : 'построен и сохранён'}: ` +
-      `${readyDependencyGraph.artifactPath} (${readyDependencyGraph.graph.edges.length} edge(s))`
-  );
+  logDependencyGraphReady(readyDependencyGraph);
 
   const results = await runQuestionsAgainstSnapshot(
     runId,
@@ -2537,7 +2639,7 @@ async function reuseExtractionRun(
     embeddedCandidates,
     unitsById,
     readyDependencyGraph.graph,
-    readyDependencyGraph.artifact.contentDigest,
+    readyDependencyGraph.artifactContentDigest,
     deps,
     artifact.contentDigest
   );
@@ -2552,7 +2654,7 @@ async function reuseExtractionRun(
     auditResults: artifact.auditResults,
     focusedRetryLogs: artifact.focusedRetryLogs,
     dependencyGraphArtifactPath: readyDependencyGraph.artifactPath,
-    dependencyGraphArtifactContentDigest: readyDependencyGraph.artifact.contentDigest,
+    dependencyGraphArtifactContentDigest: readyDependencyGraph.artifactContentDigest,
     dependencyGraphFingerprint: readyDependencyGraph.graph.fingerprint,
     dependencyGraphRestored: readyDependencyGraph.restored,
     artifact: null,
@@ -2831,6 +2933,7 @@ async function main() {
       {
         ranAt: new Date().toISOString(),
         docPath: args.docPath,
+        ...resolveDependencyGraphSummaryFields(args.dependencyGraphStage),
         extractionRuns: args.extractionRuns,
         questionCount: questions.length,
         taintedShingleCount: taintDetector.taintedShingleCount,
