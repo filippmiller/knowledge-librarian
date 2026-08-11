@@ -441,6 +441,26 @@ export function resolveRunConfig(
   };
 }
 
+/**
+ * Единая формулировка «отвечай только JSON» для ОБОИХ провайдеров — раньше
+ * один и тот же литерал жил двумя копиями (здесь и в
+ * `withOpenAiJsonInstruction` ниже), и это ровно тот дубль, из-за которого
+ * они рано или поздно разошлись бы при следующей правке одной копии без
+ * другой.
+ *
+ * Хвост про преамбулу/код-забор добавлен намеренно (2026-08-11, после
+ * живого прогона coverage-audit): «не оборачивай в markdown» запрещает
+ * ЗАБОР ВОКРУГ ответа, но не прозу ДО или ПОСЛЕ него — а на моделях с
+ * выключенным `thinking` (см. `postAnthropicMessages`) рассуждение вслух
+ * прямо в ответе стало нормой, не редкостью. Инструкция снижает частоту
+ * такой прозы, но не заменяет устойчивый парсинг: `normalizeJsonResponse()`
+ * всё равно обязан пережить преамбулу, если модель её всё же добавит
+ * (см. три стратегии там). Формулировка ниже сохраняет прежние три
+ * предложения дословно и добавляет к ним недостающее «только сам объект».
+ */
+const JSON_ONLY_RESPONSE_INSTRUCTION =
+  'Respond with valid JSON only. Use double quotes for all keys and string values. Do not wrap in markdown or add commentary. Output the JSON object or array itself and nothing else — no preamble, no explanation before or after it, and no code fence.';
+
 function buildAnthropicPayload(options: ChatCompletionOptions) {
   const systemParts = options.messages
     .filter((m) => m.role === 'system')
@@ -451,9 +471,7 @@ function buildAnthropicPayload(options: ChatCompletionOptions) {
     .map((m) => ({ role: m.role, content: m.content }));
 
   const responseFormatInstruction =
-    options.responseFormat === 'json_object'
-      ? 'Respond with valid JSON only. Use double quotes for all keys and string values. Do not wrap in markdown or add commentary.'
-      : null;
+    options.responseFormat === 'json_object' ? JSON_ONLY_RESPONSE_INSTRUCTION : null;
 
   const system = [...systemParts, responseFormatInstruction]
     .filter(Boolean)
@@ -580,43 +598,199 @@ function buildAnthropicSystemField(
 
 /**
  * Robustly normalize and parse JSON from AI responses, even if truncated or wrapped in markdown.
+ *
+ * `thinking: {type:'disabled'}` (см. `postAnthropicMessages` выше) означает,
+ * что на Sonnet 5/Opus 5 модель, не имея внутреннего reasoning, рассуждает
+ * вслух ПРЯМО В ОТВЕТЕ — проза перед JSON теперь обычный случай, а не
+ * редкость. Живой прогон (2026-08-11, coverage-audit) поймал старую версию
+ * этой функции на прозе вида «...в самом JSON видно, что triggerCondition
+ * установлен на `{"all":[...]}`, а...» — цитата ПРИМЕРА внутри рассуждения —
+ * за которой только потом шёл настоящий ответ в ```json-заборе с ключом
+ * `findings`. Старый код резал строку с ПЕРВОЙ `{`/`[` где угодно в тексте,
+ * то есть с примера, а не с ответа. Результат парсился без единой ошибки —
+ * просто был не тем JSON: `findings` отсутствовал, схема падала с
+ * «expected array, received undefined». Модель ответила правильно, парсер
+ * прочитал не то — и не пожаловался.
+ *
+ * Три стратегии по порядку, первая давшая результат — побеждает:
+ *
+ *  1. `tryFencedBlocks` — заборы ``` где угодно в тексте, с ПОСЛЕДНЕГО к
+ *     первому. Рассуждение-потом-ответ означает, что ответ — последний
+ *     забор; более ранние — иллюстрации по ходу рассуждения. Не разобрался
+ *     последний (например сам оборван) — пробуем предыдущий: он всё ещё
+ *     то, что модель САМА пометила как код, а не первая попавшаяся `{` в
+ *     свободном тексте.
+ *  2. `tryBestCompleteSpan` — без заборов вовсе: полные сбалансированные
+ *     значения `{...}`/`[...]` где угодно в тексте, тот же принцип
+ *     «последнее — победитель», просто без markdown-обёртки.
+ *  3. `tryLegacyGreedyRepair` — прежнее поведение как последний рубеж:
+ *     первая `{`/`[` где угодно, жадное закрытие того, что осталось
+ *     открытым, до конца текста. Единственная стратегия, умеющая
+ *     «дочинить» значение, оборванное на середине — и единственная, которая
+ *     должна за это отвечать: шаги 1–2 сознательно СТРОЖЕ (принимают только
+ *     то, что уже само по себе — полное сбалансированное значение), поэтому
+ *     на настоящем обрыве они не найдут кандидата и управление всё равно
+ *     дойдёт досюда.
+ *
+ * Проверка обрыва (`wasRepaired()` в structured-output.ts) не зависит от
+ * того, какая из трёх стратегий сработала: она сравнивает СЫРОЙ ответ
+ * целиком с этим результатом и считает баланс скобок в сыром тексте — не в
+ * том, что вернула эта функция. Не ослабляется этим фиксом, см. разбор в
+ * структурных тестах.
  */
 export function normalizeJsonResponse(raw: string): string {
-  let trimmed = raw.trim();
+  const trimmed = raw.trim();
   if (!trimmed) return '{}';
+  return tryExtractJsonValue(trimmed) ?? '{}';
+}
 
-  // Strip code fences.  Use a position-based approach that is immune to ** inside JSON bodies.
-  if (trimmed.startsWith('`')) {
-    // Remove the opening fence line (e.g. ```json or ```)
-    const firstNewline = trimmed.indexOf('\n');
-    if (firstNewline !== -1) {
-      trimmed = trimmed.slice(firstNewline + 1).trim();
-    } else {
-      trimmed = trimmed.replace(/^`+(?:json)?\s*/i, '').trim();
+/** Перебирает все три стратегии из комментария `normalizeJsonResponse`
+ *  выше. `null` означает «в тексте нет вообще ни одной `{`/`[`». */
+function tryExtractJsonValue(text: string): string | null {
+  return tryFencedBlocks(text) ?? tryBestCompleteSpan(text) ?? tryLegacyGreedyRepair(text);
+}
+
+/** Тройной бэктик, необязательный языковой тег (`json`, и что угодно ещё —
+ *  тег не проверяется, потому что реальным фильтром всё равно служит
+ *  попытка `JSON.parse` ниже, а не имя тега), необязательный перевод строки,
+ *  содержимое до следующего тройного бэктика. `g`, чтобы `matchAll` нашёл
+ *  все заборы, а не только первый; `matchAll` клонирует regex под капотом,
+ *  так что общий модульный `lastIndex` между вызовами не расползается. */
+const FENCE_RE = /```[ \t]*[A-Za-z0-9_+-]*[ \t]*\r?\n?([\s\S]*?)```/g;
+
+/**
+ * Заборы ``` где угодно в тексте, с ПОСЛЕДНЕГО к первому — обоснование
+ * порядка см. `normalizeJsonResponse`. Незакрытый забор (нет второй ```)
+ * НЕ попадает в список: `FENCE_RE` требует закрывающих бэктиков, и это
+ * осознанно — недописанный при обрыве стрима забор обязан остаться
+ * недостижимым отсюда и уйти в `tryLegacyGreedyRepair()`, чтобы
+ * `wasRepaired()` увидел несбалансированные скобки сырого текста и поднял
+ * TRUNCATED_JSON, а не получил тихо «отремонтированный» результат из более
+ * раннего, полностью постороннего забора.
+ */
+function tryFencedBlocks(text: string): string | null {
+  const blocks = Array.from(text.matchAll(FENCE_RE), (match) => match[1]);
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const hit = tryBestCompleteSpan(blocks[i]);
+    if (hit !== null) return hit;
+  }
+  return null;
+}
+
+/**
+ * Полные сбалансированные значения `{...}`/`[...]` в `text`, с ПОСЛЕДНЕГО к
+ * первому опробованные на `JSON.parse` — тот же принцип «ответ идёт
+ * последним», но без забора. Каждый диапазон отдельно проходит через
+ * `escapeControlCharsInStrings`/`coerceJsonSyntax` (те же хелперы, что и
+ * раньше), так что мелкие синтаксические огрехи внутри одного значения
+ * по-прежнему чинятся — не чинится только «слипание» двух РАЗНЫХ значений,
+ * ради чего эта функция и появилась.
+ */
+function tryBestCompleteSpan(text: string): string | null {
+  const spans = findCompleteJsonSpans(text);
+  for (let i = spans.length - 1; i >= 0; i--) {
+    const { start, end } = spans[i];
+    const candidate = coerceJsonSyntax(escapeControlCharsInStrings(text.slice(start, end)));
+    if (parsesAsJsonObjectOrArray(candidate)) return candidate;
+  }
+  return null;
+}
+
+function parsesAsJsonObjectOrArray(candidate: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(candidate);
+    return parsed !== null && typeof parsed === 'object';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Топ-уровневые сбалансированные диапазоны `{...}`/`[...]` в порядке
+ * появления в `text`. В отличие от `balanceJson()` ниже (жадной версии той
+ * же идеи), эта функция ОСТАНАВЛИВАЕТСЯ, как только глубина впервые
+ * возвращается к нулю — то есть два независимых JSON-значения подряд
+ * (пример внутри рассуждения, потом настоящий ответ) дают ДВА раздельных
+ * диапазона, а не один слипшийся кусок текста от первой `{` до последней
+ * `}`/`]` во всём тексте. Это слипание и было первопричиной бага: прежний
+ * `normalizeJsonResponse` резал с первой `{` и звал `balanceJson()`, а та
+ * жадно тянула диапазон до последней закрывающей скобки в целом тексте, не
+ * замечая, что между двумя значениями лежит несвязанная проза — на реальном
+ * прогоне (см. комментарий выше) это в итоге не парсилось вовсе и падало в
+ * `{}`.
+ *
+ * Кавычки учитываются, чтобы `{`/`}` внутри строковых значений (например,
+ * JSON-пример прямо в цитате рассуждения, как в живом прогоне) не сбивали
+ * подсчёт глубины.
+ *
+ * `{`/`[`, для которых глубина ни разу не вернулась к нулю до конца текста
+ * (обрыв на середине значения), намеренно НЕ попадают в результат — такой
+ * диапазон не закрыт, и включать его сюда значило бы называть открытый
+ * кусок текста «полным значением». Обрыв — забота `tryLegacyGreedyRepair()`
+ * и, главное, `wasRepaired()` в structured-output.ts, которая сравнивает
+ * баланс скобок СЫРОГО текста — независимо от того, что вернула эта функция.
+ */
+function findCompleteJsonSpans(text: string): Array<{ start: number; end: number }> {
+  const spans: Array<{ start: number; end: number }> = [];
+  const stack: ('{' | '[')[] = [];
+  let inString = false;
+  let escaped = false;
+  let spanStart = -1;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
     }
-    // Remove a closing fence (``` at start of a line, or at end of string)
-    const closingFence = trimmed.lastIndexOf('\n```');
-    if (closingFence !== -1) {
-      trimmed = trimmed.slice(0, closingFence).trim();
-    } else if (trimmed.endsWith('`')) {
-      trimmed = trimmed.replace(/`+\s*$/, '').trim();
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === '{' || char === '[') {
+      if (stack.length === 0) spanStart = i;
+      stack.push(char);
+      continue;
+    }
+
+    if (char === '}' || char === ']') {
+      const top = stack[stack.length - 1];
+      if ((char === '}' && top === '{') || (char === ']' && top === '[')) {
+        stack.pop();
+        if (stack.length === 0 && spanStart !== -1) {
+          spans.push({ start: spanStart, end: i + 1 });
+          spanStart = -1;
+        }
+      }
+      continue;
     }
   }
 
-  // Find the first JSON-like start
-  const startIndex = trimmed.search(/[{[]/);
-  if (startIndex === -1) return '{}';
-  trimmed = trimmed.slice(startIndex);
+  return spans;
+}
 
-  // Escape literal newlines/carriage-returns inside JSON string values.
-  // The AI sometimes puts real \n in long body fields, which makes JSON.parse fail.
-  trimmed = escapeControlCharsInStrings(trimmed);
-
-  // Attempt to fix truncated JSON by closing open brackets/braces
-  const balanced = balanceJson(trimmed);
-
-  const sanitized = coerceJsonSyntax(balanced);
-  return sanitized;
+/**
+ * Последний рубеж — поведение ДО этого фикса, буквально: первая `{`/`[` где
+ * угодно в тексте, а дальше `balanceJson()` жадно закрывает всё, что
+ * осталось открытым, до конца текста. Единственная из трёх стратегий,
+ * умеющая достраивать значение, оборванное на середине — и обязана
+ * оставаться последней: `tryFencedBlocks`/`tryBestCompleteSpan` строже
+ * (принимают только то, что уже само по себе — полное сбалансированное
+ * значение) и пробуются первыми, так что на настоящем обрыве они честно не
+ * находят кандидата, и управление доходит именно сюда — ровно туда, где
+ * `wasRepaired()` (structured-output.ts) ожидает увидеть «починенный» текст,
+ * чтобы сравнить его с несбалансированным сырым и поднять TRUNCATED_JSON.
+ */
+function tryLegacyGreedyRepair(text: string): string | null {
+  const startIndex = text.search(/[{[]/);
+  if (startIndex === -1) return null;
+  const escaped = escapeControlCharsInStrings(text.slice(startIndex));
+  return coerceJsonSyntax(balanceJson(escaped));
 }
 
 /** Escape literal newlines/CRs that appear inside JSON string values. */
@@ -1279,8 +1453,7 @@ function withOpenAiJsonInstruction(options: ChatCompletionOptions): ChatMessage[
     ...options.messages,
     {
       role: 'system',
-      content:
-        'Respond with valid JSON only. Use double quotes for all keys and string values. Do not wrap in markdown or add commentary.',
+      content: JSON_ONLY_RESPONSE_INSTRUCTION,
     },
   ];
 }

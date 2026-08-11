@@ -13,6 +13,7 @@ import {
   createChatCompletionDetailed,
   createChatCompletionStreamDetailed,
   isRetryableChatCompletionError,
+  normalizeJsonResponse,
   resolveFallbackPolicy,
   resolveRunConfig,
   streamChatCompletionTokens,
@@ -1919,5 +1920,178 @@ describe('callAnthropic completeness gate (translation-gy3 hardening)', () => {
     expect(result.attempts).toHaveLength(1);
     expect(result.attempts[0].outcome).toBe('SUCCESS');
     expect(result.attempts[0].usage).toEqual({ inputTokens: 10, outputTokens: 5 });
+  });
+});
+
+describe('normalizeJsonResponse — проза перед JSON (thinking: disabled, 2026-08-11)', () => {
+  // Точная форма реального ответа: scratchpad/aurora-v11/call-trace.jsonl,
+  // последняя запись на момент бага (coverage-audit, 604 output tokens —
+  // не обрыв, errorMessage в трассе: "findings: Invalid input: expected
+  // array, received undefined [invalid_type]"). С выключенным `thinking`
+  // (см. postAnthropicMessages) модель рассуждает вслух и по ходу
+  // ЦИТИРУЕТ пример JSON (`{"all":[...]}`, в одинарных бэктиках прямо в
+  // прозе), а настоящий ответ идёт только в ```json-заборе в конце.
+  const REAL_COVERAGE_AUDIT_RESPONSE =
+    "Смотрю на unit 4: в описании uncertainties говорится, что triggerCondition и parentExtractionRef оставлены null, но в самом JSON видно, что triggerCondition установлен на `{\"all\":[{\"fact\":\"helperPresent\",\"equals\":false}]}`, а parentExtractionRef установлен на \"b2-u3\". Это внутреннее несоответствие между полями и описанием uncertainty — сама uncertainty утверждает одно, а структура показывает другое. Также \"helperPresent\" не связано по смыслу с \"желанием продолжить\" — это придуманный trigger, не вытекающий из текста.\n\nТакже стоит проверить \"1\" — там numericConstraint unit \"секунд\" (не \"seconds\"), но так как проверка на русском, это, вероятно, приемлемо в контексте локали; сосредоточусь на структурных проблемах согласно инструкции.\n\n```json\n{\"findings\": [\n  {\"verdict\": \"UNREPRESENTED_CLAUSE\", \"quote\": \"желание продолжить не отменяет ограничение\", \"explanation\": \"Unit b2-u4 содержит противоречие: triggerCondition фактически задан как {helperPresent: false}, хотя явного основания для такого условия в тексте нет («желание продолжить» не относится к присутствию помощника), и при этом собственная uncertainty утверждает, что triggerCondition и parentExtractionRef оставлены null — что не соответствует фактическому содержанию unit. Это структурная ошибка: либо trigger придуман и должен быть удалён (оставлен null, как заявлено в uncertainty), либо uncertainty неверно описывает реальную структуру unit. В любом случае корректное представление этого утверждения (presentation-only, без придуманного trigger) отсутствует.\"}\n]}\n```";
+
+  it('реальный обрыв: находит настоящий ответ (```json-забор), а не пример-цитату внутри рассуждения', () => {
+    const result = normalizeJsonResponse(REAL_COVERAGE_AUDIT_RESPONSE);
+    const parsed = JSON.parse(result) as { findings?: unknown };
+
+    expect(parsed).not.toHaveProperty('all'); // это была бы форма примера-цитаты, не ответа
+    expect(Array.isArray(parsed.findings)).toBe(true);
+    expect(parsed.findings).toEqual([
+      expect.objectContaining({
+        verdict: 'UNREPRESENTED_CLAUSE',
+        quote: 'желание продолжить не отменяет ограничение',
+      }),
+    ]);
+  });
+
+  it('забор в позиции 0 — прежнее поведение не изменилось', () => {
+    const payload = { kind: 'PRICE', price: 100 };
+    const result = normalizeJsonResponse('```json\n' + JSON.stringify(payload) + '\n```');
+    expect(JSON.parse(result)).toEqual(payload);
+  });
+
+  it('без забора, чистый JSON — прежнее поведение не изменилось', () => {
+    const payload = { kind: 'PRICE', price: 100 };
+    const result = normalizeJsonResponse(JSON.stringify(payload));
+    expect(JSON.parse(result)).toEqual(payload);
+  });
+
+  it('несколько заборов: побеждает последний, что разбирается как JSON', () => {
+    const early = { role: 'example', note: 'не используй меня' };
+    const real = { role: 'answer', note: 'используй меня' };
+    const text =
+      'Пример структуры:\n```json\n' +
+      JSON.stringify(early) +
+      '\n```\n\nА вот настоящий ответ:\n```json\n' +
+      JSON.stringify(real) +
+      '\n```';
+
+    expect(JSON.parse(normalizeJsonResponse(text))).toEqual(real);
+  });
+
+  it('последний забор — не JSON: откатывается к более раннему валидному забору, а не к первой скобке в тексте', () => {
+    const real = { role: 'answer', note: 'используй меня' };
+    const text =
+      '```json\n' +
+      JSON.stringify(real) +
+      '\n```\n\nИ ещё заметка от модели:\n```\nэто вообще не JSON, просто текст\n```';
+
+    expect(JSON.parse(normalizeJsonResponse(text))).toEqual(real);
+  });
+
+  // Различает Fix A от Fix B: контент ПОСЛЕ настоящего забора, который сам
+  // по себе тоже похож на полный JSON, не должен перебивать забор — заборы
+  // разбираются ПЕРВЫМИ и целиком, раньше, чем в дело идёт сканирование
+  // голых скобок по всему тексту.
+  it('приоритет забора над отдельным JSON-фрагментом ПОСЛЕ него', () => {
+    const real = { findings: [{ verdict: 'REAL' }] };
+    const decoyAfterFence = { findings: [] };
+    const text =
+      'Вот ответ:\n```json\n' +
+      JSON.stringify(real) +
+      '\n```\n\nP.S. для сравнения раньше было бы `' +
+      JSON.stringify(decoyAfterFence) +
+      '` (пустой массив).';
+
+    expect(JSON.parse(normalizeJsonResponse(text))).toEqual(real);
+  });
+
+  // Различает Fix B от старого поведения: без единого забора, прозы ДО и
+  // ПОСЛЕ первого JSON-подобного фрагмента, старый код склеивал оба
+  // значения в одну нераспознаваемую строку и падал в '{}' (эмпирически
+  // проверено на реальной фикстуре выше — тот же механизм).
+  it('без заборов вовсе, два независимых JSON-значения подряд: побеждает последнее', () => {
+    const text =
+      'Например, формат такой: {"example":true}. А теперь настоящий ответ: {"kind":"X","value":1}';
+
+    expect(JSON.parse(normalizeJsonResponse(text))).toEqual({ kind: 'X', value: 1 });
+  });
+
+  it('оборванный (незакрытый) ```json-забор посреди прозы: результат всё ещё парсится (обрыв остаётся виден raw-тексту, не этой функции)', () => {
+    const text = 'Рассуждаю над ответом...\n\n```json\n{"findings": [{"verdict": "UNREPRESENTED';
+
+    // normalizeJsonResponse() сама не отвечает за детекцию обрыва — это
+    // работа wasRepaired() в structured-output.ts, которая сравнивает
+    // СЫРОЙ текст (несбалансированный здесь) с результатом ЭТОЙ функции.
+    // Эта функция обязана лишь не бросить исключение и вернуть что-то
+    // парсящееся — иначе wasRepaired() не дойдёт до сравнения балансов и
+    // ответ уйдёт как INVALID_JSON, а не TRUNCATED_JSON.
+    const result = normalizeJsonResponse(text);
+    expect(() => JSON.parse(result)).not.toThrow();
+  });
+
+  it('проза без единого валидного JSON где-либо — как и раньше, пустой объект', () => {
+    expect(normalizeJsonResponse('Извините, не могу ответить.')).toBe('{}');
+  });
+
+  it('пустой ответ — как и раньше, пустой объект', () => {
+    expect(normalizeJsonResponse('   ')).toBe('{}');
+  });
+});
+
+describe('JSON-only инструкция явно запрещает преамбулу и код-забор (2026-08-11)', () => {
+  // «Не оборачивай в markdown» само по себе не запрещает прозу ДО/ПОСЛЕ
+  // объекта — только обёртку вокруг него. С выключенным `thinking`
+  // (Sonnet 5 / Opus 5, см. postAnthropicMessages) рассуждение вслух прямо
+  // в ответе стало нормой, и прежней формулировки было недостаточно, чтобы
+  // это явно запретить. normalizeJsonResponse остаётся обязательной сеткой
+  // безопасности независимо от этой инструкции — она лишь снижает частоту.
+  it('Anthropic system-инструкция явно запрещает преамбулу, объяснение и код-забор — прежний текст сохранён', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('{"ok":true}'));
+
+    await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      responseFormat: 'json_object',
+    });
+
+    const system = anthropicRequestBodies()[0].system as string;
+    expect(system).toContain('no preamble');
+    expect(system).toContain('no code fence');
+    expect(system).toContain('Respond with valid JSON only.');
+    expect(system).toContain('Do not wrap in markdown or add commentary.');
+  });
+
+  it('OpenAI JSON-инструкция явно запрещает преамбулу, объяснение и код-забор — прежний текст сохранён', async () => {
+    openaiCreate.mockResolvedValue(openaiOk('{"ok":true}'));
+
+    await createChatCompletionDetailed({
+      messages: [{ role: 'user', content: 'Извлеки правила из документа.' }],
+      provider: 'openai',
+      responseFormat: 'json_object',
+    });
+
+    const sent = openaiCreate.mock.calls[0][0].messages as { role: string; content: string }[];
+    const instruction = sent[sent.length - 1].content;
+    expect(instruction).toContain('no preamble');
+    expect(instruction).toContain('no code fence');
+    expect(instruction).toContain('Respond with valid JSON only.');
+    expect(instruction).toContain('Do not wrap in markdown or add commentary.');
+  });
+
+  it('обе инструкции — Anthropic и OpenAI — используют один и тот же текст (не разошлись)', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('{"ok":true}'));
+    openaiCreate.mockResolvedValue(openaiOk('{"ok":true}'));
+
+    await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      responseFormat: 'json_object',
+    });
+    await createChatCompletionDetailed({
+      messages: [{ role: 'user', content: 'Извлеки правила из документа.' }],
+      provider: 'openai',
+      responseFormat: 'json_object',
+    });
+
+    const anthropicSystem = anthropicRequestBodies()[0].system as string;
+    const sent = openaiCreate.mock.calls[0][0].messages as { role: string; content: string }[];
+    const openaiInstruction = sent[sent.length - 1].content;
+
+    expect(anthropicSystem).toBe(openaiInstruction);
   });
 });
