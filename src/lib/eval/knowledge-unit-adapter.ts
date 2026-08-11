@@ -147,6 +147,13 @@ export function buildEvaluatedCandidate(
     triggerPresentationConditions,
     negativeInferenceAllowed: hasSourceBackedNecessaryCondition(unit.statement, triggerPresentationConditions),
     parentRuleRef: unit.parentRuleRef,
+    // Без этой строки вето по соседям в resolveKnowledgeSet НИКОГДА не
+    // срабатывает на живом прогоне: оно ищет кандидатов с общим
+    // sourceBlockAnchor, а здесь — единственном пути из персистентного юнита в
+    // кандидата — поле не проставлялось. Тесты резолюции собирают кандидатов
+    // вручную и задают якорь, поэтому оставались зелёными при мёртвой защите в
+    // проде. Это опаснее отсутствия защиты: в отчёте она есть, в работе её нет.
+    sourceBlockAnchor: unit.sourceBlockAnchor,
     // Ничто в extraction/persistence не производит эту связь сегодня — см.
     // repo-wide поиск перед написанием этого файла (Task 13 планирование).
     supersedes: [],

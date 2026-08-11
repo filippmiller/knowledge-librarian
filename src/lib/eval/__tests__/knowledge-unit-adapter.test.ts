@@ -140,6 +140,23 @@ describe('buildEvaluatedCandidate', () => {
     expect(candidate.trigger).toBeNull();
   });
 
+  it('sourceBlockAnchor доносится до кандидата — иначе вето по соседям мертво в проде', () => {
+    // Регрессия на реальный дефект: вето по соседям в resolveKnowledgeSet
+    // ищет кандидатов с общим sourceBlockAnchor, а адаптер — единственный
+    // путь из персистентного юнита в кандидата на живом прогоне — поле не
+    // проставлял. Тесты резолюции собирают кандидатов вручную и якорь задают,
+    // поэтому оставались зелёными при полностью мёртвой защите. Этот тест
+    // стережёт именно связь между слоями, а не поведение каждого из них.
+    const candidate = buildEvaluatedCandidate(
+      unit({ kind: 'PROCEDURE_STEP' }),
+      emptyQueryFrame(),
+      INTERNAL_CONTEXT,
+      REVIEWED_AT
+    );
+    expect(candidate.sourceBlockAnchor).toBe(unit({ kind: 'PROCEDURE_STEP' }).sourceBlockAnchor);
+    expect(candidate.sourceBlockAnchor).toBeDefined();
+  });
+
   it('EXCEPTION_RULE С triggerCondition -> trigger вычислен реальным evaluateTrigger, не заглушкой', () => {
     const candidate = buildEvaluatedCandidate(
       unit({ kind: 'EXCEPTION_RULE', triggerCondition: { all: [{ fact: 'helperPresent', equals: true }] } }),
