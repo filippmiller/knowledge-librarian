@@ -115,7 +115,8 @@ export function buildDependencyRepairMessages(units: readonly PersistedKnowledge
     role: 'system',
     content:
       `${POLICY}\nPerform only the focused corrections requested by the audit. Return the complete corrected graph; do not make unrelated changes. ` +
-      'Use the identical strict {"edges":[...]} contract from the proposal stage, with exact source anchor/quote evidence and auditStatus "PENDING" on every edge.',
+      'Use the identical strict {"edges":[...]} contract from the proposal stage, with exact source anchor/quote evidence and auditStatus "PENDING" on every edge. ' +
+      'A finding with kind "AMBIGUOUS_RELATION" must be resolved, not left unanswered: either keep or add the edge with real cited evidence from both units that settles the relation, or drop the edge entirely rather than guessing.',
   }, { role: 'user', content: JSON.stringify({ units: JSON.parse(unitPayload(units)), graph, findings: audit.findings }, null, 2) }];
 }
 
@@ -186,6 +187,32 @@ async function runStage<T>(stage: string, messages: readonly ChatMessage[], exac
   return value;
 }
 
+/** True iff a dependency-audit finding hedges a specific relation rather than
+ * describing a concrete proposed/missing edge. MISSING_EDGE, UNSUPPORTED_EDGE
+ * and WRONG_DIRECTION always describe one specific edge, so both endpoints
+ * are always required for them to be actionable. AMBIGUOUS_RELATION is
+ * different: the auditor may be unsure not just how two units relate but
+ * precisely *which* unit is involved, so it may legitimately omit an
+ * endpoint (see auditStageSchema -- the both-endpoints check there only runs
+ * for verdict REPAIR, i.e. it was never meant to bind AMBIGUOUS_RELATION
+ * findings emitted under an AMBIGUOUS verdict). */
+function isAmbiguousRelationFinding(finding: DependencyAudit['findings'][number]): boolean {
+  return finding.kind === 'AMBIGUOUS_RELATION';
+}
+
+/** True iff the audit reports an unresolved ambiguity: either the
+ * whole-graph verdict itself is AMBIGUOUS, or at least one finding hedges a
+ * specific relation (an AMBIGUOUS_RELATION finding can ride along inside an
+ * otherwise-ordinary REPAIR verdict, as seen live in
+ * scratchpad/aurora-v5/call-trace.jsonl). Checked directly from
+ * `verdict`/`findings` every time rather than cached from an earlier round,
+ * so the final failure message reflects the *last* audit, not history --
+ * mirrors the same reasoning `hasUnresolvedAmbiguity` documents for coverage
+ * audits in audited-extraction.ts. */
+function hasUnresolvedAmbiguity(audit: DependencyAudit): boolean {
+  return audit.verdict === 'AMBIGUOUS' || audit.findings.some(isAmbiguousRelationFinding);
+}
+
 export async function buildAuditedDependencyGraph(options: {
   readonly units: readonly PersistedKnowledgeUnit[];
   readonly proposer: DependencyGraphStage<DependencyGraphProposal>;
@@ -211,15 +238,55 @@ export async function buildAuditedDependencyGraph(options: {
         edges,
       });
     }
-    if (audit.verdict === 'AMBIGUOUS' || audit.findings.some((f) => f.kind === 'AMBIGUOUS_RELATION'))
-      throw new DependencyGraphBuildError('Dependency graph is ambiguous; refusing to publish it.');
+    // AMBIGUOUS (whole-verdict) or an AMBIGUOUS_RELATION finding used to be
+    // instant-fatal here, before the repair loop below ever got a chance --
+    // the same class of defect already fixed for the extraction coverage
+    // auditor (audited-extraction.ts, commit 4b4d9fc): a verdict that means
+    // "I'm not sure" was treated the same as silence, when it is exactly the
+    // kind of question a focused repair round exists to resolve (goal-shift
+    // continuation, 2026-08-11: a live fixture run died here on first audit,
+    // see scratchpad/aurora-v5/call-trace.jsonl -- an AMBIGUOUS_RELATION
+    // finding rode along inside an otherwise-ordinary REPAIR verdict with
+    // five other, perfectly actionable findings, and the whole graph was
+    // refused without a single repair attempt). Route it into the same
+    // bounded repair loop as any other finding instead: buildDependencyRepairMessages
+    // already forwards the complete `audit.findings` list unfiltered, so no
+    // separate filtering step is needed here the way audited-extraction.ts
+    // needed isActionableCoverageFinding -- every finding kind in this domain
+    // is already actionable by repair. Only a REPAIR/AMBIGUOUS verdict with
+    // zero findings -- nothing at all to hand the repairer -- still fails
+    // immediately below, unchanged from before.
     if (audit.findings.length === 0) throw new DependencyGraphBuildError('Repair verdict requires focused findings.');
-    if (audit.findings.some((finding) => finding.fromUnitId === null || finding.toUnitId === null))
+    // Both endpoints are still required for every finding kind except
+    // AMBIGUOUS_RELATION (see isAmbiguousRelationFinding): relaxing this for
+    // ambiguity is precisely what keeps the fix from reintroducing a hard
+    // failure by the back door for a legitimately endpoint-less hedge, while
+    // MISSING_EDGE/UNSUPPORTED_EDGE/WRONG_DIRECTION -- which always describe
+    // one concrete edge -- are held to the original, stricter bar.
+    if (audit.findings.some((finding) => !isAmbiguousRelationFinding(finding) && (finding.fromUnitId === null || finding.toUnitId === null)))
       throw new DependencyGraphBuildError('Repair findings must identify both directed endpoints.');
     const unitIds = new Set(orderedUnits.map((unit) => unit.unitId));
-    if (audit.findings.some((finding) => !unitIds.has(finding.fromUnitId!) || !unitIds.has(finding.toUnitId!)))
-      throw new DependencyGraphBuildError('Repair findings reference unknown directed endpoints.');
-    if (repair === DEPENDENCY_GRAPH_MAX_REPAIRS) throw new DependencyGraphBuildError('Dependency graph did not converge after two focused repairs.');
+    // Any endpoint that IS present -- on any finding kind, ambiguous or not
+    // -- must still name a real unit; only a genuinely absent (null)
+    // endpoint is exempted, and only because the check above already permits
+    // null exclusively for AMBIGUOUS_RELATION findings.
+    if (audit.findings.some((finding) =>
+      (finding.fromUnitId !== null && !unitIds.has(finding.fromUnitId)) ||
+      (finding.toUnitId !== null && !unitIds.has(finding.toUnitId))
+    )) throw new DependencyGraphBuildError('Repair findings reference unknown directed endpoints.');
+    if (repair === DEPENDENCY_GRAPH_MAX_REPAIRS) {
+      // Same bar as before (DEPENDENCY_GRAPH_MAX_REPAIRS is not raised), but
+      // the message now says truthfully which kind of non-convergence
+      // survived every round instead of always calling it "did not
+      // converge" -- a graph that is still ambiguous after a real repair
+      // attempt is a different, more diagnosable failure than one that
+      // simply never settled.
+      throw new DependencyGraphBuildError(
+        hasUnresolvedAmbiguity(audit)
+          ? `Dependency graph is still ambiguous after ${DEPENDENCY_GRAPH_MAX_REPAIRS} focused repairs; refusing to publish it.`
+          : 'Dependency graph did not converge after two focused repairs.'
+      );
+    }
     graph = validateGraph(await runStage(`REPAIR_${repair + 1}`, buildDependencyRepairMessages(orderedUnits, graph, audit), options.exactRequestFingerprint, validatedGraphSchema, options.repairer, options.checkpoint), orderedUnits);
   }
   throw new DependencyGraphBuildError('Dependency graph did not converge.');
