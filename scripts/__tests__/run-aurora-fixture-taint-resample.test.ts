@@ -262,8 +262,7 @@ describe('targeted malformed exception repair', () => {
     expect(prompt).toContain('настоящий EXCEPTION_RULE');
     expect(prompt).toContain('id, type, content и evidence ЗАПРЕЩЕНЫ');
     expect(prompt).toContain('"evidenceByField"');
-    expect(prompt).toContain('water_unavailable');
-    expect(prompt).toContain('PROCEDURE_STEP с triggerCondition=null');
+    expect(prompt).toContain('resourceAvailability');
   });
 
   it('renders every trigger fact and enum value from the shared registry, never stale aliases', () => {
@@ -306,7 +305,17 @@ describe('targeted malformed exception repair', () => {
     expect(prompt).toContain('если X выражается закрытым каталогом, triggerCondition обязателен');
   });
 
-  it('keeps no-water as a noncatalogued PROCEDURE_STEP with explicit uncertainty', () => {
+  // Real live-fixture bug (2026-08-12, block b6): this prompt still carried a
+  // stale explicit ban on "отсутствие воды" as a trigger, left over from
+  // BEFORE resourceAvailability existed in the catalog (translation-oxu). The
+  // catalog entry right above this sentence (trigger-facts.ts) already names
+  // "при отсутствии воды допустим антисептик" as its canonical correct
+  // example — the ban directly contradicted the catalog it sat next to in the
+  // same prompt. Coverage audit correctly flagged the resulting
+  // PROCEDURE_STEP+UNRECOGNIZED_TRIGGER_CONDITION as a structural gap, and
+  // resolveMalformedExceptions has no further repair round, so the whole run
+  // died on a self-contradiction in static prompt text, not a model mistake.
+  it('classifies no-water as EXCEPTION_RULE with the catalogued resourceAvailability trigger', () => {
     const prompt = buildExceptionRepairPromptMessages({
       block: { anchor: 'b6', text: 'При отсутствии воды допустим кожный антисептик.' },
       malformed: [{
@@ -316,11 +325,10 @@ describe('targeted malformed exception repair', () => {
       }],
     }).map((message) => message.content).join('\n');
 
-    expect(prompt).toContain('water_unavailable');
-    expect(prompt).toContain('PROCEDURE_STEP с triggerCondition=null');
-    expect(prompt).toContain('UNRECOGNIZED_TRIGGER_CONDITION');
-    expect(prompt).toContain('условие отсутствия воды не входит в закрытый каталог');
-    expect(prompt).toContain('Для самостоятельного условия, которого нет в trigger-каталоге, используй именно "UNRECOGNIZED_TRIGGER_CONDITION", не "OTHER"');
+    expect(prompt).toContain('resourceAvailability');
+    expect(prompt).toContain('UNAVAILABLE');
+    expect(prompt).not.toContain('water_unavailable');
+    expect(prompt).not.toContain('условие отсутствия воды не входит в закрытый каталог');
     expect(prompt).toContain('"DANGLING_PARENT_REF"');
   });
 
