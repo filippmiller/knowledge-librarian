@@ -167,6 +167,20 @@ describe('buildExtractionPromptMessages — чистая функция, без 
     expect(system).toContain('текстовая близость двух правил в одном блоке сама по себе не создаёт');
   });
 
+  // Real live-fixture bug (2026-08-12, block b8): "желание продолжить не
+  // отменяет установленное ограничение" was classified as EXCEPTION_RULE with
+  // a fabricated helperPresent=false trigger — the schema requires a
+  // triggerCondition whenever kind=EXCEPTION_RULE, so the model invented one
+  // to satisfy the contract for a clause that isn't an exception at all: it
+  // explicitly denies being an override, the opposite of what EXCEPTION_RULE
+  // means.
+  it('не учит модель делать EXCEPTION_RULE из фразы, подтверждающей неотменяемость базового правила', () => {
+    const messages = buildExtractionPromptMessages([BLOCK_A]);
+    const system = messages.find((m) => m.role === 'system')!.content.toLowerCase();
+    expect(system).toContain('подтверждает, что базовое правило не отменяется');
+    expect(system).toContain('без выдуманного условия только ради того, чтобы оправдать kind="exception_rule"');
+  });
+
   // Real live-fixture bug (2026-08-12, block b8, targeted taint resample):
   // resolveTaintedCandidates (run-aurora-fixture.ts) calls the BASE extractor
   // directly, with no focused-repair loop and no fallback on an audit gap —

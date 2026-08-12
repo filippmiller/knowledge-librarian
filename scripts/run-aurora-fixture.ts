@@ -60,6 +60,7 @@ import {
   type AuditBlockCoverageOptions,
   type BlockCoverageAuditResult,
 } from '../src/lib/knowledge/extraction-coverage-auditor';
+import { quoteSpansOverlap } from '../src/lib/knowledge/quote-locator';
 import {
   ChatCompletionError,
   isRetryableChatCompletionError,
@@ -1059,10 +1060,23 @@ export async function resolveTaintedCandidates(
         blocks: [sourceBlock],
       }) : { units: [...restoredExtraction], structuredResult: {} as never };
       if (restoredExtraction === undefined) checkpoint?.saveTaintExtraction(round, sourceBlock, retryResult.units);
+      // Prefix extractionRef AND parentExtractionRef together, exactly like
+      // resolveMalformedExceptions does just below (2026-08-12 live bug):
+      // this used to force parentExtractionRef to null unconditionally, which
+      // discarded a VALID same-response sibling link (validateParentRefs
+      // inside `extractor` already resolves any parentExtractionRef to
+      // another unit in this same batch, or nulls it as DANGLING_PARENT_REF —
+      // there is no other kind of non-null value to receive here). Live
+      // trace: the model correctly linked an EXCEPTION_RULE to its sibling
+      // base rule within the same single-block response, and this line threw
+      // that correct link away, which coverage-audit then (correctly) flagged
+      // as a malformed exception with a missing parent — a defect the code
+      // itself introduced, not the model.
+      const taintRetryPrefix = `taint-retry-${anchor}-`;
       const namespaced = retryResult.units.map((u) => ({
         ...u,
-        extractionRef: `taint-retry-${anchor}-${u.extractionRef}`,
-        parentExtractionRef: null,
+        extractionRef: `${taintRetryPrefix}${u.extractionRef}`,
+        parentExtractionRef: u.parentExtractionRef === null ? null : `${taintRetryPrefix}${u.parentExtractionRef}`,
       }));
 
       // A taint retry replaces every unit for the block, so the previous

@@ -363,6 +363,21 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
     expect(prompt).toContain('текстовая близость не создаёт отношение условие/исключение сама по себе');
   });
 
+  // Real live-fixture bug (2026-08-12, block b8): "желание продолжить не
+  // отменяет установленное ограничение" was classified as EXCEPTION_RULE with
+  // a fabricated helperPresent=false trigger, invented only to satisfy the
+  // schema's requirement that EXCEPTION_RULE carry a triggerCondition — for a
+  // clause that explicitly denies being an override.
+  it('repair-промпт тоже не учит делать EXCEPTION_RULE из подтверждающей неотменяемость фразы', () => {
+    const prompt = buildFocusedRepairPromptMessages({
+      block: block('b8', 'За один эпизод разрешено не более трёх циклов. Желание продолжить не отменяет ограничение.'),
+      findings: [{ verdict: 'UNREPRESENTED_CLAUSE', quote: 'не отменяет ограничение', explanation: 'нужен ли отдельный unit', quoteVerified: true }],
+      existingUnits: [unit({ kind: 'PROCEDURE_STEP', extractionRef: 'base', statement: 'За один эпизод разрешено не более трёх циклов.' })],
+    }).map((message) => message.content).join('\n').toLowerCase();
+    expect(prompt).toContain('подтверждает, что базовое правило не отменяется');
+    expect(prompt).toContain('не изобретай условие только ради оправдания kind="exception_rule"'.toLowerCase());
+  });
+
   it('b2 regression: оговорка не приглашает kind=fact/disclaimer и получает точные enum/object контракты', () => {
     const messages = buildFocusedRepairPromptMessages({
       block: {

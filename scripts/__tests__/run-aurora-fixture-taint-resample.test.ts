@@ -172,6 +172,62 @@ describe('targeted taint resample completeness gate', () => {
     )).rejects.toThrow('1 unresolved evidence');
   });
 
+  // Real live-fixture bug (2026-08-12, block b8): the model correctly
+  // returned an EXCEPTION_RULE linked to its sibling base rule within the
+  // SAME single-block taint-retry response (parentExtractionRef: "base"),
+  // but the namespacing step used to force parentExtractionRef to null
+  // unconditionally for every replacement unit -- discarding a valid,
+  // same-response link. Coverage audit then (correctly) flagged the
+  // resulting parentless exception as malformed, and resolveTaintedCandidates
+  // has no repair loop, so the whole run died on a defect the orchestration
+  // code introduced, not the model. Fixed to prefix parentExtractionRef the
+  // same way extractionRef is already prefixed, mirroring
+  // resolveMalformedExceptions's namespacing just below.
+  it('preserves a valid same-response parentExtractionRef instead of discarding it', async () => {
+    const initial = assignIdentity([extracted()], new Map([[BLOCK.anchor, BLOCK]]), 'rev-1').units;
+    const extractor = vi.fn(async () => ({
+      units: [
+        extracted({ statement: 'Основное правило', extractionRef: 'base' }),
+        extracted({
+          kind: 'EXCEPTION_RULE' as const,
+          statement: 'Безопасное обязательное исключение',
+          extractionRef: 'exception',
+          parentExtractionRef: 'base',
+          triggerCondition: { all: [{ fact: 'helperPresent', equals: false }] },
+          sourceSpan: { anchor: BLOCK.anchor, quote: 'Обязательное исключение.' },
+          evidenceByField: {
+            statement: { anchor: BLOCK.anchor, quote: 'Обязательное исключение.' },
+            triggerCondition: { anchor: BLOCK.anchor, quote: 'Обязательное исключение.' },
+          },
+        }),
+      ],
+      attempts: [],
+      structuredResult: {} as never,
+    }));
+    const auditor = vi.fn(async () => ({
+      blockAnchor: BLOCK.anchor,
+      findings: [{ verdict: 'COVERED' as const, quote: '', explanation: '', quoteVerified: false }],
+      hasGap: false,
+      unresolved: false,
+    }));
+
+    const result = await resolveTaintedCandidates(
+      initial,
+      new Map([[BLOCK.anchor, BLOCK]]),
+      'rev-1',
+      detector,
+      extractor,
+      auditor,
+      { runConfig, maxTokens: 100 },
+      1
+    );
+
+    const base = result.units.find((u) => u.statement === 'Основное правило')!;
+    const exception = result.units.find((u) => u.kind === 'EXCEPTION_RULE')!;
+    expect(base).toBeDefined();
+    expect(exception.parentRuleRef).toBe(base.unitId);
+  });
+
   it('rejects ambiguous identity diagnostics on the initial extraction path', () => {
     const duplicateIdentity = assignIdentity(
       [extracted({ extractionRef: 'one' }), extracted({ extractionRef: 'two' })],
