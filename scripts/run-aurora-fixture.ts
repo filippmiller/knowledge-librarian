@@ -2154,6 +2154,13 @@ async function runQuestionsAgainstSnapshot(
   const reviewedAt = new Date().toISOString();
   const questionModel = deps.questionModel;
   const questionProvider = deps.questionProvider;
+  // ЕДИНСТВЕННЫЙ источник действующего размера пула на этот прогон. И отпечаток
+  // журнала, и сам вызов retrieveUnits обязаны читать ОДНО значение: если
+  // отпечаток берёт число из одного места, а движок из другого, они могут
+  // разойтись, и тогда журнал заявит пул, которым прогон не считался. Это
+  // хуже отсутствия флага — молча заверяет сравнение, которого не было
+  // (находка независимого ревью Grok 4.6).
+  const effectiveRerankPoolSize = deps.args.rerankPoolSize;
   const rerankerProvider = new LlmRerankerProvider(
     budgetedRunConfig(deps.ledger, 'reranker', 'aurora-fixture-reranker-v1', questionProvider, questionModel)
   );
@@ -2211,7 +2218,7 @@ async function runQuestionsAgainstSnapshot(
       decisionRelevance: { maxStageAttempts: 3, maxIdenticalSchemaFailures: 2 },
       wholeQuestion: { maxAttempts: MAX_ENGINE_QUESTION_RETRY_ATTEMPTS },
     },
-    queryEmbeddingModel: queryEmbeddingProvider.modelInfo(), retrievalContract: retrievalContractProbe(deps.args.rerankPoolSize),
+    queryEmbeddingModel: queryEmbeddingProvider.modelInfo(), retrievalContract: retrievalContractProbe(effectiveRerankPoolSize),
     deterministicStages: {
       buildQueryFrame: buildQueryFrame(
         { facetMentions: [], triggerFactMentions: [{ fact: 'consentStatus', rawValue: 'EXPLICIT', messageId: 'probe', quote: 'согласен' }], questionAspects: ['REQUIREMENT'] },
@@ -2247,7 +2254,7 @@ async function runQuestionsAgainstSnapshot(
     dependencyGraph,
     embeddingProvider: queryEmbeddingProvider,
     rerankerProvider,
-    ...(deps.args.rerankPoolSize !== undefined && { rerankPoolSize: deps.args.rerankPoolSize }),
+    ...(effectiveRerankPoolSize !== undefined && { rerankPoolSize: effectiveRerankPoolSize }),
     requestContext: { audience: 'internal', now: reviewedAt },
     reviewedAt,
     queryFrameRunConfig: budgetedRunConfig(deps.ledger, 'query-frame', 'aurora-fixture-query-frame-v1', questionProvider, questionModel),
@@ -3157,6 +3164,12 @@ async function main() {
         ranAt: new Date().toISOString(),
         docPath: args.docPath,
         ...resolveDependencyGraphSummaryFields(args.dependencyGraphStage),
+        // Присутствует ТОЛЬКО при переопределении: на дефолтном прогоне
+        // summary обязан остаться байт-в-байт прежним. Без этого поля два
+        // прогона с разными пулами выглядят в summary одинаково — отпечаток
+        // журнала их различает, но человек, читающий summary, не различает
+        // (находка независимого ревью Grok 4.6).
+        ...(args.rerankPoolSize !== undefined && { rerankPoolSizeOverride: args.rerankPoolSize }),
         // Пусто на чистом прогоне — тогда грейдер видит ровно то же, что
         // видел до появления реестра, и оценивает как раньше.
         degradations: runDegradations.snapshot(),
