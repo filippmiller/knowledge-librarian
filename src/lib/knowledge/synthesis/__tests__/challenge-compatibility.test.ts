@@ -6,6 +6,8 @@ import type {
 } from '../../applicability/decision-relevance';
 import {
   buildChallengeCompatibilityMessages,
+  challengeCompatibilityResponseSchema,
+  deriveChallengeVerdict,
   resolveProbabilisticExclusionSafety,
   selectChallengeRecoveryCandidates,
   validateChallengeCompatibilityDecisions,
@@ -178,9 +180,44 @@ describe('challenge-candidate safety', () => {
   it('provider semantic ID errors remain paid semantic errors with telemetry', () => {
     expect(() => validateChallengeCompatibilityDecisions(
       ['expected'],
-      [{ unitId: 'unexpected', verdict: 'COMPATIBLE', contradiction: 'NO', missingRequiredContent: 'NO', reason: 'x' }],
+      [{ unitId: 'unexpected' }],
       { attempts: [], requestMessages: [{ role: 'user', content: 'paid request' }], responseText: '{"results":[]}' }
     )).toThrow(PaidStructuredSemanticError);
+  });
+
+  describe('deriveChallengeVerdict — вердикт выводится, а не спрашивается (translation-69l)', () => {
+    it.each([
+      ['YES', 'NO', 'CONFLICTS'],
+      ['NO', 'YES', 'CONFLICTS'],
+      ['YES', 'UNKNOWN', 'CONFLICTS'],
+      ['UNKNOWN', 'YES', 'CONFLICTS'],
+      ['UNKNOWN', 'NO', 'AMBIGUOUS'],
+      ['NO', 'UNKNOWN', 'AMBIGUOUS'],
+      ['UNKNOWN', 'UNKNOWN', 'AMBIGUOUS'],
+      ['NO', 'NO', 'COMPATIBLE'],
+    ] as const)(
+      'contradiction=%s + missingRequiredContent=%s → %s',
+      (contradiction, missingRequiredContent, expected) => {
+        expect(deriveChallengeVerdict({ contradiction, missingRequiredContent })).toBe(expected);
+      }
+    );
+
+    it('YES побеждает UNKNOWN — доказанное противоречие не смягчается неизвестностью второй проверки', () => {
+      // Ровно тот вход, на котором Q04 падал в ENGINE_ERROR: модель называла
+      // AMBIGUOUS там, где проверки требуют CONFLICTS. Теперь это не расхождение,
+      // а единственный возможный результат.
+      expect(deriveChallengeVerdict({ contradiction: 'YES', missingRequiredContent: 'UNKNOWN' })).toBe('CONFLICTS');
+    });
+
+    it('схема ответа НЕ принимает verdict от модели', () => {
+      // Гарантия, что поле не вернут «на всякий случай»: strictObject обязан
+      // отвергнуть лишний ключ, иначе вердикт снова начнёт приходить извне.
+      expect(
+        challengeCompatibilityResponseSchema.safeParse({
+          results: [{ unitId: 'u1', verdict: 'COMPATIBLE', contradiction: 'NO', missingRequiredContent: 'NO', reason: 'x' }],
+        }).success
+      ).toBe(false);
+    });
   });
 
   it('no recoverable omission schedules no recovery work', () => {

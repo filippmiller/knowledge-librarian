@@ -30,17 +30,38 @@ export interface ChallengeCompatibilityResult {
   readonly responseText: string | null;
 }
 
+/** `verdict` НАМЕРЕННО отсутствует: модель отвечает только на два
+ *  наблюдения — contradiction и missingRequiredContent, — а вердикт
+ *  ВЫВОДИТСЯ из них детерминированно (`deriveChallengeVerdict`).
+ *
+ *  Раньше вердикт спрашивали у модели ПАРАЛЛЕЛЬНО с теми же двумя
+ *  проверками, а `validateChallengeCompatibilityDecisions` бросал, если они
+ *  разошлись. На живом прогоне это и случилось (Q04: `AMBIGUOUS` при
+ *  `checks require CONFLICTS`) — кейс падал в ENGINE_ERROR, то есть НЕ
+ *  получал ответа вовсе. Требовать от модели самосогласованности там, где
+ *  вывод чисто механический, — просить лишнего и падать на этом. */
 export const challengeCompatibilityResponseSchema = z.strictObject({
   results: z.array(
     z.strictObject({
       unitId: z.string().min(1),
-      verdict: z.enum(CHALLENGE_COMPATIBILITY_VERDICTS),
       reason: z.string().min(1),
       contradiction: z.enum(['NO', 'YES', 'UNKNOWN']),
       missingRequiredContent: z.enum(['NO', 'YES', 'UNKNOWN']),
     })
   ),
 });
+
+/** ЕДИНСТВЕННОЕ место, где рождается вердикт. Приоритет YES над UNKNOWN не
+ *  косметика: доказанное противоречие не смягчается тем, что вторая проверка
+ *  осталась неизвестной. */
+export function deriveChallengeVerdict(checks: {
+  readonly contradiction: 'NO' | 'YES' | 'UNKNOWN';
+  readonly missingRequiredContent: 'NO' | 'YES' | 'UNKNOWN';
+}): ChallengeCompatibilityVerdict {
+  if (checks.contradiction === 'YES' || checks.missingRequiredContent === 'YES') return 'CONFLICTS';
+  if (checks.contradiction === 'UNKNOWN' || checks.missingRequiredContent === 'UNKNOWN') return 'AMBIGUOUS';
+  return 'COMPATIBLE';
+}
 
 export function buildChallengeCompatibilityMessages(
   question: string,
@@ -61,8 +82,9 @@ export function buildChallengeCompatibilityMessages(
         'Выбранное активное узкое исключение может сделать общее правило совместимым, если оно действительно разрешает описанное в ответе узкое действие. ' +
         'Верни COMPATIBLE только при явном доказательстве одновременно двух пунктов: нет противоречия и нет пропущенного обязательного содержания. ' +
         'Для каждого результата отдельно заполни contradiction и missingRequiredContent значением NO|YES|UNKNOWN. ' +
-        'COMPATIBLE допустим только при NO+NO; CONFLICTS — когда хотя бы одно YES; AMBIGUOUS — когда YES нет, но хотя бы одно UNKNOWN. ' +
-        'Ответ строго JSON: {"results":[{"unitId":"...","verdict":"COMPATIBLE|CONFLICTS|AMBIGUOUS","contradiction":"NO|YES|UNKNOWN","missingRequiredContent":"NO|YES|UNKNOWN","reason":"..."}]}.',
+        'Вердикт НЕ возвращай: он выводится из этих двух проверок автоматически (хотя бы одно YES → CONFLICTS; ' +
+        'иначе хотя бы одно UNKNOWN → AMBIGUOUS; иначе COMPATIBLE). Твоя задача — только два наблюдения. ' +
+        'Ответ строго JSON: {"results":[{"unitId":"...","contradiction":"NO|YES|UNKNOWN","missingRequiredContent":"NO|YES|UNKNOWN","reason":"..."}]}.',
     },
     {
       role: 'user',
@@ -96,9 +118,12 @@ export interface VerifyChallengeCompatibilityOptions {
   readonly runConfig: ExtractionRunConfig;
 }
 
+/** Принимает РОВНО то, что проверяет: набор unitId. Сузилось вместе с
+ *  удалением проверки вердикта — сигнатура не должна обещать, что смотрит на
+ *  поля, которых больше не касается. */
 export function validateChallengeCompatibilityDecisions(
   expectedUnitIds: readonly string[],
-  decisions: readonly ChallengeCompatibilityDecision[],
+  decisions: readonly { readonly unitId: string }[],
   telemetry: { attempts: readonly CompletionAttempt[]; requestMessages: readonly ChatMessage[]; responseText: string | null }
 ): void {
   try {
@@ -107,12 +132,9 @@ export function validateChallengeCompatibilityDecisions(
     for (const decision of decisions) {
       if (!expected.has(decision.unitId)) throw new Error(`Challenge verifier returned unexpected unitId: ${decision.unitId}`);
       if (seen.has(decision.unitId)) throw new Error(`Challenge verifier returned duplicate unitId: ${decision.unitId}`);
-      const hasYes = decision.contradiction === 'YES' || decision.missingRequiredContent === 'YES';
-      const hasUnknown = decision.contradiction === 'UNKNOWN' || decision.missingRequiredContent === 'UNKNOWN';
-      const expectedVerdict = hasYes ? 'CONFLICTS' : hasUnknown ? 'AMBIGUOUS' : 'COMPATIBLE';
-      if (decision.verdict !== expectedVerdict) {
-        throw new Error(`Challenge verifier returned inconsistent verdict for ${decision.unitId}: ${decision.verdict} but checks require ${expectedVerdict}`);
-      }
+      // Проверки на согласованность вердикта здесь БОЛЬШЕ НЕТ и быть не может:
+      // вердикт больше не приходит от модели, он выводится в
+      // `deriveChallengeVerdict`. Расхождению неоткуда взяться.
       seen.add(decision.unitId);
     }
     for (const unitId of expected) if (!seen.has(unitId)) throw new Error(`Challenge verifier omitted unitId: ${unitId}`);
@@ -141,11 +163,15 @@ export async function verifyChallengeCompatibility(
     result.data.results,
     { attempts: result.attempts, requestMessages: result.requestMessages ?? messages, responseText: result.rawText ?? null }
   );
-  const blockingUnitIds = result.data.results
+  const decisions: ChallengeCompatibilityDecision[] = result.data.results.map((decision) => ({
+    ...decision,
+    verdict: deriveChallengeVerdict(decision),
+  }));
+  const blockingUnitIds = decisions
     .filter((decision) => decision.verdict !== 'COMPATIBLE')
     .map((decision) => decision.unitId);
   return {
-    decisions: result.data.results,
+    decisions,
     blockingUnitIds,
     attempts: result.attempts,
     requestMessages: result.requestMessages ?? messages,
