@@ -61,6 +61,7 @@ import {
   type BlockCoverageAuditResult,
 } from '../src/lib/knowledge/extraction-coverage-auditor';
 import { quoteSpansOverlap } from '../src/lib/knowledge/quote-locator';
+import { sharedTaxonomyRulesText } from '../src/lib/knowledge/prompt-taxonomy-rules';
 import {
   ChatCompletionError,
   isRetryableChatCompletionError,
@@ -890,6 +891,7 @@ uncertainties — всегда массив объектов ТОЧНО форм
 - самостоятельное условное действие (если X, сделать Y) — PROCEDURE_STEP, parentExtractionRef=null; если X выражается закрытым каталогом, triggerCondition обязателен, иначе triggerCondition=null и обязательна uncertainty kind=UNRECOGNIZED_TRIGGER_CONDITION с дословной цитатой X;
 - поясняющая семантика или значение термина — TERM_DEFINITION, parentExtractionRef=null, triggerCondition=null.
 Не сохраняй EXCEPTION_RULE без родителя или без известного triggerCondition. Не изобретай родителя либо trigger: переклассифицируй по функции текста.
+${sharedTaxonomyRulesText()}
 Все sourceSpan/evidence quote должны быть дословными фрагментами исходного блока, а anchor должен точно совпадать с данным anchor.
 Ответ СТРОГО JSON: {"units": [...]}`;
 

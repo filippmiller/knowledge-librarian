@@ -42,6 +42,11 @@ import type { ExtractionRunConfig } from '@/lib/ai/extraction-run';
 import type { ChatMessage } from '@/lib/ai/chat-provider';
 import { structured } from '@/lib/ai/structured-output';
 import { quoteSpansOverlap } from './quote-locator';
+import {
+  CYCLES_VS_TIMES_RULE,
+  NUMERIC_SPLIT_IDENTITY_RULE,
+  sharedTaxonomyRulesText,
+} from './prompt-taxonomy-rules';
 import { z } from 'zod';
 
 export interface FocusedRetryLog {
@@ -95,10 +100,10 @@ kind — СТРОГО одно из: "PROCEDURE_STEP", "EXCEPTION_RULE", "TERM_D
 Если finding указывает самостоятельный запрет/обязанность внутри фразы с определением, добавь отдельный sibling kind="PROCEDURE_STEP" для нормативной семантики; существующий TERM_DEFINITION не заменяй и искусственный parent к нему не создавай.
 Finding с verdict "AMBIGUOUS" означает, что аудитор не уверен, нужен ли для этого содержания отдельный unit — не оставляй такой finding без ответа: либо верни новый самостоятельный unit на то содержание, в котором сомневался аудитор (новый extractionRef, evidence именно на эту часть текста), либо, если оно уже по существу покрыто существующим unit'ом, верни его исправленную версию (тем же extractionRef), чтобы это содержание однозначно отражалось в его statement/evidence.
 
-numericConstraint — null либо ТОЧНО объект {"factKey":"что измеряется","value":2,"unit":"fingers"}. Ключи min/max/from/to/range/values ЗАПРЕЩЕНЫ. Наблюдавшийся неверный ответ {"min":2,"max":3,"unit":"..."} повторять ЗАПРЕЩЕНО. Для диапазона или альтернативы («два или три пальца») верни отдельный unit на КАЖДОЕ значение: один с value=2 и один с value=3, у каждого ровно один factKey/value/unit. Первый исправленный unit может повторить statement существующего unit для безопасной замены; каждый дополнительный unit обязан иметь отличающийся statement и точную отдельную sourceSpan.quote для своего числового токена (например «двух» и «трёх»), чтобы identity не столкнулась.
-  ВАЖНО: "отдельную sourceSpan.quote" — это ТОП-УРОВНЕВОЕ поле sourceSpan.quote (и evidenceByField.statement.quote), а НЕ только evidenceByField.numericConstraint.quote: узкая цитата только там, а sourceSpan.quote при этом — прежняя полная фраза, даёт ОДИНАКОВЫЙ sourceSpan.quote у обоих unit'ов, значит одинаковый unitId и провал прогона на identity-конфликте (уже наблюдавшийся живой сбой).
+numericConstraint — null либо ТОЧНО объект {"factKey":"что измеряется","value":2,"unit":"fingers"}. Ключи min/max/from/to/range/values ЗАПРЕЩЕНЫ. Наблюдавшийся неверный ответ {"min":2,"max":3,"unit":"..."} повторять ЗАПРЕЩЕНО. Первый исправленный unit может повторить statement существующего unit для безопасной замены; каждый дополнительный unit обязан иметь отличающийся statement.
+  ${NUMERIC_SPLIT_IDENTITY_RULE}
   Если разделение исказило бы смысл, numericConstraint=null и добавь UNRECOGNIZED_NUMERIC_CONSTRAINT; никогда не кодируй диапазон через min/max.
-Для unit: "cycles" используй ТОЛЬКО когда исходный текст прямо считает циклы или целые повторяющиеся последовательности. Количество отдельных действий/случаев (например «прижать один раз») имеет unit="times", не "cycles".
+${CYCLES_VS_TIMES_RULE}
 
 Каждый unit обязан иметь ТОЧНО эту объектную форму (без дополнительных ключей):
 {"kind":"PROCEDURE_STEP","statement":"...","facets":{},"triggerCondition":null,"numericConstraint":null,"extractionRef":"r1","parentExtractionRef":null,"sourceSpan":{"anchor":"ДАННЫЙ_ANCHOR","quote":"ДОСЛОВНАЯ ЦИТАТА"},"evidenceByField":{"statement":{"anchor":"ДАННЫЙ_ANCHOR","quote":"ДОСЛОВНАЯ ЦИТАТА"}},"uncertainties":[]}
@@ -113,8 +118,8 @@ triggerCondition — null либо ТОЧНО {"all":[{"fact":"...","equals":...
 Если исходное условие выражается этим каталогом, запрещено оставлять его только прозой в statement.
 
 Если новое правило является узким исключением/послаблением, которое изменяет уже извлечённое базовое правило: kind="EXCEPTION_RULE", triggerCondition обязателен, parentExtractionRef обязан быть extractionRef базового unit из списка «Уже извлечено». Если base и exception оба создаются этим repair-ответом, parentExtractionRef ссылается на extractionRef нового base. Самостоятельное условное действие, не изменяющее базовое правило, остаётся PROCEDURE_STEP и не получает искусственного parent.
-Правило о СПОСОБЕ/ТЕХНИКЕ действия рядом в тексте с правилом об УСЛОВИИ МЕСТА/КОНТЕКСТА — это НЕ исключение из правила про место, даже если оба в одном блоке подряд: текстовая близость не создаёт отношение условие/исключение сама по себе, его создаёт только сам текст. Если finding настаивает на такой связи, а текст её не задаёт явно, верни этот unit как kind="PROCEDURE_STEP" с parentExtractionRef=null и triggerCondition=null, а не как EXCEPTION_RULE с унаследованным условием соседа.
-Фраза, которая ПОДТВЕРЖДАЕТ, что базовое правило НЕ отменяется («желание продолжить не отменяет ограничение»), — это НЕ EXCEPTION_RULE: исключение изменяет/отменяет базовое правило при условии, а такая фраза прямо отрицает отмену. Верни её как kind="PROCEDURE_STEP" с parentExtractionRef на base-unit и triggerCondition=null — не изобретай условие только ради оправдания kind="EXCEPTION_RULE".
+${sharedTaxonomyRulesText()}
+Если finding настаивает на связи, которую текст не задаёт явно, следуй правилам выше, а не finding'у.
 extractionRef каждого нового unit уникален в этом ответе.
 uncertainties — всегда массив объектов ТОЧНО формы {"kind":"OTHER","description":"...","quote":"дословная цитата"}. uncertainty.kind — СТРОГО одно из: "UNRECOGNIZED_TRIGGER_CONDITION", "UNRECOGNIZED_NUMERIC_CONSTRAINT", "AMBIGUOUS_FACET", "DANGLING_PARENT_REF", "DUPLICATE_EXTRACTION_REF", "OTHER". Строки вместо объектов запрещены.
 Не изобретай значения. Если finding нельзя уверенно структурировать, сохрани правило с явной uncertainty.

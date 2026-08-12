@@ -12,6 +12,7 @@ import type { ExtractedKnowledgeUnit } from '../applicability/extraction';
 import { assignIdentity } from '../applicability/identity-assignment';
 import { validateParentRefs } from '../applicability/extraction-parent-refs';
 import type { AuditBlockCoverageOptions, BlockCoverageAuditResult, CoverageFinding } from '../extraction-coverage-auditor';
+import { NUMERIC_SPLIT_IDENTITY_RULE, sharedTaxonomyRulesText } from '../prompt-taxonomy-rules';
 
 /**
  * Goal-shift continuation (2026-08-09), Task 19: composes batch-extraction
@@ -288,7 +289,20 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
     expect(compact).toContain('посетителям запрещено');
     expect(compact).toContain('Сотрудникам можно войти.');
     expect(compact).not.toContain('Каждая единица знания (unit) имеет один из видов');
-    expect(compact.length).toBeLessThan(full.length / 2);
+
+    // The shared taxonomy block (prompt-taxonomy-rules.ts) is DELIBERATELY
+    // byte-identical in both prompts — that consolidation is what stopped the
+    // three prompts drifting apart across six paid runs (translation-*). So it
+    // is not evidence that the repair prompt duplicates the full extraction
+    // prompt, and the size comparison measures the non-shared remainder, which
+    // is what "ограничен findings" actually means here. Comparing raw lengths
+    // would make this test fail purely because a shared policy rule got a
+    // needed counter-example — punishing the fix instead of the defect.
+    // Presence of each shared rule in each prompt is asserted in
+    // prompt-taxonomy-rules.test.ts; the base prompt renders them indented, so
+    // only the length is discounted here.
+    const sharedLength = sharedTaxonomyRulesText().length;
+    expect(compact.length - sharedLength).toBeLessThan((full.length - sharedLength) / 2);
   });
 
   it('b7 prompt forbids the observed min/max shape and specifies split numeric units', () => {
@@ -302,11 +316,13 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
     });
     const prompt = messages.map((message) => message.content).join('\n');
 
+    // min/max shape ban is specific to this prompt's numericConstraint
+    // contract. The split-identity rule itself is shared across all three
+    // extraction prompts and asserted in prompt-taxonomy-rules.test.ts.
     expect(prompt).toContain('{"factKey":"что измеряется","value":2,"unit":"fingers"}');
     expect(prompt).toContain('Ключи min/max/from/to/range/values ЗАПРЕЩЕНЫ');
     expect(prompt).toContain('{"min":2,"max":3,"unit":"..."}');
-    expect(prompt).toContain('один с value=2 и один с value=3');
-    expect(prompt).toContain('«двух» и «трёх»');
+    expect(prompt).toContain(NUMERIC_SPLIT_IDENTITY_RULE);
   });
 
   // Real live-fixture bug (2026-08-12, block b7): this rule already said each
@@ -370,39 +386,11 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
     expect(prompt).not.toContain('kind="PROHIBITION"');
   });
 
-  // Real live-fixture bug (2026-08-12, block b5): three focused-repair rounds
-  // in a row kept re-parenting "regular scratching through fabric is not a
-  // proper method" onto the neighboring seclusion rule with an inherited
-  // privacyContext=PRIVATE condition, despite the auditor naming the exact
-  // defect each round. FOCUSED_REPAIR_MAX_ROUNDS exhausted, whole extraction
-  // run died. Repair prompt needed the same concrete counter-example already
-  // added to the main extraction prompt — the abstract sentence alone did not
-  // stop it across repeated rounds either.
-  it('repair-промпт тоже не учит приписывать правилу о способе условие места соседнего правила', () => {
-    const prompt = buildFocusedRepairPromptMessages({
-      block: block('b5', 'Перед началом уединиться. Регулярное выполнение через ткань не считается надлежащим способом.'),
-      findings: [{ verdict: 'AMBIGUOUS', quote: 'через ткань', explanation: 'привязка к parent сомнительна', quoteVerified: true }],
-      existingUnits: [unit({ kind: 'PROCEDURE_STEP', extractionRef: 'seclusion', statement: 'Перед началом действия необходимо уединиться.' })],
-    }).map((message) => message.content).join('\n').toLowerCase();
-    expect(prompt).toContain('правило о способе/технике действия');
-    expect(prompt).toContain('условии места/контекста');
-    expect(prompt).toContain('текстовая близость не создаёт отношение условие/исключение сама по себе');
-  });
-
-  // Real live-fixture bug (2026-08-12, block b8): "желание продолжить не
-  // отменяет установленное ограничение" was classified as EXCEPTION_RULE with
-  // a fabricated helperPresent=false trigger, invented only to satisfy the
-  // schema's requirement that EXCEPTION_RULE carry a triggerCondition — for a
-  // clause that explicitly denies being an override.
-  it('repair-промпт тоже не учит делать EXCEPTION_RULE из подтверждающей неотменяемость фразы', () => {
-    const prompt = buildFocusedRepairPromptMessages({
-      block: block('b8', 'За один эпизод разрешено не более трёх циклов. Желание продолжить не отменяет ограничение.'),
-      findings: [{ verdict: 'UNREPRESENTED_CLAUSE', quote: 'не отменяет ограничение', explanation: 'нужен ли отдельный unit', quoteVerified: true }],
-      existingUnits: [unit({ kind: 'PROCEDURE_STEP', extractionRef: 'base', statement: 'За один эпизод разрешено не более трёх циклов.' })],
-    }).map((message) => message.content).join('\n').toLowerCase();
-    expect(prompt).toContain('подтверждает, что базовое правило не отменяется');
-    expect(prompt).toContain('не изобретай условие только ради оправдания kind="exception_rule"'.toLowerCase());
-  });
+  // The shared taxonomy counter-examples (метод/место b5, подтверждающая
+  // фраза b8, безусловный запрет b14) now come from prompt-taxonomy-rules.ts
+  // and are asserted for ALL THREE extraction prompts at once in
+  // prompt-taxonomy-rules.test.ts. Restating them per-prompt here is exactly
+  // what allowed the three prompts to drift apart across six paid runs.
 
   it('b2 regression: оговорка не приглашает kind=fact/disclaimer и получает точные enum/object контракты', () => {
     const messages = buildFocusedRepairPromptMessages({

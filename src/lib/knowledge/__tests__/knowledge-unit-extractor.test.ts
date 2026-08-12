@@ -149,67 +149,12 @@ describe('buildExtractionPromptMessages — чистая функция, без 
     expect(system.content).toContain('а не родителями друг друга');
   });
 
-  // Real live-fixture bug (2026-08-12, block b5): the model kept classifying
-  // "regular scratching through fabric is not a proper method" as an
-  // EXCEPTION_RULE parented to the neighboring seclusion rule with an
-  // inherited privacyContext=PRIVATE condition, purely because both sentences
-  // sit in the same block. Coverage-audit flagged this correctly three repair
-  // rounds in a row and the model never internalized the fix, exhausting
-  // FOCUSED_REPAIR_MAX_ROUNDS and killing the whole extraction run. Same
-  // disease as the resourceAvailability over-application fixed twice earlier
-  // the same day (952beb7, e714ef4): abstract rule wording alone did not stop
-  // it, a concrete counter-example did.
-  it('не учит модель приписывать правилу о способе действия условие места соседнего правила', () => {
-    const messages = buildExtractionPromptMessages([BLOCK_A]);
-    const system = messages.find((m) => m.role === 'system')!.content.toLowerCase();
-    expect(system).toContain('правило о способе/технике действия');
-    expect(system).toContain('условии места/контекста');
-    expect(system).toContain('текстовая близость двух правил в одном блоке сама по себе не создаёт');
-  });
-
-  // Real live-fixture bug (2026-08-12, block b8): "желание продолжить не
-  // отменяет установленное ограничение" was classified as EXCEPTION_RULE with
-  // a fabricated helperPresent=false trigger — the schema requires a
-  // triggerCondition whenever kind=EXCEPTION_RULE, so the model invented one
-  // to satisfy the contract for a clause that isn't an exception at all: it
-  // explicitly denies being an override, the opposite of what EXCEPTION_RULE
-  // means.
-  it('не учит модель делать EXCEPTION_RULE из фразы, подтверждающей неотменяемость базового правила', () => {
-    const messages = buildExtractionPromptMessages([BLOCK_A]);
-    const system = messages.find((m) => m.role === 'system')!.content.toLowerCase();
-    expect(system).toContain('подтверждает, что базовое правило не отменяется');
-    expect(system).toContain('без выдуманного условия только ради того, чтобы оправдать kind="exception_rule"');
-  });
-
-  // Real live-fixture bug (2026-08-12, block b7): "два или три пальца" split
-  // into two units by numericConstraint.value, but nothing told the base
-  // extractor that the split units also need distinct sourceSpan.quote — only
-  // the FOCUSED_REPAIR prompt (audited-extraction.ts) had that guidance, and
-  // even there it was self-contradictory. Mirrored here so a fresh base
-  // extraction hitting the same alternative-value phrasing doesn't hit the
-  // same identity collision before repair ever runs.
-  it('учит разводить sourceSpan.quote при разбиении альтернативы на несколько numericConstraint unit\'ов', () => {
-    const messages = buildExtractionPromptMessages([BLOCK_A]);
-    const system = messages.find((m) => m.role === 'system')!.content.toLowerCase();
-    expect(system).toContain('обязаны сузиться до его собственного числового токена');
-    expect(system).toContain('unitid у разных unit\'ов, и прогон падает на identity-конфликте');
-  });
-
-  // Real live-fixture bug (2026-08-12, block b8, targeted taint resample):
-  // resolveTaintedCandidates (run-aurora-fixture.ts) calls the BASE extractor
-  // directly, with no focused-repair loop and no fallback on an audit gap —
-  // one bad field fails the whole run outright. The base prompt was missing
-  // the cycles-vs-times canonicalization guidance that only existed in
-  // FOCUSED_REPAIR_SYSTEM_PROMPT (audited-extraction.ts), so a fresh resample
-  // of a block that explicitly counts cycles picked unit="times", coverage
-  // audit correctly flagged it, and there was no repair path to recover.
-  // Same policy, now in both places it's exercised live.
-  it('не учит модель путать unit="times" и unit="cycles" — то же правило, что в focused-repair', () => {
-    const messages = buildExtractionPromptMessages([BLOCK_A]);
-    const system = messages.find((m) => m.role === 'system')!.content.toLowerCase();
-    expect(system).toContain('используй только когда исходный текст прямо считает циклы');
-    expect(system).toContain('«прижать один раз») имеет unit="times", не "cycles"'.toLowerCase());
-  });
+  // Taxonomy counter-examples that must be identical in every extraction
+  // prompt (метод/место b5, подтверждающая фраза b8, безусловный запрет b14,
+  // cycles/times b8, numeric-split identity b7) are asserted centrally in
+  // prompt-taxonomy-rules.test.ts against the shared constants. Duplicating
+  // those assertions here is what let the three prompts drift apart in the
+  // first place, so this file deliberately does not restate them.
 
   // Real cost bug (2026-08-09): 43 of 43 SCHEMA_MISMATCH extraction failures
   // across every benchmark run this session were the SAME error — the model
