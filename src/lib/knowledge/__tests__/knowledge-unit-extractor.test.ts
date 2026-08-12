@@ -167,6 +167,22 @@ describe('buildExtractionPromptMessages — чистая функция, без 
     expect(system).toContain('текстовая близость двух правил в одном блоке сама по себе не создаёт');
   });
 
+  // Real live-fixture bug (2026-08-12, block b8, targeted taint resample):
+  // resolveTaintedCandidates (run-aurora-fixture.ts) calls the BASE extractor
+  // directly, with no focused-repair loop and no fallback on an audit gap —
+  // one bad field fails the whole run outright. The base prompt was missing
+  // the cycles-vs-times canonicalization guidance that only existed in
+  // FOCUSED_REPAIR_SYSTEM_PROMPT (audited-extraction.ts), so a fresh resample
+  // of a block that explicitly counts cycles picked unit="times", coverage
+  // audit correctly flagged it, and there was no repair path to recover.
+  // Same policy, now in both places it's exercised live.
+  it('не учит модель путать unit="times" и unit="cycles" — то же правило, что в focused-repair', () => {
+    const messages = buildExtractionPromptMessages([BLOCK_A]);
+    const system = messages.find((m) => m.role === 'system')!.content.toLowerCase();
+    expect(system).toContain('используй только когда исходный текст прямо считает циклы');
+    expect(system).toContain('«прижать один раз») имеет unit="times", не "cycles"'.toLowerCase());
+  });
+
   // Real cost bug (2026-08-09): 43 of 43 SCHEMA_MISMATCH extraction failures
   // across every benchmark run this session were the SAME error — the model
   // puts trigger-fact names (privacyContext, consentStatus, reachability,
