@@ -249,6 +249,18 @@ interface CliArgs {
    *  only. See run-summary.json's dependencyGraphStage for how a skipped run
    *  stays distinguishable from a real measurement. */
   readonly dependencyGraphStage: DependencyGraphStageArg;
+  /** Кардинальность пула, уходящего в реранкер (`fused.slice(0, N)` в
+   *  `retrieveUnits`). Не задан — дефолт модуля retrieval, то есть прежнее
+   *  поведение. Это ДИАГНОСТИЧЕСКАЯ ручка для атрибуции провалов стадии
+   *  retrieval: позиционный отрез пула — единственное оставшееся в конвейере
+   *  произвольное усечение по позиции (финальный отрез уже заменён на
+   *  калиброванную полосу оценок, см. `selectRerankScoreBand`). Прогон с
+   *  N = размеру корпуса даёт ПОТОЛОК того, что вообще способна купить любая
+   *  политика пула; без этого числа выбор политики — угадывание.
+   *  Значение попадает в отпечаток журнала вопросов через
+   *  `retrievalContractProbe()`, поэтому прогон с другим пулом не может быть
+   *  молча сопоставлен с прогоном на дефолте. */
+  readonly rerankPoolSize?: number;
   /** Путь к сохранённому артефакту извлечения. Задан — фаза извлечения не
    *  делает НИ ОДНОГО платного вызова (см. `--reuse-extraction` ниже);
    *  `undefined` — сегодняшнее поведение, свежее извлечение. */
@@ -324,7 +336,7 @@ export function dependencyGraphQuestionFingerprint(
 }
 
 const USAGE =
-  'Usage: npx tsx scripts/run-aurora-fixture.ts --mode=e2e --extraction-runs=N --out=path/to/dir --max-cost-usd=N --max-paid-calls=N [--engine-profile=quality|balanced|economy] [--question-provider=anthropic|openai] [--question-model=MODEL] [--doc=path/to/source.docx] [--batch-size=N]';
+  'Usage: npx tsx scripts/run-aurora-fixture.ts --mode=e2e --extraction-runs=N --out=path/to/dir --max-cost-usd=N --max-paid-calls=N [--engine-profile=quality|balanced|economy] [--question-provider=anthropic|openai] [--question-model=MODEL] [--doc=path/to/source.docx] [--batch-size=N] [--rerank-pool-size=N]';
 
 export function parseArgs(argv: readonly string[]): CliArgs {
   // Опции со значением проверяются по префиксу, голые флаги — ТОЧНЫМ
@@ -346,6 +358,7 @@ export function parseArgs(argv: readonly string[]): CliArgs {
     '--engine-profile=',
     '--reuse-extraction=',
     '--dependency-graph=',
+    '--rerank-pool-size=',
   ];
   const knownFlags = ['--fresh-extraction'];
   const unknown = argv.filter(
@@ -370,6 +383,7 @@ export function parseArgs(argv: readonly string[]): CliArgs {
     'quality'
   ).trim().toLowerCase();
   const reuseArg = argv.find((a) => a.startsWith('--reuse-extraction='))?.slice('--reuse-extraction='.length);
+  const rerankPoolSizeArg = argv.find((a) => a.startsWith('--rerank-pool-size='))?.slice('--rerank-pool-size='.length);
   const freshFlag = argv.includes('--fresh-extraction');
   // Дефолт 'required' НЕ читается из env (в отличие от AURORA_ENGINE_PROFILE
   // выше) — намеренно один явный флаг и ни одного скрытого способа его
@@ -445,6 +459,15 @@ export function parseArgs(argv: readonly string[]): CliArgs {
     throw new Error(`--batch-size обязан быть положительным целым, получено "${batchSizeArg}".\n${USAGE}`);
   }
 
+  // Нижняя граница — 1, а не 0: `retrieveUnits` трактует 0 как легальный
+  // запрос "верни пустой пул", и такой прогон стоил бы денег, отвечая на
+  // вопрос, который никто не задавал. Отсутствие флага (undefined) — это
+  // "дефолт модуля", а не число, поэтому проверка только для заданного.
+  const rerankPoolSizeArgValue = rerankPoolSizeArg === undefined ? undefined : Number(rerankPoolSizeArg);
+  if (rerankPoolSizeArgValue !== undefined && (!Number.isInteger(rerankPoolSizeArgValue) || rerankPoolSizeArgValue < 1)) {
+    throw new Error(`--rerank-pool-size обязан быть положительным целым, получено "${rerankPoolSizeArg}".\n${USAGE}`);
+  }
+
   return {
     mode: modeArg as Mode,
     extractionRuns,
@@ -460,6 +483,7 @@ export function parseArgs(argv: readonly string[]): CliArgs {
     engineProfile: engineProfileRaw as EngineProfile,
     dependencyGraphStage: dependencyGraphStageRaw as DependencyGraphStageArg,
     ...(reuseArg !== undefined && { reuseExtraction: reuseArg }),
+    ...(rerankPoolSizeArgValue !== undefined && { rerankPoolSize: rerankPoolSizeArgValue }),
   };
 }
 
@@ -528,6 +552,8 @@ interface EngineContext {
   readonly dependencyGraph: DependencyGraph;
   readonly embeddingProvider: OpenAIEmbeddingProvider;
   readonly rerankerProvider: LlmRerankerProvider;
+  /** `undefined` — дефолт `retrieveUnits`; см. `CliArgs.rerankPoolSize`. */
+  readonly rerankPoolSize?: number;
   readonly requestContext: RequestContext;
   readonly reviewedAt: string;
   readonly queryFrameRunConfig: ReturnType<typeof resolveExtractionRunConfig>;
@@ -1477,6 +1503,7 @@ async function runEngineOnQuestion(
       retrieveUnits(input.question, ctx.embeddedCandidates, {
         embeddingProvider: ctx.embeddingProvider,
         rerankerProvider: ctx.rerankerProvider,
+        ...(ctx.rerankPoolSize !== undefined && { rerankPoolSize: ctx.rerankPoolSize }),
       })
     );
     const rerankerAttempts = ctx.rerankerProvider.drainAttempts();
@@ -2184,7 +2211,7 @@ async function runQuestionsAgainstSnapshot(
       decisionRelevance: { maxStageAttempts: 3, maxIdenticalSchemaFailures: 2 },
       wholeQuestion: { maxAttempts: MAX_ENGINE_QUESTION_RETRY_ATTEMPTS },
     },
-    queryEmbeddingModel: queryEmbeddingProvider.modelInfo(), retrievalContract: retrievalContractProbe(),
+    queryEmbeddingModel: queryEmbeddingProvider.modelInfo(), retrievalContract: retrievalContractProbe(deps.args.rerankPoolSize),
     deterministicStages: {
       buildQueryFrame: buildQueryFrame(
         { facetMentions: [], triggerFactMentions: [{ fact: 'consentStatus', rawValue: 'EXPLICIT', messageId: 'probe', quote: 'согласен' }], questionAspects: ['REQUIREMENT'] },
@@ -2220,6 +2247,7 @@ async function runQuestionsAgainstSnapshot(
     dependencyGraph,
     embeddingProvider: queryEmbeddingProvider,
     rerankerProvider,
+    ...(deps.args.rerankPoolSize !== undefined && { rerankPoolSize: deps.args.rerankPoolSize }),
     requestContext: { audience: 'internal', now: reviewedAt },
     reviewedAt,
     queryFrameRunConfig: budgetedRunConfig(deps.ledger, 'query-frame', 'aurora-fixture-query-frame-v1', questionProvider, questionModel),
@@ -2978,6 +3006,12 @@ function printPreRunCeiling(blockCount: number, args: CliArgs, questionCount: nu
   console.log(
     `  --max-paid-calls=${args.maxPaidCalls} — hard raw-request reservation ceiling; no provider request starts after this many reservations`
   );
+  if (args.rerankPoolSize !== undefined) {
+    console.log(
+      `  --rerank-pool-size=${args.rerankPoolSize} — ДИАГНОСТИЧЕСКОЕ переопределение пула реранкера (дефолт модуля НЕ применён); ` +
+        'прогон несопоставим с дефолтным напрямую — отпечаток журнала вопросов это фиксирует'
+    );
+  }
 }
 
 // ────────────────────────────────── main ─────────────────────────────────────

@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { ModelInfo } from '@/lib/ai/embedding-provider';
 import type { RankedCandidate, RerankCandidate, RerankerProvider } from '@/lib/ai/reranker-provider';
-import { embedCandidates, retrieveUnits, type EmbeddingProvider } from '../semantic-retrieval';
+import {
+  embedCandidates,
+  retrievalContractProbe,
+  retrieveUnits,
+  type EmbeddingProvider,
+} from '../semantic-retrieval';
 
 /**
  * PR G acceptance criteria: recall@5 после reranking; recall@K ДО reranking
@@ -337,5 +342,31 @@ describe('retrieveUnits — оркестрация lexical + semantic + RRF + re
       });
       expect(result.topK.length).toBeGreaterThan(0);
     });
+  });
+});
+
+describe('retrievalContractProbe — отпечаток обязан отражать ДЕЙСТВУЮЩИЙ пул', () => {
+  const poolSizeOf = (probe: unknown): unknown => (probe as { rerankPoolSize: unknown }).rerankPoolSize;
+
+  it('переопределённый пул попадает в отпечаток, а не подменяется дефолтом', () => {
+    expect(poolSizeOf(retrievalContractProbe(49))).toBe(49);
+  });
+
+  it('прогоны с РАЗНЫМ пулом дают РАЗНЫЕ отпечатки', () => {
+    // Суть гарантии: замер на переопределённом пуле не может быть молча
+    // сопоставлен с замером на дефолте. Раньше проба всегда рапортовала
+    // константу модуля, поэтому оба прогона выглядели одинаково.
+    const asDefault = JSON.stringify(retrievalContractProbe());
+    const asOverridden = JSON.stringify(retrievalContractProbe(49));
+    expect(asOverridden).not.toBe(asDefault);
+  });
+
+  it('без аргумента — дефолт модуля, прежнее поведение сохранено', () => {
+    const bare = poolSizeOf(retrievalContractProbe());
+    expect(typeof bare).toBe('number');
+    expect(poolSizeOf(retrievalContractProbe(bare as number))).toBe(bare);
+    expect(JSON.stringify(retrievalContractProbe(bare as number))).toBe(
+      JSON.stringify(retrievalContractProbe())
+    );
   });
 });

@@ -116,10 +116,17 @@ export function selectRerankScoreBand(
     .map((candidate) => candidate.id);
 }
 
-export function retrievalContractProbe(): unknown {
+/** Отпечаток контракта retrieval для журнала вопросов.
+ *
+ * `effectiveRerankPoolSize` обязан быть ТЕМ ЖЕ числом, что уйдёт в
+ * `retrieveUnits` для этого прогона. Раньше проба всегда рапортовала
+ * `DEFAULT_RERANK_POOL_SIZE`, поэтому прогон с переопределённым пулом получал
+ * отпечаток, неотличимый от дефолтного, — два несопоставимых замера молча
+ * слились бы в один. Не задан — дефолт модуля, прежнее поведение. */
+export function retrievalContractProbe(effectiveRerankPoolSize?: number): unknown {
   return {
     rrfK: DEFAULT_RRF_K,
-    rerankPoolSize: DEFAULT_RERANK_POOL_SIZE,
+    rerankPoolSize: effectiveRerankPoolSize ?? DEFAULT_RERANK_POOL_SIZE,
     legacyDisableLimit: 0,
     scoreBand: {
       absoluteFloor: RERANK_SCORE_ABSOLUTE_FLOOR,
