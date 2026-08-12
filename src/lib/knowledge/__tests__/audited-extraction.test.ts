@@ -309,6 +309,32 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
     expect(prompt).toContain('«двух» и «трёх»');
   });
 
+  // Real live-fixture bug (2026-08-12, block b7): this rule already said each
+  // additional split unit needs "точную отдельную sourceSpan.quote", but the
+  // SAME sentence also said evidenceByField.statement "может цитировать
+  // полную общую фразу" -- and sourceSpan.quote/evidenceByField.statement.
+  // quote are conventionally identical everywhere else in this prompt. The
+  // model reasonably narrowed only evidenceByField.numericConstraint.quote
+  // (a different field) across three focused-repair rounds in a row, kept
+  // sourceSpan.quote as the full shared sentence for both split units, and
+  // assignIdentity correctly rejected the resulting unitId collision --
+  // killing the whole run on a self-contradiction in prompt text, not a
+  // model mistake.
+  it('b7: explicitly clarifies that sourceSpan.quote itself must narrow, not just evidenceByField.numericConstraint.quote', () => {
+    const messages = buildFocusedRepairPromptMessages({
+      block: block('b7', 'Почесание выполняют подушечками двух или трёх пальцев.'),
+      findings: [{
+        verdict: 'POSSIBLE_OMISSION', quote: 'двух или трёх пальцев',
+        explanation: 'числа отсутствуют в numericConstraint', quoteVerified: true,
+      }],
+      existingUnits: [unit({ statement: 'Почесание выполняют подушечками двух или трёх пальцев.' })],
+    });
+    const prompt = messages.map((message) => message.content).join('\n');
+
+    expect(prompt).toContain('ТОП-УРОВНЕВОЕ поле sourceSpan.quote');
+    expect(prompt).toContain('identity-конфликте');
+  });
+
   it('compact prompt exposes full existing structure and protects unaffected populated fields', () => {
     const existing = unit({
       extractionRef: 'exception', parentExtractionRef: 'base',

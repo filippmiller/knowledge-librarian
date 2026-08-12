@@ -978,10 +978,29 @@ export function assertTrustedIdentity(
   context: string
 ): void {
   if (identity.unresolvedEvidence.length === 0 && identity.ambiguousDuplicates.length === 0) return;
+  // Diagnostic content, not just counts: a bare "1 ambiguous duplicate
+  // group(s)" gave no way to tell WHICH units collided without re-running the
+  // extraction and hand-parsing call-trace.jsonl offline (2026-08-12 live
+  // debugging session). Same discipline as the rest of this file's error
+  // messages — the failure should carry enough to diagnose without a paid
+  // re-run.
+  const duplicateDetail = identity.ambiguousDuplicates
+    .map(
+      (dup) =>
+        `${dup.unitId}: ${dup.units.length}x [${dup.units
+          .map((u) => `${u.kind}/${u.sourceSpan.anchor}: "${u.statement}"`)
+          .join(' | ')}]`
+    )
+    .join('; ');
+  const unresolvedDetail = identity.unresolvedEvidence
+    .map((u) => `${u.unit.kind}/${u.unit.sourceSpan.anchor}: ${u.reason}`)
+    .join('; ');
   throw new Error(
     `${context}: identity assignment is not trusted (` +
       `${identity.unresolvedEvidence.length} unresolved evidence, ` +
-      `${identity.ambiguousDuplicates.length} ambiguous duplicate group(s))`
+      `${identity.ambiguousDuplicates.length} ambiguous duplicate group(s))` +
+      (duplicateDetail.length > 0 ? `\nDuplicates: ${duplicateDetail}` : '') +
+      (unresolvedDetail.length > 0 ? `\nUnresolved: ${unresolvedDetail}` : '')
   );
 }
 

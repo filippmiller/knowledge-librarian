@@ -238,6 +238,26 @@ describe('targeted taint resample completeness gate', () => {
     expect(() => assertTrustedIdentity(duplicateIdentity, 'initial extraction'))
       .toThrow('1 ambiguous duplicate group');
   });
+
+  // Real live-fixture debugging gap (2026-08-12): the thrown error carried
+  // only a count ("1 ambiguous duplicate group(s)"), so diagnosing which
+  // units collided required re-running the extraction and hand-parsing
+  // call-trace.jsonl offline. The error now carries the colliding units'
+  // kind/anchor/statement so the failure is self-diagnosing.
+  it('carries which units collided, not just a count', () => {
+    const duplicateIdentity = assignIdentity(
+      [
+        extracted({ extractionRef: 'one', statement: 'Первая формулировка' }),
+        extracted({ extractionRef: 'two', statement: 'Вторая формулировка' }),
+      ],
+      new Map([[BLOCK.anchor, BLOCK]]),
+      'rev-1'
+    );
+
+    expect(() => assertTrustedIdentity(duplicateIdentity, 'initial extraction')).toThrow(
+      /Первая формулировка[\s\S]*Вторая формулировка/
+    );
+  });
 });
 
 describe('targeted malformed exception repair', () => {

@@ -181,6 +181,20 @@ describe('buildExtractionPromptMessages — чистая функция, без 
     expect(system).toContain('без выдуманного условия только ради того, чтобы оправдать kind="exception_rule"');
   });
 
+  // Real live-fixture bug (2026-08-12, block b7): "два или три пальца" split
+  // into two units by numericConstraint.value, but nothing told the base
+  // extractor that the split units also need distinct sourceSpan.quote — only
+  // the FOCUSED_REPAIR prompt (audited-extraction.ts) had that guidance, and
+  // even there it was self-contradictory. Mirrored here so a fresh base
+  // extraction hitting the same alternative-value phrasing doesn't hit the
+  // same identity collision before repair ever runs.
+  it('учит разводить sourceSpan.quote при разбиении альтернативы на несколько numericConstraint unit\'ов', () => {
+    const messages = buildExtractionPromptMessages([BLOCK_A]);
+    const system = messages.find((m) => m.role === 'system')!.content.toLowerCase();
+    expect(system).toContain('обязаны сузиться до его собственного числового токена');
+    expect(system).toContain('unitid у разных unit\'ов, и прогон падает на identity-конфликте');
+  });
+
   // Real live-fixture bug (2026-08-12, block b8, targeted taint resample):
   // resolveTaintedCandidates (run-aurora-fixture.ts) calls the BASE extractor
   // directly, with no focused-repair loop and no fallback on an audit gap —
