@@ -344,6 +344,25 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
     expect(prompt).not.toContain('kind="PROHIBITION"');
   });
 
+  // Real live-fixture bug (2026-08-12, block b5): three focused-repair rounds
+  // in a row kept re-parenting "regular scratching through fabric is not a
+  // proper method" onto the neighboring seclusion rule with an inherited
+  // privacyContext=PRIVATE condition, despite the auditor naming the exact
+  // defect each round. FOCUSED_REPAIR_MAX_ROUNDS exhausted, whole extraction
+  // run died. Repair prompt needed the same concrete counter-example already
+  // added to the main extraction prompt — the abstract sentence alone did not
+  // stop it across repeated rounds either.
+  it('repair-промпт тоже не учит приписывать правилу о способе условие места соседнего правила', () => {
+    const prompt = buildFocusedRepairPromptMessages({
+      block: block('b5', 'Перед началом уединиться. Регулярное выполнение через ткань не считается надлежащим способом.'),
+      findings: [{ verdict: 'AMBIGUOUS', quote: 'через ткань', explanation: 'привязка к parent сомнительна', quoteVerified: true }],
+      existingUnits: [unit({ kind: 'PROCEDURE_STEP', extractionRef: 'seclusion', statement: 'Перед началом действия необходимо уединиться.' })],
+    }).map((message) => message.content).join('\n').toLowerCase();
+    expect(prompt).toContain('правило о способе/технике действия');
+    expect(prompt).toContain('условии места/контекста');
+    expect(prompt).toContain('текстовая близость не создаёт отношение условие/исключение сама по себе');
+  });
+
   it('b2 regression: оговорка не приглашает kind=fact/disclaimer и получает точные enum/object контракты', () => {
     const messages = buildFocusedRepairPromptMessages({
       block: {

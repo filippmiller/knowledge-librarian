@@ -149,6 +149,24 @@ describe('buildExtractionPromptMessages — чистая функция, без 
     expect(system.content).toContain('а не родителями друг друга');
   });
 
+  // Real live-fixture bug (2026-08-12, block b5): the model kept classifying
+  // "regular scratching through fabric is not a proper method" as an
+  // EXCEPTION_RULE parented to the neighboring seclusion rule with an
+  // inherited privacyContext=PRIVATE condition, purely because both sentences
+  // sit in the same block. Coverage-audit flagged this correctly three repair
+  // rounds in a row and the model never internalized the fix, exhausting
+  // FOCUSED_REPAIR_MAX_ROUNDS and killing the whole extraction run. Same
+  // disease as the resourceAvailability over-application fixed twice earlier
+  // the same day (952beb7, e714ef4): abstract rule wording alone did not stop
+  // it, a concrete counter-example did.
+  it('не учит модель приписывать правилу о способе действия условие места соседнего правила', () => {
+    const messages = buildExtractionPromptMessages([BLOCK_A]);
+    const system = messages.find((m) => m.role === 'system')!.content.toLowerCase();
+    expect(system).toContain('правило о способе/технике действия');
+    expect(system).toContain('условии места/контекста');
+    expect(system).toContain('текстовая близость двух правил в одном блоке сама по себе не создаёт');
+  });
+
   // Real cost bug (2026-08-09): 43 of 43 SCHEMA_MISMATCH extraction failures
   // across every benchmark run this session were the SAME error — the model
   // puts trigger-fact names (privacyContext, consentStatus, reachability,
