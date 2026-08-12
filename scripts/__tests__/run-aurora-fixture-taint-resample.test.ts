@@ -11,6 +11,7 @@ import {
 import { assignIdentity, type SourceBlockLocation } from '../../src/lib/knowledge/applicability/identity-assignment';
 import type { ExtractedKnowledgeUnit } from '../../src/lib/knowledge/applicability/extraction';
 import { OracleTaintError, type OracleTaintDetector } from '../../src/lib/eval/oracle-taint';
+import { RunDegradationLedger } from '../../src/lib/eval/run-degradations';
 import {
   TRIGGER_FACT_KEYS,
   TRIGGER_FACT_REGISTRY,
@@ -96,6 +97,56 @@ describe('targeted taint resample completeness gate', () => {
       blockKind: 'LIST_ITEM',
       extractedStatements: [expect.objectContaining({ statement: 'Основное правило', quote: 'Основное правило.' })],
     }));
+  });
+
+  // «Здание в сто этажей, в которое нельзя войти» (владелец, 2026-08-12):
+  // семь платных прогонов подряд умерли, ни разу не дойдя до вопроса, потому
+  // что КАЖДЫЙ судья закрывал прогон наглухо. Прогоны 2/3/4 умерли именно
+  // здесь. С переданным реестром стадия обязана записать деградацию и
+  // продолжить — а приёмочный статус снимает уже грейдер
+  // (resolveDegradationGate), не эта стадия.
+  it('с реестром записывает деградацию и продолжает вместо того, чтобы убить прогон', async () => {
+    const initial = assignIdentity([extracted()], new Map([[BLOCK.anchor, BLOCK]]), 'rev-1').units;
+    const extractor = vi.fn(async () => ({
+      units: [extracted({ statement: 'Безопасная замена', extractionRef: 'replacement' })],
+      attempts: [],
+      structuredResult: {} as never,
+    }));
+    const auditor = vi.fn(async () => ({
+      blockAnchor: BLOCK.anchor,
+      findings: [{
+        verdict: 'AMBIGUOUS' as const,
+        quote: 'Обязательное исключение.',
+        explanation: 'не уверен, нужен ли отдельный unit',
+        quoteVerified: true,
+      }],
+      hasGap: false,
+      unresolved: true,
+    }));
+    const ledger = new RunDegradationLedger();
+
+    const result = await resolveTaintedCandidates(
+      initial,
+      new Map([[BLOCK.anchor, BLOCK]]),
+      'rev-1',
+      detector,
+      extractor,
+      auditor,
+      { runConfig, maxTokens: 100 },
+      1,
+      undefined,
+      ledger
+    );
+
+    // Прогон дошёл до конца и отдал ЗАМЕНУ, а не заражённый оригинал:
+    // выбор между двумя нечистыми вариантами сделан в пользу валидности
+    // замера (оригинал заражён текстом оракула и завысил бы счёт).
+    expect(result.units.some((u) => u.statement === 'Безопасная замена')).toBe(true);
+    expect(result.units.some((u) => u.statement.includes('tainted'))).toBe(false);
+    expect(ledger.degraded).toBe(true);
+    expect(ledger.snapshot()[0].stage).toBe('TAINT_RESAMPLE');
+    expect(ledger.snapshot()[0].blockAnchor).toBe(BLOCK.anchor);
+    expect(ledger.snapshot()[0].detail).toContain('AMBIGUOUS');
   });
 
   it('rebuilds replacement identity and clears parent references to removed units', async () => {

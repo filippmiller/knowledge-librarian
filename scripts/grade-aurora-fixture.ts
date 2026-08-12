@@ -20,6 +20,7 @@ import { loadSemanticRuleOracle, type OracleCase } from '../src/lib/eval/semanti
 import { loadNegativeCaseOracle, type NegativeCaseApplicabilityOracle } from '../src/lib/eval/negative-case-oracle';
 import { RULE_1_EVIDENCE_GROUP, RULE_9_EVIDENCE_GROUP, RULE_10_EVIDENCE_GROUP, evaluateEvidenceGroupCoverage, type RequiredEvidenceGroup } from '../src/lib/eval/evidence-groups';
 import type { PersistedKnowledgeUnit } from '../src/lib/knowledge/applicability/identity-assignment';
+import { resolveDegradationGate, type RunSummaryDegradationFields } from '../src/lib/eval/run-degradations';
 
 type FailureStage =
   | 'EXTRACTION_MISS'
@@ -40,14 +41,22 @@ const EVIDENCE_GROUPS_BY_RULE: Record<number, RequiredEvidenceGroup> = {
   10: RULE_10_EVIDENCE_GROUP,
 };
 
-function parseArgs(argv: readonly string[]): { inDir: string; outPath: string; acceptSkippedGraph: boolean } {
+function parseArgs(argv: readonly string[]): {
+  inDir: string;
+  outPath: string;
+  acceptSkippedGraph: boolean;
+  acceptDegradedRun: boolean;
+} {
   const inArg = argv.find((a) => a.startsWith('--in='))?.slice('--in='.length);
   const outArg = argv.find((a) => a.startsWith('--out='))?.slice('--out='.length);
   const acceptSkippedGraph = argv.includes('--accept-skipped-graph');
+  const acceptDegradedRun = argv.includes('--accept-degraded-run');
   if (!inArg || !outArg) {
-    throw new Error('Usage: npx tsx scripts/grade-aurora-fixture.ts --in=<dir> --out=<report.json> [--accept-skipped-graph]');
+    throw new Error(
+      'Usage: npx tsx scripts/grade-aurora-fixture.ts --in=<dir> --out=<report.json> [--accept-skipped-graph] [--accept-degraded-run]'
+    );
   }
-  return { inDir: inArg, outPath: outArg, acceptSkippedGraph };
+  return { inDir: inArg, outPath: outArg, acceptSkippedGraph, acceptDegradedRun };
 }
 
 /** run-summary.json's minimal shape this grader cares about. A run-summary
@@ -379,20 +388,25 @@ export function gradeNegativeCase(neg: NegativeCaseApplicabilityOracle, run: Run
 // the parameter exists solely so tests can drive the full read -> gate ->
 // grade -> write pipeline against a temp directory without a subprocess.
 export async function main(argv: readonly string[] = process.argv.slice(2)) {
-  const { inDir, outPath, acceptSkippedGraph } = parseArgs(argv);
+  const { inDir, outPath, acceptSkippedGraph, acceptDegradedRun } = parseArgs(argv);
 
   const positiveOracle = loadSemanticRuleOracle();
   const negativeOracle = loadNegativeCaseOracle();
 
   const summary = JSON.parse(readFileSync(path.join(inDir, 'run-summary.json'), 'utf8')) as {
     runIds: readonly string[];
-  } & RunSummaryDependencyGraphFields;
+  } & RunSummaryDependencyGraphFields &
+    RunSummaryDegradationFields;
   // Refuses (throws, writes nothing) before any grading work when the run
   // was measured with the dependency-graph stage skipped and the caller did
   // not pass --accept-skipped-graph. A run-summary.json with no
   // dependencyGraphStage field (every run predating this switch) always
   // passes through as REQUIRED.
   const { dependencyGraphSkipped } = resolveDependencyGraphGate(summary, acceptSkippedGraph);
+  // Тот же принцип для деградаций: прогон, дошедший до конца с записанными
+  // деградациями, ИЗМЕРИМ, но приёмочным числом называться не может без
+  // явного согласия вызывающего.
+  const { degraded, degradations } = resolveDegradationGate(summary, acceptDegradedRun);
 
   const runDirs = readdirSync(inDir).filter((d) => summary.runIds.includes(d));
 

@@ -62,6 +62,18 @@ import {
 } from '../src/lib/knowledge/extraction-coverage-auditor';
 import { quoteSpansOverlap } from '../src/lib/knowledge/quote-locator';
 import { sharedTaxonomyRulesText } from '../src/lib/knowledge/prompt-taxonomy-rules';
+import { RunDegradationLedger } from '../src/lib/eval/run-degradations';
+
+/**
+ * Реестр деградаций текущего процесса. Модульный синглтон осознанно: скрипт
+ * — однопроцессный бенчмарк, один прогон на запуск, а альтернатива означала
+ * бы протаскивание одного объекта через шесть слоёв сигнатур
+ * (main -> runOneExtractionRun/reuseExtractionRun -> resolveTaintedCandidates
+ * / resolveMalformedExceptions / ensureDependencyGraph) ради того же эффекта.
+ * Стадии принимают его ПАРАМЕТРОМ (а не читают отсюда), чтобы оставаться
+ * тестируемыми и сохранять прежнее фатальное поведение, когда он не передан.
+ */
+const runDegradations = new RunDegradationLedger();
 import {
   ChatCompletionError,
   isRetryableChatCompletionError,
@@ -1041,7 +1053,15 @@ export async function resolveTaintedCandidates(
   auditor: (options: AuditBlockCoverageOptions) => Promise<BlockCoverageAuditResult>,
   optionsPerBatch: Omit<ExtractKnowledgeUnitsOptions, 'blocks'>,
   maxRounds: number,
-  checkpoint?: TaintResampleCheckpoint
+  checkpoint?: TaintResampleCheckpoint,
+  /**
+   * Куда сообщить, что замена блока не прошла аудит покрытия. Передан —
+   * прогон продолжается с записанной деградацией; НЕ передан — прежнее
+   * фатальное поведение (так все существующие вызовы и тесты, включая
+   * проверку «замена, потерявшая пункт источника, отклоняется», сохраняют
+   * свой контракт без изменений).
+   */
+  degradations?: RunDegradationLedger
 ): Promise<{
   units: PersistedKnowledgeUnit[];
   resampleLogs: TaintResampleLog[];
@@ -1124,9 +1144,22 @@ export async function resolveTaintedCandidates(
       if (restoredAudit === undefined) checkpoint?.saveTaintAudit(round, taintAuditOptions, audit);
       auditResults.push(audit);
       if (coverageAuditNeedsReview(audit)) {
-        throw new Error(
-          `targeted taint resample: replacement for block "${anchor}" did not pass coverage audit`
-        );
+        const detail =
+          `targeted taint resample: replacement for block "${anchor}" did not pass coverage audit` +
+          ` (${audit.findings.map((f) => `${f.verdict}: ${f.explanation}`).join('; ')})`;
+        if (degradations === undefined) throw new Error(detail);
+        // Замена ПРИНИМАЕТСЯ, несмотря на замечание аудита, и деградация
+        // записывается. Выбор между двумя нечистыми вариантами сделан в
+        // пользу валидности замера: исходные units этого блока заражены
+        // текстом оракула (иначе resample бы не запускался), и оставить их
+        // значило бы посчитать ложно завышенный счёт. Замена лишь неполна.
+        // Ровно здесь прогоны 2/3/4 умирали, не дойдя ни до одного вопроса.
+        degradations.record({
+          stage: 'TAINT_RESAMPLE',
+          blockAnchor: anchor,
+          unitIds: namespaced.map((u) => u.extractionRef),
+          detail,
+        });
       }
 
       const identity = assignIdentity(namespaced, blocksByAnchor, sourceRevisionHash);
@@ -1158,7 +1191,11 @@ export async function resolveMalformedExceptions(
   auditor: (options: AuditBlockCoverageOptions) => Promise<BlockCoverageAuditResult>,
   optionsPerCall: Omit<ExtractKnowledgeUnitsOptions, 'blocks'>,
   maxRounds: number,
-  checkpoint?: ExceptionRepairCheckpoint
+  checkpoint?: ExceptionRepairCheckpoint,
+  /** См. одноимённый параметр `resolveTaintedCandidates`: передан — прогон
+   *  продолжается с записанной деградацией, не передан — прежнее фатальное
+   *  поведение. */
+  degradations?: RunDegradationLedger
 ): Promise<{
   units: PersistedKnowledgeUnit[];
   repairLogs: ExceptionRepairLog[];
@@ -1224,7 +1261,20 @@ export async function resolveMalformedExceptions(
       if (restoredAudit === undefined) checkpoint?.saveExceptionRepairAudit(round, auditOptions, audit);
       auditResults.push(audit);
       if (coverageAuditNeedsReview(audit)) {
-        throw new Error(`malformed exception repair: replacement for block "${anchor}" did not pass coverage audit`);
+        const detail =
+          `malformed exception repair: replacement for block "${anchor}" did not pass coverage audit` +
+          ` (${audit.findings.map((f) => `${f.verdict}: ${f.explanation}`).join('; ')})`;
+        if (degradations === undefined) throw new Error(detail);
+        // Здесь умерли прогоны 6 (блок b6) и 7 (блок b14) — причём в b14
+        // аудитор написал буквально «не уверен» (AMBIGUOUS), то есть прогон
+        // убивало СОМНЕНИЕ судьи, а не найденный дефект. Структурный дефект,
+        // ради которого стадия и запускалась, к этому моменту уже исправлен.
+        degradations.record({
+          stage: 'MALFORMED_EXCEPTION_REPAIR',
+          blockAnchor: anchor,
+          unitIds: namespaced.map((unit) => unit.extractionRef),
+          detail,
+        });
       }
 
       const identity = assignIdentity(namespaced, blocksByAnchor, sourceRevisionHash);
@@ -1869,7 +1919,10 @@ export async function ensureDependencyGraph(
   // `resolveTaintedCandidates` already uses): lets a test prove the
   // REQUIRED path still invokes the graph stage, and the skip path invokes
   // it zero times, without EITHER path making a real provider call.
-  buildGraph: typeof buildAuditedDependencyGraph = buildAuditedDependencyGraph
+  buildGraph: typeof buildAuditedDependencyGraph = buildAuditedDependencyGraph,
+  /** См. `resolveTaintedCandidates`: передан — несходимость графа
+   *  деградирует прогон вместо того, чтобы его убить. */
+  degradations?: RunDegradationLedger
 ): Promise<ReadyDependencyGraph> {
   if (extractionArtifact.phase !== 'COMPLETE') {
     throw new Error('Dependency graph requires a COMPLETE extraction artifact.');
@@ -1959,19 +2012,60 @@ export async function ensureDependencyGraph(
     };
   };
 
-  const graph = await buildGraph({
-    units,
-    proposer: makeStage('dependency-graph-proposal', 'dependency-graph-proposal'),
-    auditor: makeStage('dependency-graph-audit', 'dependency-graph-audit'),
-    repairer: makeStage('dependency-graph-repair', 'dependency-graph-repair'),
-    exactRequestFingerprint: {
-      extractionArtifactContentDigest: extractionArtifact.contentDigest,
-      config,
-      maxStageAttempts: DEPENDENCY_GRAPH_STAGE_MAX_ATTEMPTS,
-      maxTokens: DEPENDENCY_GRAPH_STAGE_MAX_TOKENS,
-    },
-    checkpoint: new FileDependencyGraphCheckpoint(`${artifactPath}.stage-journal.json`),
-  });
+  let graph: Awaited<ReturnType<typeof buildGraph>>;
+  try {
+    graph = await buildGraph({
+      units,
+      proposer: makeStage('dependency-graph-proposal', 'dependency-graph-proposal'),
+      auditor: makeStage('dependency-graph-audit', 'dependency-graph-audit'),
+      repairer: makeStage('dependency-graph-repair', 'dependency-graph-repair'),
+      exactRequestFingerprint: {
+        extractionArtifactContentDigest: extractionArtifact.contentDigest,
+        config,
+        maxStageAttempts: DEPENDENCY_GRAPH_STAGE_MAX_ATTEMPTS,
+        maxTokens: DEPENDENCY_GRAPH_STAGE_MAX_TOKENS,
+      },
+      checkpoint: new FileDependencyGraphCheckpoint(`${artifactPath}.stage-journal.json`),
+    });
+  } catch (error) {
+    // Прогон 7 умер здесь. Причина не в недостатке раундов: аудитор графа
+    // даёт ВЗАИМОИСКЛЮЧАЮЩИЕ вердикты по одному и тому же ребру между
+    // раундами (translation-<осцилляция>: MISSING_EDGE в раунде 1 ->
+    // UNSUPPORTED_EDGE в раунде 2 -> MISSING_EDGE в раунде 3). Repair
+    // добросовестно добавляет ребро, которое потребовал аудит, и следующий
+    // аудит осуждает его же. Цикл не может сойтись по построению, и ещё
+    // раунды лишь жгут деньги ($0.43 из $1.05 прогона 7 — на графе).
+    //
+    // Деградируем к тому же состоянию, что даёт --dependency-graph=skip:
+    // units как изолированные точки, edges пуст. Это НЕ тихое ослабление —
+    // деградация записана, а грейдер откажется называть такой прогон
+    // приёмочным. Без этого единственная альтернатива — не измерить ничего.
+    if (degradations === undefined) throw error;
+    degradations.record({
+      stage: 'DEPENDENCY_GRAPH',
+      blockAnchor: null,
+      unitIds: [],
+      detail:
+        `dependency graph build failed, degraded to isolated endpoints (edges: 0): ` +
+        (error instanceof Error ? error.message : String(error)),
+    });
+    return {
+      graph: createDependencyGraph({
+        units: units.map((unit) => ({
+          unitId: unit.unitId,
+          sourceSpan: unit.sourceSpan,
+          evidenceByField: unit.evidenceByField,
+        })),
+        edges: [],
+      }),
+      artifactPath: null,
+      artifactContentDigest: sha256Json({
+        dependencyGraphStage: 'DEGRADED',
+        extractionArtifactContentDigest: extractionArtifact.contentDigest,
+      }),
+      restored: false,
+    };
+  }
   const graphDocument: DependencyGraphDocument = serializeDependencyGraph(graph);
   const artifact = buildDependencyGraphArtifact(expectedFingerprint, graphDocument);
   writeDependencyGraphArtifact(artifactPath, artifact);
@@ -2484,6 +2578,7 @@ async function runOneExtractionRun(
     { runConfig: extractionRunConfig, maxTokens: EXTRACTION_MAX_TOKENS },
     TAINT_RESAMPLE_MAX_ROUNDS
     , rawCheckpoint
+    , runDegradations
   );
   if (resampled.resampleLogs.length > 0) {
     const affectedBlocks = new Set(resampled.resampleLogs.map((l) => l.blockAnchor)).size;
@@ -2500,7 +2595,8 @@ async function runOneExtractionRun(
     retryingAuditor,
     { runConfig: exceptionRepairRunConfig, maxTokens: 8_000 },
     MALFORMED_EXCEPTION_REPAIR_MAX_ROUNDS,
-    rawCheckpoint
+    rawCheckpoint,
+    runDegradations
   );
   if (exceptionRepaired.repairLogs.length > 0) {
     console.log(
@@ -2596,7 +2692,8 @@ async function runOneExtractionRun(
   console.log(`  артефакт извлечения сохранён ДО вопросов: ${artifactPath} (для --reuse-extraction)`);
 
   const readyDependencyGraph = await ensureDependencyGraph(
-    runId, artifactPath, artifact, ledger, traceLog, args.dependencyGraphStage
+    runId, artifactPath, artifact, ledger, traceLog, args.dependencyGraphStage,
+    buildAuditedDependencyGraph, runDegradations
   );
   logDependencyGraphReady(readyDependencyGraph);
 
@@ -2719,7 +2816,9 @@ async function reuseExtractionRun(
     artifact,
     deps.ledger,
     deps.traceLog,
-    deps.args.dependencyGraphStage
+    deps.args.dependencyGraphStage,
+    buildAuditedDependencyGraph,
+    runDegradations
   );
   logDependencyGraphReady(readyDependencyGraph);
 
@@ -3024,6 +3123,9 @@ async function main() {
         ranAt: new Date().toISOString(),
         docPath: args.docPath,
         ...resolveDependencyGraphSummaryFields(args.dependencyGraphStage),
+        // Пусто на чистом прогоне — тогда грейдер видит ровно то же, что
+        // видел до появления реестра, и оценивает как раньше.
+        degradations: runDegradations.snapshot(),
         extractionRuns: args.extractionRuns,
         questionCount: questions.length,
         taintedShingleCount: taintDetector.taintedShingleCount,
@@ -3079,6 +3181,17 @@ async function main() {
     );
     console.log(`Частичные артефакты записаны в: ${args.outDir}`);
     throw abortedBy;
+  }
+
+  if (runDegradations.degraded) {
+    const entries = runDegradations.snapshot();
+    console.log(
+      `\n=== ДЕГРАДАЦИИ (${entries.length}) — прогон дошёл до конца, но приёмочным не является ===`
+    );
+    for (const entry of entries) {
+      console.log(`  [${entry.stage}]${entry.blockAnchor ? ` блок ${entry.blockAnchor}` : ''}: ${entry.detail}`);
+    }
+    console.log('  Грейдер потребует --accept-degraded-run, чтобы посчитать этот прогон.');
   }
 
   console.log(`\nАртефакты записаны в: ${args.outDir}`);
