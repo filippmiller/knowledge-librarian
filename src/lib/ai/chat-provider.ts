@@ -121,8 +121,27 @@ export interface CompletionAttempt {
   usage?: CompletionUsage;
 }
 
+/**
+ * Почему провайдер перестал генерировать — в НАШИХ терминах, а не в терминах
+ * конкретного вендора (`finish_reason` у OpenAI, `stop_reason` у Anthropic).
+ *
+ * `OTHER` намеренно не разбирается детальнее: `content_filter`, `refusal`,
+ * `tool_calls` — это разные вещи, но ни одна из них не «обрыв по лимиту», а
+ * различать их здесь пока некому. Появится потребитель — появится и деталь.
+ */
+export type CompletionTerminationReason = 'COMPLETE' | 'MAX_TOKENS' | 'OTHER';
+
 export interface ChatCompletionResult {
   text: string;
+  /**
+   * Почему генерация закончилась, если провайдер это сообщил.
+   *
+   * `undefined` означает ровно «провайдер промолчал» (или результат собран
+   * тестовым моком вручную) — и НЕ означает `COMPLETE`. Различие существенно:
+   * на нём держится запасная эвристика в `structured()`, которая для
+   * промолчавшего провайдера остаётся единственным признаком обрыва.
+   */
+  terminationReason?: CompletionTerminationReason;
   /**
    * Ответ провайдера ДО `normalizeJsonResponse()`.
    *
@@ -1273,6 +1292,36 @@ interface ProviderCallResult {
   /** `null` when the provider's response didn't carry a usage block —
    *  don't fabricate zeros, a cost meter reading 0 looks like a free call. */
   usage: CompletionUsage | null;
+  /** `undefined` = провайдер причину не прислал; см. `ChatCompletionResult`. */
+  terminationReason?: CompletionTerminationReason;
+}
+
+/**
+ * `finish_reason` OpenAI → наши термины. Незнакомое значение попадает в
+ * `OTHER`, а не в `COMPLETE`: молча считать законченным то, чего мы не поняли,
+ * — как раз тот класс ошибки, из-за которого это поле и заводится.
+ */
+function normalizeOpenAiFinishReason(
+  finishReason: string | null | undefined
+): CompletionTerminationReason | undefined {
+  if (typeof finishReason !== 'string' || finishReason === '') return undefined;
+  if (finishReason === 'length') return 'MAX_TOKENS';
+  if (finishReason === 'stop') return 'COMPLETE';
+  return 'OTHER';
+}
+
+/**
+ * `stop_reason` Anthropic → наши термины. `end_turn` (модель договорила) и
+ * `stop_sequence` (наткнулась на стоп-последовательность) — оба означают
+ * законченный ответ; `max_tokens` — упёрлась в потолок.
+ */
+function normalizeAnthropicStopReason(
+  stopReason: unknown
+): CompletionTerminationReason | undefined {
+  if (typeof stopReason !== 'string' || stopReason === '') return undefined;
+  if (stopReason === 'max_tokens') return 'MAX_TOKENS';
+  if (stopReason === 'end_turn' || stopReason === 'stop_sequence') return 'COMPLETE';
+  return 'OTHER';
 }
 
 async function callAnthropic(
@@ -1321,6 +1370,7 @@ async function callAnthropic(
   let cacheReadInputTokens: number | undefined;
   let frameCount = 0;
   let sawMessageStart = false;
+  let terminationReason: CompletionTerminationReason | undefined;
 
   for await (const frame of parseAnthropicSseFrames(response)) {
     throwIfAnthropicErrorFrame(frame);
@@ -1373,6 +1423,15 @@ async function callAnthropic(
       if (typeof usage === 'object' && usage !== null) {
         const u = usage as Record<string, unknown>;
         if (typeof u.output_tokens === 'number') outputTokens = u.output_tokens;
+      }
+      // Здесь же приходит и причина остановки. В `message_start` поле тоже
+      // есть, но там оно всегда null — сообщение только началось.
+      const delta = frame.data.delta;
+      if (typeof delta === 'object' && delta !== null) {
+        const parsed = normalizeAnthropicStopReason(
+          (delta as Record<string, unknown>).stop_reason
+        );
+        if (parsed) terminationReason = parsed;
       }
       continue;
     }
@@ -1431,7 +1490,7 @@ async function callAnthropic(
     ...(typeof cacheReadInputTokens === 'number' && { cacheReadInputTokens }),
   };
 
-  return { text: content.trim(), usage };
+  return { text: content.trim(), usage, ...(terminationReason && { terminationReason }) };
 }
 
 /**
@@ -1499,12 +1558,19 @@ async function callOpenAI(
     typeof response.usage?.completion_tokens === 'number'
       ? { inputTokens: response.usage.prompt_tokens, outputTokens: response.usage.completion_tokens }
       : null;
+  const terminationReason = normalizeOpenAiFinishReason(response.choices[0]?.finish_reason);
 
-  return { text, usage };
+  return { text, usage, ...(terminationReason && { terminationReason }) };
 }
 
 type AttemptResult =
-  | { ok: true; text: string; rawText: string; attempt: CompletionAttempt }
+  | {
+      ok: true;
+      text: string;
+      rawText: string;
+      terminationReason?: CompletionTerminationReason;
+      attempt: CompletionAttempt;
+    }
   | { ok: false; error: unknown; attempt: CompletionAttempt };
 
 async function runCompletionAttempt(
@@ -1533,6 +1599,9 @@ async function runCompletionAttempt(
       ok: true,
       text,
       rawText: raw,
+      ...(providerResult.terminationReason && {
+        terminationReason: providerResult.terminationReason,
+      }),
       attempt: {
         provider,
         model,
@@ -1653,6 +1722,7 @@ export async function createChatCompletionDetailed(
       return {
         text: result.text,
         rawText: result.rawText,
+        ...(result.terminationReason && { terminationReason: result.terminationReason }),
         servedByProvider: primaryProvider,
         servedByModel: primaryModel,
         fallbackUsed: false,
@@ -1702,6 +1772,7 @@ export async function createChatCompletionDetailed(
       return {
         text: result.text,
         rawText: result.rawText,
+        ...(result.terminationReason && { terminationReason: result.terminationReason }),
         servedByProvider: fallbackTarget.provider,
         servedByModel: fallbackTarget.model,
         fallbackUsed: true,

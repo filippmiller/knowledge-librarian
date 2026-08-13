@@ -49,10 +49,13 @@ let fetchMock: ReturnType<typeof vi.fn>;
  * этот хелпер эмитит настоящую последовательность фреймов
  * (message_start → content_block_delta → message_delta → message_stop),
  * ОДНИМ content_block_delta на весь текст, чтобы rawText реконструировался
- * байт-в-байт (см. тест ниже на SCHEMA_MISMATCH result.rawText). Сигнатура
- * не изменилась — существующие вызовы этого файла правок не требуют.
+ * байт-в-байт (см. тест ниже на SCHEMA_MISMATCH result.rawText).
+ *
+ * `stopReason` — то, что Anthropic сообщает в `message_delta`; по умолчанию
+ * `end_turn` (модель договорила сама). Параметр необязательный, поэтому
+ * существующие вызовы этого файла правок не требуют.
  */
-function anthropicOk(text: string): Response {
+function anthropicOk(text: string, stopReason = 'end_turn'): Response {
   const frames: Record<string, unknown>[] = [
     {
       type: 'message_start',
@@ -70,7 +73,7 @@ function anthropicOk(text: string): Response {
     { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
     {
       type: 'message_delta',
-      delta: { stop_reason: 'end_turn', stop_sequence: null },
+      delta: { stop_reason: stopReason, stop_sequence: null },
       usage: { output_tokens: 5 },
     },
     { type: 'message_stop' },
@@ -84,8 +87,15 @@ function anthropicFailure(status = 500, body = 'anthropic is down'): Response {
   return new Response(body, { status });
 }
 
-function openaiOk(text: string) {
-  return { choices: [{ message: { content: text } }] };
+/** `finishReason` не проставляется по умолчанию сознательно: так мок остаётся
+ *  «провайдером, который промолчал», и существующие тесты продолжают проверять
+ *  именно эвристическую ветку детектора обрыва. */
+function openaiOk(text: string, finishReason?: string) {
+  return {
+    choices: [
+      { message: { content: text }, ...(finishReason && { finish_reason: finishReason }) },
+    ],
+  };
 }
 
 function abortError(): Error {
@@ -276,6 +286,97 @@ describe('structured() — успешный разбор', () => {
     expect(error.reason).toBe('TRUNCATED_JSON');
     expect(error.result.attempts.length).toBeGreaterThan(0);
     expect(error.result.servedByProvider).toBe('anthropic');
+  });
+
+  /**
+   * Случай, который эвристика не поймает В ПРИНЦИПЕ: ответ оборван по лимиту
+   * токенов ровно на границе целого значения, поэтому `JSON.parse(raw)`
+   * проходит, `wasRepaired()` возвращает false на первой же строке и до
+   * баланса скобок дело не доходит. Единственный источник правды здесь — сам
+   * провайдер, который причину остановки сообщает.
+   *
+   * Схему такой ответ ПРОХОДИТ (payload целиком валиден) — то есть без этой
+   * проверки вызывающий получает «успех» с молчаливо потерянным хвостом.
+   */
+  it('провайдер сказал MAX_TOKENS — ответ отвергается, даже если JSON целый', async () => {
+    fetchMock.mockResolvedValue(anthropicOk(JSON.stringify(VALID_PAYLOAD), 'max_tokens'));
+
+    const error = (await structured({
+      schema: priceSchema,
+      messages: MESSAGES,
+      runConfig: runConfig(),
+    }).catch((e: unknown) => e)) as StructuredOutputError;
+
+    expect(error).toBeInstanceOf(StructuredOutputError);
+    expect(error.reason).toBe('TRUNCATED_JSON');
+  });
+
+  it('OpenAI finish_reason=length — тот же вердикт по другому имени поля', async () => {
+    openaiCreate.mockResolvedValue(openaiOk(JSON.stringify(VALID_PAYLOAD), 'length'));
+
+    const error = (await structured({
+      schema: priceSchema,
+      messages: MESSAGES,
+      runConfig: runConfig({ provider: 'openai', model: 'gpt-test-primary' }),
+    }).catch((e: unknown) => e)) as StructuredOutputError;
+
+    expect(error).toBeInstanceOf(StructuredOutputError);
+    expect(error.reason).toBe('TRUNCATED_JSON');
+  });
+
+  /**
+   * Обратная сторона той же проверки: `end_turn` не должен становиться
+   * поводом для отказа. Без этого теста «отвергать всё подряд» прошло бы
+   * оба теста выше.
+   */
+  it('провайдер договорил сам — целый ответ проходит', async () => {
+    fetchMock.mockResolvedValue(anthropicOk(JSON.stringify(VALID_PAYLOAD), 'end_turn'));
+
+    const result = await structured({
+      schema: priceSchema,
+      messages: MESSAGES,
+      runConfig: runConfig(),
+    });
+
+    expect(result.data).toEqual(VALID_PAYLOAD);
+  });
+
+  /**
+   * Баланс скобок обязан различать ТИПЫ. У одного числового счётчика `{` и `]`
+   * взаимно гасятся, поэтому такой ответ считался «сбалансированным», обрыв не
+   * поднимался, а нормализованный результат схему проходит — снова тихая
+   * потеря данных.
+   */
+  it('«{ ]» не считается сбалансированным: закрыватель не того типа — это обрыв', async () => {
+    fetchMock.mockResolvedValue(
+      anthropicOk('{"kind":"PRICE","price":3500,"notes":["a"],"source":{"docId":"doc-1"}]')
+    );
+
+    const error = (await structured({
+      schema: priceSchema,
+      messages: MESSAGES,
+      runConfig: runConfig(),
+    }).catch((e: unknown) => e)) as StructuredOutputError;
+
+    expect(error).toBeInstanceOf(StructuredOutputError);
+    expect(error.reason).toBe('TRUNCATED_JSON');
+  });
+
+  /**
+   * Зеркальный дефект: баланс считался по ВСЕМУ сырому тексту, а нормализация
+   * отбрасывает всё до первой `{`/`[`. Непарная `]` в прозаическом вступлении
+   * уводила счётчик в минус и помечала обрывом ответ, у которого JSON целый.
+   */
+  it('непарная скобка в прозе перед JSON не делает целый ответ обрывом', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('Готово] ' + JSON.stringify(VALID_PAYLOAD)));
+
+    const result = await structured({
+      schema: priceSchema,
+      messages: MESSAGES,
+      runConfig: runConfig(),
+    });
+
+    expect(result.data).toEqual(VALID_PAYLOAD);
   });
 
   it('attempts[] доходит до вызывающего вместе с фактическим исполнителем', async () => {
