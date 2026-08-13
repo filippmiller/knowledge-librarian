@@ -74,6 +74,19 @@ interface DecisionRow {
   notes: string | null;
 }
 
+/** Ровно те аргументы, которыми стор зовёт Prisma: двойник обязан ломаться, если стор поменяет форму вызова. */
+type RunCreateInput = ExtractionRunProvenance & {
+  documentId: string | null;
+  sourceDocPath: string | null;
+  humanReviewed: boolean;
+  qualifiedAt: Date | null;
+};
+
+type RunUpdateInput = Omit<RunCreateInput, 'extractionRunId'>;
+
+type DecisionCreateInput = DecisionRow;
+type DecisionUpdateInput = Omit<DecisionRow, 'unitId'>;
+
 /** In-memory двойник ровно того подмножества Prisma, что использует стор. */
 function fakeDb() {
   const runs: RunRow[] = [];
@@ -85,7 +98,15 @@ function fakeDb() {
   const db = {
     $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(db),
     knowledgeExtractionRun: {
-      upsert: async ({ where, create, update }: any) => {
+      upsert: async ({
+        where,
+        create,
+        update,
+      }: {
+        where: { extractionRunId: string };
+        create: RunCreateInput;
+        update: RunUpdateInput;
+      }) => {
         const existing = runs.find((r) => r.extractionRunId === where.extractionRunId);
         if (existing) {
           Object.assign(existing, update);
@@ -99,9 +120,15 @@ function fakeDb() {
         runs.push(row);
         return row;
       },
-      findUnique: async ({ where }: any) =>
+      findUnique: async ({ where }: { where: { extractionRunId: string } }) =>
         runs.find((r) => r.extractionRunId === where.extractionRunId) ?? null,
-      findFirst: async ({ where, orderBy }: any) => {
+      findFirst: async ({
+        where,
+        orderBy,
+      }: {
+        where: { documentId: string; humanReviewed?: boolean };
+        orderBy?: { createdAt?: 'asc' | 'desc' };
+      }) => {
         const matches = runs.filter(
           (r) =>
             r.documentId === where.documentId &&
@@ -114,21 +141,29 @@ function fakeDb() {
       },
     },
     knowledgeUnitRecord: {
-      deleteMany: async ({ where }: any) => {
+      deleteMany: async ({ where }: { where: { runId: string } }) => {
         for (let i = units.length - 1; i >= 0; i--) {
           if (units[i].runId === where.runId) units.splice(i, 1);
         }
       },
-      createMany: async ({ data }: any) => {
+      createMany: async ({ data }: { data: UnitRow[] }) => {
         units.push(...data);
       },
-      findMany: async ({ where }: any) =>
+      findMany: async ({ where }: { where: { runId: string } }) =>
         units
           .filter((u) => u.runId === where.runId)
           .sort((a, b) => a.unitId.localeCompare(b.unitId)),
     },
     knowledgeUnitReviewDecision: {
-      upsert: async ({ where, create, update }: any) => {
+      upsert: async ({
+        where,
+        create,
+        update,
+      }: {
+        where: { unitId: string };
+        create: DecisionCreateInput;
+        update: DecisionUpdateInput;
+      }) => {
         const existing = decisions.find((d) => d.unitId === where.unitId);
         if (existing) {
           Object.assign(existing, update);
