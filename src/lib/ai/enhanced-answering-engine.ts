@@ -754,7 +754,20 @@ async function findCanonicalQaOverride(
     });
     if (authorityCandidates.length === 0) return null;
 
-    const ranked = authorityCandidates
+    // Аудит 2026-08-13 (1.2): канонический override шёл МИМО фильтра
+    // учреждений — одобренная операторская пара про ЗАГС ЛО могла целиком
+    // подменить ответ на вопрос про КЗАГС СПб с confidence=1.0. Тот же
+    // фильтр, что у чанков/правил/QA в основном пути.
+    const scopedCandidates = filterCrossInstitutionEvidence(
+      question,
+      undefined,
+      authorityCandidates,
+      (qa) => `${qa.question}\n${qa.answer}`,
+      (qa) => qa.scenarioKey
+    );
+    if (scopedCandidates.length === 0) return null;
+
+    const ranked = scopedCandidates
       .map((qa) => ({ qa, overlap: questionTermOverlap(question, qa.question) }))
       // Порог по длинной стороне отсекает главный класс ложных совпадений:
       // короткий общий вопрос против длинного специфичного канонического.

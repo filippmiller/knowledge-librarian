@@ -25,7 +25,11 @@ export interface LintWarning {
   detail: string;
 }
 
-const PLACEHOLDER = /\b(lorem ipsum|todo|tbd|placeholder|xxxx+|\.\.\.\.\.+|пример текста|заполнить)\b/i;
+// Два регекса, не один: JS \b — ASCII-only (см. CYR_BEFORE ниже), поэтому
+// `\bпример текста\b` не срабатывал НИКОГДА — кириллические маркеры проверяются
+// своими границами (аудит 2026-08-13).
+const PLACEHOLDER_ASCII = /\b(lorem ipsum|todo|tbd|placeholder|xxxx+|\.\.\.\.\.+)\b/i;
+const PLACEHOLDER_CYR = /(?<![а-яёa-z])(пример текста|заполнить|черновик|шаблон ответа)(?![а-яёa-z])/i;
 
 // Generic marketing/atmospheric filler that has no place in an operational rule.
 // Russian tails use [а-яё]*, NOT \w* — JS \w is ASCII-only, so "волшебная" /
@@ -81,11 +85,18 @@ function addressNames(text: string): string[] {
 
 type StemPolarity = 'pos' | 'neg' | 'mixed' | 'absent';
 
+// Аудит 2026-08-13: точная форма «требуется» пропускала «требуются» /
+// «потребуется» — инверсия «запись не требуются» ↔ «запись обязательна»
+// проходила мимо. Стемы расширены на число/вид; «обязательн*» добавлен как
+// самостоятельная полярная пара. Фразовые антонимы разных стемов («без
+// записи» ↔ «запись обязательна») стемовой механикой не ловятся — это
+// уровень claim-grounding, не lint.
 const POLARITY_STEMS: Array<{ id: string; stem: string }> = [
-  { id: 'требуется', stem: 'требуется' },
+  { id: 'требуется', stem: '(?:по)?требу(?:ет|ют)ся' },
   { id: 'нуж', stem: 'нуж(?:ен|на|но|ны)' },
   { id: 'можно', stem: 'можно' },
   { id: 'входит', stem: 'входит' },
+  { id: 'обязательн', stem: 'обязательн[а-яё]*' },
 ];
 
 function polarityOf(text: string, stem: string): StemPolarity {
@@ -125,7 +136,7 @@ export function lintRule(input: LintInput): LintWarning[] {
   if (body.length > MAX_BODY) {
     warnings.push({ ruleCode: code, kind: 'too_long', detail: `body is ${body.length} chars — likely several rules` });
   }
-  if (PLACEHOLDER.test(body)) {
+  if (PLACEHOLDER_ASCII.test(body) || PLACEHOLDER_CYR.test(body)) {
     warnings.push({ ruleCode: code, kind: 'placeholder', detail: 'contains placeholder text' });
   }
   if (FILLER.test(body)) {
