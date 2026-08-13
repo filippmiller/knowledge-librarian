@@ -16,7 +16,7 @@ const DETECTORS: Array<{ id: InstitutionScope; re: RegExp }> = [
   },
   {
     id: 'zags_lo',
-    re: /загс[а-яё]*\s+(?:ло|лен)|управлен[а-яё]*\s+загс|ленинградск|ленобласт|(?:^|[^а-яё])ло\s+загс/iu,
+    re: /загс[а-яё]*\s+(?:ло|лен)|управлен[а-яё]*\s+загс|ленинградск|ленобласт|(?:^|[^а-яё])ло\s+загс|недел[а-яё]*\s+впер[её]д|вторник.{0,40}четверг|четверг.{0,40}вторник/iu,
   },
   {
     id: 'minjust',
@@ -52,10 +52,13 @@ export function evidenceConflictsWithQuestion(
   evidenceScopes: ReadonlySet<InstitutionScope>
 ): boolean {
   if (questionScopes.size === 0 || evidenceScopes.size === 0) return false;
+  // Чанк, где есть и КЗАГС, и ЗАГС ЛО, раньше оставляли — модель брала
+  // оттуда график ЛО и приписывала его СПб. Чужое учреждение в чанке
+  // важнее частичного совпадения.
   for (const scope of evidenceScopes) {
-    if (questionScopes.has(scope)) return false;
+    if (!questionScopes.has(scope)) return true;
   }
-  return true;
+  return false;
 }
 
 export function filterCrossInstitutionEvidence<T>(
