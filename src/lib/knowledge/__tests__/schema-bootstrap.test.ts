@@ -48,35 +48,65 @@ describe('runKnowledgeSchemaBootstrap', () => {
   function fakeDb() {
     const executed: string[] = [];
     const queried: string[] = [];
-    const db: SchemaBootstrapDb = {
+    // Двойник намеренно ШИРЕ, чем SchemaBootstrapDb: $queryRawUnsafe остаётся,
+    // чтобы тест ниже мог доказать, что модуль этот путь не трогает.
+    const db: SchemaBootstrapDb & { $queryRawUnsafe: (sql: string) => Promise<unknown> } = {
       $executeRawUnsafe: (async (sql: string) => {
         executed.push(sql);
         return 0;
       }) as SchemaBootstrapDb['$executeRawUnsafe'],
-      $queryRawUnsafe: (async (sql: string) => {
+      $queryRawUnsafe: async (sql: string) => {
         queried.push(sql);
         return [];
-      }) as SchemaBootstrapDb['$queryRawUnsafe'],
+      },
     };
     return { db, executed, queried };
   }
 
   it('выполняет все statements под advisory-локом и снимает лок', async () => {
-    const { db, executed, queried } = fakeDb();
+    const { db, executed } = fakeDb();
     const result = await runKnowledgeSchemaBootstrap(db);
     expect(result.ok).toBe(true);
     expect(result.statementsRun).toBe(KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS.length);
-    expect(executed).toEqual([...KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS]);
-    expect(queried[0]).toContain('pg_advisory_lock');
-    expect(queried[queried.length - 1]).toContain('pg_advisory_unlock');
+    expect(executed[0]).toContain('pg_advisory_lock');
+    expect(executed.slice(1, -1)).toEqual([...KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS]);
+    expect(executed[executed.length - 1]).toContain('pg_advisory_unlock');
   });
 
   it('ошибка DDL пробрасывается, но лок всё равно снимается', async () => {
-    const { db, queried } = fakeDb();
-    db.$executeRawUnsafe = (async () => {
+    const { db, executed } = fakeDb();
+    const passthrough = db.$executeRawUnsafe;
+    db.$executeRawUnsafe = (async (sql: string) => {
+      if (sql.includes('pg_advisory')) return passthrough(sql);
       throw new Error('нет соединения с БД');
     }) as SchemaBootstrapDb['$executeRawUnsafe'];
     await expect(runKnowledgeSchemaBootstrap(db)).rejects.toThrow('нет соединения с БД');
-    expect(queried[queried.length - 1]).toContain('pg_advisory_unlock');
+    expect(executed[executed.length - 1]).toContain('pg_advisory_unlock');
+  });
+
+  // Живой прод-отказ, деплой 2026-08-13 (`0ec97d79`): лок брали через
+  // $queryRawUnsafe, а `pg_advisory_lock()` возвращает `void` — Prisma не умеет
+  // десериализовать такую колонку и падает с
+  // "Failed to deserialize column of type 'void'". Исключение летело ДО первого
+  // DDL, поэтому statementsRun был 0, все три таблицы отсутствовали, а
+  // /api/health/schema отдавал auroraV2Ready:false при полностью успешном
+  // деплое. Прежний двойник этого не ловил: его $queryRawUnsafe покорно
+  // возвращал [] на что угодно.
+  it('не берёт лок через query-путь: он не переживает void-возврат pg_advisory_lock', async () => {
+    const { db, executed, queried } = fakeDb();
+    db.$queryRawUnsafe = async () => {
+      throw new Error(
+        "Raw query failed. Code: `N/A`. Message: `Failed to deserialize column of type 'void'.`"
+      );
+    };
+
+    const result = await runKnowledgeSchemaBootstrap(db);
+
+    expect(result.ok).toBe(true);
+    expect(result.statementsRun).toBe(KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS.length);
+    expect(executed).toEqual(
+      expect.arrayContaining([...KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS])
+    );
+    expect(queried).toEqual([]);
   });
 });

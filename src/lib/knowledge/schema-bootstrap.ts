@@ -79,7 +79,15 @@ export const KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS: readonly string[] = [
 /** Ключ advisory-лока: два инстанса на одном деплое не гоняют DDL наперегонки. */
 const BOOTSTRAP_LOCK_KEY = 4_270_813_001;
 
-export type SchemaBootstrapDb = Pick<PrismaClient, '$executeRawUnsafe' | '$queryRawUnsafe'>;
+/**
+ * Только `$executeRawUnsafe`, и это не сокращение ради краткости: лок берётся
+ * тем же путём, что и DDL. `pg_advisory_lock()` возвращает `void`, а
+ * `$queryRaw*` пытается десериализовать колонку результата и падает на нём с
+ * "Failed to deserialize column of type 'void'" — исключение прилетало ДО
+ * первого DDL, поэтому таблицы молча не создавались при полностью успешном
+ * деплое (живой отказ 2026-08-13, деплой `0ec97d79`).
+ */
+export type SchemaBootstrapDb = Pick<PrismaClient, '$executeRawUnsafe'>;
 
 export interface SchemaBootstrapResult {
   readonly ok: boolean;
@@ -91,7 +99,7 @@ export async function runKnowledgeSchemaBootstrap(
   db: SchemaBootstrapDb = prisma
 ): Promise<SchemaBootstrapResult> {
   let statementsRun = 0;
-  await db.$queryRawUnsafe(`SELECT pg_advisory_lock(${BOOTSTRAP_LOCK_KEY})`);
+  await db.$executeRawUnsafe(`SELECT pg_advisory_lock(${BOOTSTRAP_LOCK_KEY})`);
   try {
     for (const statement of KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS) {
       await db.$executeRawUnsafe(statement);
@@ -100,7 +108,7 @@ export async function runKnowledgeSchemaBootstrap(
     return { ok: true, statementsRun };
   } finally {
     await db
-      .$queryRawUnsafe(`SELECT pg_advisory_unlock(${BOOTSTRAP_LOCK_KEY})`)
+      .$executeRawUnsafe(`SELECT pg_advisory_unlock(${BOOTSTRAP_LOCK_KEY})`)
       .catch(() => undefined);
   }
 }
