@@ -1,4 +1,5 @@
 import { openai, CHAT_MODEL as OPENAI_DEFAULT_MODEL } from '@/lib/openai';
+import { recordLlmCall, type LlmCallLogContext } from './llm-call-log';
 
 export type ChatMessage = {
   role: 'system' | 'user' | 'assistant';
@@ -81,6 +82,13 @@ export interface ChatCompletionOptions extends Partial<CompletionRunConfig> {
   totalDeadlineMs?: number;
   /** Внешняя отмена. Прерванная попытка получает outcome `ABORTED`, не `ERROR`. */
   signal?: AbortSignal;
+  /**
+   * Корреляционные метки для журнала вызовов в БД (`LlmCallLog`). Отсутствие
+   * поля означает «этот вызов не журналировать»: журнал полезен ровно там, где
+   * известно, ЧЕЙ это вызов, а безымянные записи в него только шумят.
+   * Сам журнал вдобавок выключен по умолчанию — см. `llm-call-log.ts`.
+   */
+  callLog?: LlmCallLogContext;
 }
 
 /** Токены реального вызова провайдера — источник для cost meter (Task 37).
@@ -1653,11 +1661,56 @@ async function runCompletionAttempt(
  *
  * При полном отказе бросает `ChatCompletionError` с полным `attempts[]`.
  */
+/**
+ * Роли для журнала: system-части склеиваются так же, как их склеивает
+ * `buildAnthropicPayload`, остальное идёт в `userMessage`. Ассистентские
+ * реплики (few-shot) попадают туда же с явной пометкой роли — иначе в журнале
+ * не отличить пример ответа от вопроса пользователя.
+ */
+function splitMessagesForLog(messages: readonly ChatMessage[]): {
+  systemPrompt: string;
+  userMessage: string;
+} {
+  const system: string[] = [];
+  const rest: string[] = [];
+  for (const message of messages) {
+    if (message.role === 'system') system.push(message.content);
+    else if (message.role === 'user') rest.push(message.content);
+    else rest.push(`[${message.role}] ${message.content}`);
+  }
+  return { systemPrompt: system.join('\n\n'), userMessage: rest.join('\n\n') };
+}
+
 export async function createChatCompletionDetailed(
   options: ChatCompletionOptions
 ): Promise<ChatCompletionResult> {
   const callStartedMs = Date.now();
   const attempts: CompletionAttempt[] = [];
+
+  /** Общая часть записи журнала; `undefined` — вызов журналировать не просили. */
+  const logCall = async (outcome: {
+    provider: string;
+    model: string;
+    rawResponse?: string | null;
+    error?: string | null;
+  }): Promise<void> => {
+    if (!options.callLog) return;
+    const { systemPrompt, userMessage } = splitMessagesForLog(options.messages);
+    await recordLlmCall({
+      ...options.callLog,
+      provider: outcome.provider,
+      model: outcome.model,
+      systemPrompt,
+      userMessage,
+      rawResponse: outcome.rawResponse ?? null,
+      error: outcome.error ?? null,
+      ...(options.temperature !== undefined && { temperature: options.temperature }),
+      ...(options.maxTokens !== undefined && { maxTokens: options.maxTokens }),
+      ...(options.responseFormat !== undefined && { responseFormat: options.responseFormat }),
+      streaming: false,
+      latencyMs: Date.now() - callStartedMs,
+    });
+  };
 
   const primaryProvider = options.provider ?? getProvider();
   const primaryModel = resolvePrimaryModel(primaryProvider, options);
@@ -1727,6 +1780,11 @@ export async function createChatCompletionDetailed(
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const result = await runOne(primaryProvider, primaryModel, true);
     if (result.ok) {
+      await logCall({
+        provider: primaryProvider,
+        model: primaryModel,
+        rawResponse: result.rawText,
+      });
       return {
         text: result.text,
         rawText: result.rawText,
@@ -1777,6 +1835,11 @@ export async function createChatCompletionDetailed(
     );
     const result = await runOne(fallbackTarget.provider, fallbackTarget.model, false);
     if (result.ok) {
+      await logCall({
+        provider: fallbackTarget.provider,
+        model: fallbackTarget.model,
+        rawResponse: result.rawText,
+      });
       return {
         text: result.text,
         rawText: result.rawText,
@@ -1800,6 +1863,14 @@ export async function createChatCompletionDetailed(
   // attempts[]. Иначе health-эндпоинт и consistency-gate печатали бы
   // пользователю сводку попыток вместо причины отказа.
   const rootError = primaryError ?? fallbackError;
+
+  // Отказ журналируется наравне с успехом: «что мы спросили, когда всё легло»
+  // — половина смысла журнала. `rawResponse` тут честно null: ответа не было.
+  await logCall({
+    provider: primaryProvider,
+    model: primaryModel,
+    error: rawMessageOf(rootError),
+  });
 
   throw new ChatCompletionError(rawMessageOf(rootError), attempts, {
     cause: rootError,

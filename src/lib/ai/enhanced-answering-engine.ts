@@ -312,6 +312,7 @@ const GENERAL_KNOWLEDGE_FALLBACK_PROMPT = `Ты — экспертный пом�
 async function classifyIntent(question: string): Promise<IntentClassification> {
   const { createChatCompletion, normalizeJsonResponse } = await import('@/lib/ai/chat-provider');
   const content = await createChatCompletion({
+    callLog: { callSite: 'enhanced-answering.classifyIntent', question },
     messages: [
       { role: 'system', content: INTENT_CLASSIFIER_PROMPT },
       { role: 'user', content: question },
@@ -1446,6 +1447,11 @@ export async function answerQuestionEnhanced(
   try {
     answer =
       (await createChatCompletion({
+      callLog: {
+        callSite: 'enhanced-answering.synthesis',
+        question,
+        ...(sessionId !== undefined && { sessionId }),
+      },
       messages: [
         { role: 'system', content: systemPrompt },
         {
