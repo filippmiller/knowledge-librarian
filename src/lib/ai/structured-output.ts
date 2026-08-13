@@ -130,12 +130,38 @@ function wasRepaired(rawText: string, normalizedText: string): boolean {
   // «достроили обрыв» по БАЛАНСУ СКОБОК, а не по длине: markdown-забор вокруг
   // целого JSON длину меняет, но скобки в нём сбалансированы, а у оборванного
   // ответа — нет. Сравнение длин здесь давало ложные срабатывания на заборах.
-  return !hasBalancedJsonBrackets(raw);
+  //
+  // Баланс считается по JSON-СРЕЗУ, а не по всему сырому тексту: нормализация
+  // (`tryLegacyGreedyRepair` в chat-provider.ts) начинает ровно с первой
+  // `{`/`[`, и всё, что было до неё, до неё же и не доезжает. Пока баланс
+  // считался по всему тексту, непарная `]` в прозаическом вступлении уводила
+  // счётчик в минус и объявляла обрывом ответ с целым JSON.
+  const candidate = extractJsonCandidate(raw);
+  if (candidate === null) return false; // ни одной скобки — чинить было нечего
+  return !hasBalancedJsonBrackets(candidate);
 }
 
-/** Баланс `{}`/`[]` с пропуском содержимого строк и экранирования. */
+/**
+ * Тот же срез, который увидит нормализация: от первой `{`/`[` и до конца.
+ * `null` — в тексте нет ни одной открывающей скобки.
+ *
+ * Держать это в синхроне с `tryLegacyGreedyRepair()` обязательно: разъедутся —
+ * и детектор снова начнёт судить о тексте, которого нормализация не видела.
+ */
+function extractJsonCandidate(text: string): string | null {
+  const start = text.search(/[{[]/);
+  return start === -1 ? null : text.slice(start);
+}
+
+/**
+ * Баланс `{}`/`[]` с пропуском содержимого строк и экранирования.
+ *
+ * СТЕК, а не счётчик: у одного числового счётчика `{` и `]` взаимно гасятся,
+ * поэтому `{ ]` сходился в ноль и объявлялся сбалансированным — а это либо
+ * обрыв, либо мусор, но точно не целое значение.
+ */
 function hasBalancedJsonBrackets(text: string): boolean {
-  let depth = 0;
+  const stack: ('{' | '[')[] = [];
   let inString = false;
   let escaped = false;
 
@@ -150,11 +176,15 @@ function hasBalancedJsonBrackets(text: string): boolean {
       continue;
     }
     if (char === '"') inString = true;
-    else if (char === '{' || char === '[') depth++;
-    else if (char === '}' || char === ']') depth--;
+    else if (char === '{' || char === '[') stack.push(char);
+    else if (char === '}' || char === ']') {
+      const opener = stack.pop();
+      const matches = char === '}' ? opener === '{' : opener === '[';
+      if (!matches) return false;
+    }
   }
 
-  return depth === 0 && !inString;
+  return stack.length === 0 && !inString;
 }
 
 /** Одна претензия схемы к ответу модели: путь до поля + причина. */
@@ -390,15 +420,38 @@ export async function structured<T>(
   // с меньшим числом units. Тихая потеря знания вместо retry — ровно то, чего
   // structured-контракт допускать не должен. Признак ремонта: сырой ответ сам по
   // себе не парсится, а нормализованный парсится.
-  if (result.rawText !== undefined && wasRepaired(result.rawText, result.text)) {
+  //
+  // ПЕРВИЧНЫЙ признак — слово самого провайдера (`finish_reason: length` у
+  // OpenAI, `stop_reason: max_tokens` у Anthropic). Эвристика ниже физически
+  // не способна поймать обрыв, пришедшийся на границу целого значения:
+  // `JSON.parse(raw)` тогда проходит, и `wasRepaired()` выходит на первой же
+  // строке. Провайдер же знает это точно.
+  //
+  // РЕШЕНИЕ (осознанное, влияет на прод и на счёт): `MAX_TOKENS` отвергается
+  // ДАЖЕ когда JSON выглядит целым. Цена — лишний повтор в тех редких случаях,
+  // когда модель уложилась в потолок ровно и ничего не потеряла. Плата за
+  // обратное решение — молча принятый ответ с обрезанным хвостом, то есть
+  // ровно та тихая потеря знания, ради которой structured-контракт и заведён.
+  // Для извлечения знаний недосчитаться юнитов дороже, чем переспросить.
+  //
+  // `OTHER` (content_filter/refusal/tool_calls) обрывом НЕ считается: это не
+  // потолок токенов, и повторять такой вызов бессмысленно — откажут снова.
+  // `COMPLETE` эвристику не отменяет: несбалансированный payload — прямая
+  // улика, и заявление провайдера о законченности её не отменяет.
+  const providerSaysTruncated = result.terminationReason === 'MAX_TOKENS';
+  const heuristicSaysTruncated =
+    result.rawText !== undefined && wasRepaired(result.rawText, result.text);
+
+  if (providerSaysTruncated || heuristicSaysTruncated) {
     throw new StructuredOutputError(
       'TRUNCATED_JSON',
       [
         {
           path: '',
           code: 'truncated_response',
-          message:
-            'ответ провайдера оборван и был бы «починен» нормализацией: часть данных потеряна, нужен повторный вызов',
+          message: providerSaysTruncated
+            ? 'провайдер сообщил об остановке по лимиту токенов: ответ оборван, нужен повторный вызов'
+            : 'ответ провайдера оборван и был бы «починен» нормализацией: часть данных потеряна, нужен повторный вызов',
         },
       ],
       result
