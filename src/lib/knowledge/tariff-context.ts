@@ -29,6 +29,7 @@
  */
 import type { TariffRecord, TariffSectionKey } from '@/lib/knowledge/tariffs';
 import { formatTariffPrice, matchesLanguage } from '@/lib/knowledge/tariffs';
+import { filterCrossInstitutionEvidence } from '@/lib/knowledge/institution-scope';
 
 /**
  * Потолок строк в промпте. Матрица перевода — 1560 строк, и без потолка один
@@ -147,7 +148,16 @@ export function buildTariffContext(question: string, tariffs: TariffRecord[]): T
     // Берутся ВСЕ строки раздела, а не первые N: у услуги может быть пять строк
     // по срокам, и показать модели часть — прямой путь к ответу «апостиль стоит
     // 7000», когда есть ещё четыре цены.
-    selected.push(...tariffs.filter((t) => t.section === section).slice(0, MAX_FLAT_ROWS));
+    // Но строки ЧУЖОГО учреждения режутся (аудит 2026-08-13, 1.3): в разделе
+    // APOSTILLE_SPB лежат и «ЗАГС СПб (2 недели)», и «ЗАГС ЛО (1–1,5 недели)»,
+    // и без фильтра ЛО-сроки попадали в промпт СПб-вопроса — тот же класс
+    // смешивания, от которого чанки уже защищены filterCrossInstitutionEvidence.
+    const sectionRows = tariffs.filter((t) => t.section === section).slice(0, MAX_FLAT_ROWS);
+    selected.push(
+      ...filterCrossInstitutionEvidence(question, undefined, sectionRows, (t) =>
+        [t.serviceName, t.termText, t.conditions, t.footnote].filter(Boolean).join('; ')
+      )
+    );
   }
 
   // Матрица перевода — только когда язык назван. Иначе цена перевода зависит от
