@@ -311,6 +311,27 @@ describe('structured() — успешный разбор', () => {
     expect(error.reason).toBe('TRUNCATED_JSON');
   });
 
+  /**
+   * Второй потолок Anthropic: не `max_tokens` запроса, а контекстное окно
+   * модели целиком. Для вызывающего это тот же обрыв посреди ответа, просто по
+   * другой границе — уронить его в `OTHER` значило бы снова принять обрезанный
+   * ответ как целый.
+   */
+  it('model_context_window_exceeded — тот же обрыв, что и max_tokens', async () => {
+    fetchMock.mockResolvedValue(
+      anthropicOk(JSON.stringify(VALID_PAYLOAD), 'model_context_window_exceeded')
+    );
+
+    const error = (await structured({
+      schema: priceSchema,
+      messages: MESSAGES,
+      runConfig: runConfig(),
+    }).catch((e: unknown) => e)) as StructuredOutputError;
+
+    expect(error).toBeInstanceOf(StructuredOutputError);
+    expect(error.reason).toBe('TRUNCATED_JSON');
+  });
+
   it('OpenAI finish_reason=length — тот же вердикт по другому имени поля', async () => {
     openaiCreate.mockResolvedValue(openaiOk(JSON.stringify(VALID_PAYLOAD), 'length'));
 

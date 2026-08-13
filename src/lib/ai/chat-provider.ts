@@ -1313,13 +1313,21 @@ function normalizeOpenAiFinishReason(
 /**
  * `stop_reason` Anthropic → наши термины. `end_turn` (модель договорила) и
  * `stop_sequence` (наткнулась на стоп-последовательность) — оба означают
- * законченный ответ; `max_tokens` — упёрлась в потолок.
+ * законченный ответ.
+ *
+ * Потолков ДВА, и оба означают одно и то же для вызывающего: ответ обрезан
+ * лимитом. `max_tokens` — упёрлись в `max_tokens` запроса,
+ * `model_context_window_exceeded` — в контекстное окно модели целиком.
+ * Второй легко не заметить и уронить в `OTHER`, а это ровно тот же обрыв
+ * посреди ответа, просто по другой границе.
  */
 function normalizeAnthropicStopReason(
   stopReason: unknown
 ): CompletionTerminationReason | undefined {
   if (typeof stopReason !== 'string' || stopReason === '') return undefined;
-  if (stopReason === 'max_tokens') return 'MAX_TOKENS';
+  if (stopReason === 'max_tokens' || stopReason === 'model_context_window_exceeded') {
+    return 'MAX_TOKENS';
+  }
   if (stopReason === 'end_turn' || stopReason === 'stop_sequence') return 'COMPLETE';
   return 'OTHER';
 }
