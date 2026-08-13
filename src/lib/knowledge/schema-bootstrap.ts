@@ -79,7 +79,7 @@ export const KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS: readonly string[] = [
 /** Ключ advisory-лока: два инстанса на одном деплое не гоняют DDL наперегонки. */
 const BOOTSTRAP_LOCK_KEY = 4_270_813_001;
 
-export type SchemaBootstrapDb = Pick<PrismaClient, '$executeRawUnsafe' | '$queryRawUnsafe'>;
+export type SchemaBootstrapDb = Pick<PrismaClient, '$executeRawUnsafe'>;
 
 export interface SchemaBootstrapResult {
   readonly ok: boolean;
@@ -91,7 +91,13 @@ export async function runKnowledgeSchemaBootstrap(
   db: SchemaBootstrapDb = prisma
 ): Promise<SchemaBootstrapResult> {
   let statementsRun = 0;
-  await db.$queryRawUnsafe(`SELECT pg_advisory_lock(${BOOTSTRAP_LOCK_KEY})`);
+  // Лок и анлок идут через $executeRawUnsafe, НЕ через $queryRawUnsafe:
+  // pg_advisory_lock() возвращает тип void, а десериализация void-колонки —
+  // известная ошибка Prisma («Failed to deserialize column of type 'void'»).
+  // Именно на этом первый прод-запуск bootstrap'а упал целиком (2026-08-13:
+  // /api/health/schema отвечал, а таблиц не было). executeRaw колонок не
+  // читает — возвращает только счётчик строк.
+  await db.$executeRawUnsafe(`SELECT pg_advisory_lock(${BOOTSTRAP_LOCK_KEY})`);
   try {
     for (const statement of KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS) {
       await db.$executeRawUnsafe(statement);
@@ -100,23 +106,51 @@ export async function runKnowledgeSchemaBootstrap(
     return { ok: true, statementsRun };
   } finally {
     await db
-      .$queryRawUnsafe(`SELECT pg_advisory_unlock(${BOOTSTRAP_LOCK_KEY})`)
+      .$executeRawUnsafe(`SELECT pg_advisory_unlock(${BOOTSTRAP_LOCK_KEY})`)
       .catch(() => undefined);
   }
+}
+
+export interface BootstrapStatus {
+  readonly at: string;
+  readonly ok: boolean;
+  readonly statementsRun: number;
+  readonly error: string | null;
+}
+
+// Память последнего запуска — /api/health/schema показывает её наружу, чтобы
+// сбой bootstrap'а был виден по HTTPS, а не только в логах контейнера
+// (первый прод-сбой 2026-08-13 диагностировался вслепую именно из-за этого).
+let lastBootstrapStatus: BootstrapStatus | null = null;
+
+export function getLastBootstrapStatus(): BootstrapStatus | null {
+  return lastBootstrapStatus;
 }
 
 /**
  * Обёртка для старта сервера: ошибка схемы НЕ роняет прод — путь ответов
  * пользователям новые таблицы пока не читает, а мёртвый сервис хуже сервиса
- * без Aurora-таблиц. Ошибка уходит в лог с однозначным префиксом.
+ * без Aurora-таблиц. Ошибка уходит в лог и в getLastBootstrapStatus().
  */
 export async function bootstrapKnowledgeSchemaAtStartup(): Promise<void> {
   try {
     const result = await runKnowledgeSchemaBootstrap();
+    lastBootstrapStatus = {
+      at: new Date().toISOString(),
+      ok: true,
+      statementsRun: result.statementsRun,
+      error: null,
+    };
     console.log(
       `[aurora-schema-bootstrap] ok: ${result.statementsRun}/${KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS.length} statements applied`
     );
   } catch (error) {
+    lastBootstrapStatus = {
+      at: new Date().toISOString(),
+      ok: false,
+      statementsRun: 0,
+      error: error instanceof Error ? error.message : String(error),
+    };
     console.error('[aurora-schema-bootstrap] FAILED — Aurora v2 таблицы не созданы:', error);
   }
 }
