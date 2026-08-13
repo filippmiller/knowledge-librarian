@@ -108,10 +108,11 @@ describe('Aurora dependency graph integration', () => {
 
   it('budgets all six logical builder stages and resolves a stable sidecar path', () => {
     expect(dependencyGraphStructuredCallCeiling()).toBe(6);
-    expect(dependencyGraphSidecarPath('C:\\runs\\one\\extraction-artifact.json'))
-      .toBe(path.join('C:\\runs\\one', 'dependency-graph-artifact.json'));
-    expect(dependencyGraphSidecarPath('C:\\runs\\one\\extraction-artifact.json', 'a'.repeat(64)))
-      .toBe(path.join('C:\\runs\\one', `dependency-graph-artifact-${'a'.repeat(16)}.json`));
+    const extractionPath = path.join('runs', 'one', 'extraction-artifact.json');
+    expect(dependencyGraphSidecarPath(extractionPath))
+      .toBe(path.join('runs', 'one', 'dependency-graph-artifact.json'));
+    expect(dependencyGraphSidecarPath(extractionPath, 'a'.repeat(64)))
+      .toBe(path.join('runs', 'one', `dependency-graph-artifact-${'a'.repeat(16)}.json`));
   });
 
   it('accounts one dependency stage reservation, priced attempt, and trace exactly once', async () => {
