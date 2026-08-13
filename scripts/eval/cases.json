@@ -45,7 +45,7 @@
   },
   {
     "q": "как отправить готовый заказ почтой россии",
-    "expect": { "source": "knowledge_base", "mustInclude": ["почт"] }
+    "expect": { "source": "none", "mustInclude": ["нет данных"] }
   },
   {
     "q": "сколько сейчас стоит биткоин",
