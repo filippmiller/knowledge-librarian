@@ -47,36 +47,40 @@ describe('KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS', () => {
 describe('runKnowledgeSchemaBootstrap', () => {
   function fakeDb() {
     const executed: string[] = [];
-    const queried: string[] = [];
     const db: SchemaBootstrapDb = {
+      // Лок/анлок обязаны идти через executeRaw, НЕ через queryRaw:
+      // pg_advisory_lock() возвращает void, и queryRaw падает на его
+      // десериализации (так упал первый прод-запуск 2026-08-13). Двойник
+      // поэтому вообще не имеет $queryRawUnsafe — обращение к нему было бы
+      // ошибкой типов уже на компиляции.
       $executeRawUnsafe: (async (sql: string) => {
         executed.push(sql);
         return 0;
       }) as SchemaBootstrapDb['$executeRawUnsafe'],
-      $queryRawUnsafe: (async (sql: string) => {
-        queried.push(sql);
-        return [];
-      }) as SchemaBootstrapDb['$queryRawUnsafe'],
     };
-    return { db, executed, queried };
+    return { db, executed };
   }
 
   it('выполняет все statements под advisory-локом и снимает лок', async () => {
-    const { db, executed, queried } = fakeDb();
+    const { db, executed } = fakeDb();
     const result = await runKnowledgeSchemaBootstrap(db);
     expect(result.ok).toBe(true);
     expect(result.statementsRun).toBe(KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS.length);
-    expect(executed).toEqual([...KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS]);
-    expect(queried[0]).toContain('pg_advisory_lock');
-    expect(queried[queried.length - 1]).toContain('pg_advisory_unlock');
+    expect(executed[0]).toContain('pg_advisory_lock');
+    expect(executed.slice(1, -1)).toEqual([...KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS]);
+    expect(executed[executed.length - 1]).toContain('pg_advisory_unlock');
   });
 
   it('ошибка DDL пробрасывается, но лок всё равно снимается', async () => {
-    const { db, queried } = fakeDb();
-    db.$executeRawUnsafe = (async () => {
-      throw new Error('нет соединения с БД');
+    const { db, executed } = fakeDb();
+    const original = db.$executeRawUnsafe;
+    let calls = 0;
+    db.$executeRawUnsafe = (async (sql: string) => {
+      calls++;
+      if (calls === 2) throw new Error('нет соединения с БД'); // первый DDL после лока
+      return original(sql);
     }) as SchemaBootstrapDb['$executeRawUnsafe'];
     await expect(runKnowledgeSchemaBootstrap(db)).rejects.toThrow('нет соединения с БД');
-    expect(queried[queried.length - 1]).toContain('pg_advisory_unlock');
+    expect(executed[executed.length - 1]).toContain('pg_advisory_unlock');
   });
 });
