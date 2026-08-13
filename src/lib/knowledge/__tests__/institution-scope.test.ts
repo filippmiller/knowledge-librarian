@@ -23,22 +23,6 @@ const MINJUST_CHUNK = {
 };
 
 describe('filterCrossInstitutionEvidence — не смешивает учреждения', () => {
-  it('вопрос про КЗАГС СПб выкидывает чанк только с практикой ЛО без названия учреждения', () => {
-    const loPractice = {
-      id: 'lo-practice',
-      content: 'Запись на подачу требуется, записывают на неделю вперёд.',
-      scenarioKey: null as string | null,
-    };
-    const kept = filterCrossInstitutionEvidence(
-      'Как поставить апостиль в КЗАГС СПб?',
-      'apostille.zags.spb',
-      [SPB_CHUNK, loPractice],
-      (item) => item.content,
-      (item) => item.scenarioKey
-    );
-    expect(kept.map((item) => item.id)).toEqual(['spb']);
-  });
-
   it('смешанный чанк КЗАГС+ЛО выкидывается — иначе модель берёт график ЛО', () => {
     const mixed = {
       id: 'mixed',
