@@ -77,6 +77,28 @@ export interface StructuredOptions<T> {
  */
 export type StructuredResult<T> = ChatCompletionResult & { data: T };
 
+/** A provider-success response that passed JSON/schema validation but failed
+ *  a later semantic contract (for example exact ID reconciliation). Carries
+ *  the paid attempt telemetry so generic failure accounting cannot lose it. */
+export class PaidStructuredSemanticError extends Error {
+  readonly attempts: readonly CompletionAttempt[];
+  readonly requestMessages: readonly ChatMessage[];
+  readonly responseText: string | null;
+
+  constructor(message: string, telemetry: {
+    attempts: readonly CompletionAttempt[];
+    requestMessages: readonly ChatMessage[];
+    responseText: string | null;
+  }, options?: { cause?: unknown }) {
+    super(message);
+    this.name = 'PaidStructuredSemanticError';
+    this.attempts = telemetry.attempts;
+    this.requestMessages = telemetry.requestMessages;
+    this.responseText = telemetry.responseText;
+    if (options && 'cause' in options) (this as { cause?: unknown }).cause = options.cause;
+  }
+}
+
 /**
  * Отличает «нормализация лишь сняла обёртку» от «нормализация достроила
  * оборванный JSON».
@@ -339,9 +361,11 @@ export async function structured<T>(
 
   const routing = toCompletionOptions({ ...opts.runConfig, fallbackPolicy });
 
-  const result = await createChatCompletionDetailed({
-    ...routing,
-    messages: opts.messages,
+  let result: ChatCompletionResult;
+  try {
+    result = await createChatCompletionDetailed({
+      ...routing,
+      messages: opts.messages,
     // JSON-режим обоих провайдеров + нормализация ответа — из provider-слоя, а не
     // своя. Побочный эффект осознан: `result.text` здесь уже нормализованный, и
     // ответ прозой доезжает до схемы как `{}` (претензии будут про отсутствующие
@@ -349,8 +373,15 @@ export async function structured<T>(
     responseFormat: 'json_object',
     ...(opts.maxTokens !== undefined && { maxTokens: opts.maxTokens }),
     ...(opts.temperature !== undefined && { temperature: opts.temperature }),
-    ...(opts.signal && { signal: opts.signal }),
-  });
+      ...(opts.signal && { signal: opts.signal }),
+    });
+  } catch (error) {
+    if (error instanceof Error && 'attempts' in error && Array.isArray(error.attempts)) {
+      opts.runConfig.onCompletionAttempts?.(error.attempts as CompletionAttempt[]);
+    }
+    throw error;
+  }
+  opts.runConfig.onCompletionAttempts?.(result.attempts);
 
   // Обрезанный ответ НЕ чинится молча. `normalizeJsonResponse()` достраивает
   // скобки и отбрасывает хвостовой огрызок — для v1-синтеза это правильно, но
