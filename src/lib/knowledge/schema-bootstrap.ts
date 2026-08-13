@@ -79,11 +79,36 @@ export const KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS: readonly string[] = [
 /** Ключ advisory-лока: два инстанса на одном деплое не гоняют DDL наперегонки. */
 const BOOTSTRAP_LOCK_KEY = 4_270_813_001;
 
-export type SchemaBootstrapDb = Pick<PrismaClient, '$executeRawUnsafe'>;
+/**
+ * Предел на ВЕСЬ bootstrap при старте сервера.
+ *
+ * Живой отказ 2026-08-13 (деплой `0a89eb7c`): после починки лока bootstrap
+ * впервые реально дошёл до БД — и завис. В логах контейнера `Ready in 93ms`,
+ * затем `Stopping Container`, и НИ ОДНОЙ строки `[aurora-schema-bootstrap]`:
+ * ни `ok`, ни `FAILED`. Healthcheck 11 раз получил service unavailable и
+ * деплой был отменён.
+ *
+ * Причина класса: `register()` в instrumentation.ts ждёт bootstrap, а тот ждал
+ * БД без единого предела. Любая блокировка на стороне Postgres — удерживаемый
+ * advisory-лок, ожидание блокировки `Document` при добавлении внешнего ключа,
+ * зависшее соединение — превращалась в несостоявшийся деплой.
+ *
+ * Модуль с самого начала объявляет политику «мёртвый сервис хуже сервиса без
+ * Aurora-таблиц». Ловить только ИСКЛЮЧЕНИЕ для этого мало: зависание не бросает
+ * ничего. Предел ниже делает политику исполнимой, а не декларативной.
+ */
+const BOOTSTRAP_TOTAL_TIMEOUT_MS = 20_000;
+
+export type SchemaBootstrapDb = Pick<PrismaClient, '$executeRawUnsafe' | '$queryRawUnsafe'>;
 
 export interface SchemaBootstrapResult {
   readonly ok: boolean;
   readonly statementsRun: number;
+  /**
+   * true — лок занят другим инстансом, DDL СОЗНАТЕЛЬНО пропущен. Это не ошибка:
+   * схему в этот момент приводит в порядок сосед, а весь DDL идемпотентен.
+   */
+  readonly skippedLockHeld?: boolean;
   readonly error?: string;
 }
 
@@ -91,13 +116,23 @@ export async function runKnowledgeSchemaBootstrap(
   db: SchemaBootstrapDb = prisma
 ): Promise<SchemaBootstrapResult> {
   let statementsRun = 0;
-  // Лок и анлок идут через $executeRawUnsafe, НЕ через $queryRawUnsafe:
-  // pg_advisory_lock() возвращает тип void, а десериализация void-колонки —
-  // известная ошибка Prisma («Failed to deserialize column of type 'void'»).
-  // Именно на этом первый прод-запуск bootstrap'а упал целиком (2026-08-13:
-  // /api/health/schema отвечал, а таблиц не было). executeRaw колонок не
-  // читает — возвращает только счётчик строк.
-  await db.$executeRawUnsafe(`SELECT pg_advisory_lock(${BOOTSTRAP_LOCK_KEY})`);
+  // pg_TRY_advisory_lock, а не pg_advisory_lock: блокирующий вариант ЖДЁТ
+  // столько, сколько нужно, и именно это подвесило старт сервера 2026-08-13
+  // (деплой `0a89eb7c`). Try-версия отвечает мгновенно — либо взяли, либо нет.
+  //
+  // Читаем результат через $queryRawUnsafe и это НЕ возврат к прошлому багу:
+  // упал он на pg_advisory_lock(), возвращающем `void`, который Prisma не умеет
+  // десериализовать. pg_try_advisory_lock() возвращает boolean — обычный тип,
+  // читается штатно. Иначе результат лока прочитать нечем: $executeRaw отдаёт
+  // счётчик строк, а не значение.
+  const lockRows = await db.$queryRawUnsafe<Array<{ locked: boolean }>>(
+    `SELECT pg_try_advisory_lock(${BOOTSTRAP_LOCK_KEY}) AS locked`
+  );
+  if (lockRows[0]?.locked !== true) {
+    // Лок у соседнего инстанса — он и приводит схему в порядок. Ждать нечего:
+    // весь DDL идемпотентен, а ожидание здесь стоило бы готовности сервера.
+    return { ok: true, statementsRun: 0, skippedLockHeld: true };
+  }
   try {
     for (const statement of KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS) {
       await db.$executeRawUnsafe(statement);
@@ -105,6 +140,8 @@ export async function runKnowledgeSchemaBootstrap(
     }
     return { ok: true, statementsRun };
   } finally {
+    // Разлок через executeRaw: pg_advisory_unlock() возвращает boolean, но
+    // значение здесь не нужно — важен только сам вызов.
     await db
       .$executeRawUnsafe(`SELECT pg_advisory_unlock(${BOOTSTRAP_LOCK_KEY})`)
       .catch(() => undefined);
@@ -128,13 +165,45 @@ export function getLastBootstrapStatus(): BootstrapStatus | null {
 }
 
 /**
- * Обёртка для старта сервера: ошибка схемы НЕ роняет прод — путь ответов
- * пользователям новые таблицы пока не читает, а мёртвый сервис хуже сервиса
- * без Aurora-таблиц. Ошибка уходит в лог и в getLastBootstrapStatus().
+ * Обёртка для старта сервера: ни ошибка схемы, ни ЗАВИСАНИЕ на БД не мешают
+ * сервису подняться — путь ответов пользователям новые таблицы пока не читает,
+ * а мёртвый сервис хуже сервиса без Aurora-таблиц. Оба исхода уходят в лог и в
+ * getLastBootstrapStatus().
+ *
+ * Предел обязателен ИМЕННО здесь, а не только внутри: `register()` ждёт эту
+ * функцию, и до 2026-08-13 зависание БД означало провал healthcheck и отмену
+ * деплоя. Исключение ловилось, зависание — нет.
  */
-export async function bootstrapKnowledgeSchemaAtStartup(): Promise<void> {
+export async function bootstrapKnowledgeSchemaAtStartup(
+  db: SchemaBootstrapDb = prisma
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const result = await runKnowledgeSchemaBootstrap();
+    const result = await Promise.race([
+      runKnowledgeSchemaBootstrap(db),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `bootstrap не уложился в ${BOOTSTRAP_TOTAL_TIMEOUT_MS} мс — БД не отвечает или держит блокировку; старт сервера продолжается без Aurora-таблиц`
+              )
+            ),
+          BOOTSTRAP_TOTAL_TIMEOUT_MS
+        );
+        timer.unref?.();
+      }),
+    ]);
+    if (result.skippedLockHeld === true) {
+      lastBootstrapStatus = {
+        at: new Date().toISOString(),
+        ok: true,
+        statementsRun: 0,
+        error: null,
+      };
+      console.log('[aurora-schema-bootstrap] пропущен: лок держит другой инстанс');
+      return;
+    }
     lastBootstrapStatus = {
       at: new Date().toISOString(),
       ok: true,
@@ -152,5 +221,7 @@ export async function bootstrapKnowledgeSchemaAtStartup(): Promise<void> {
       error: error instanceof Error ? error.message : String(error),
     };
     console.error('[aurora-schema-bootstrap] FAILED — Aurora v2 таблицы не созданы:', error);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
