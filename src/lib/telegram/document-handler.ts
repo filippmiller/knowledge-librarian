@@ -106,7 +106,7 @@ export async function handleDocumentUpload(
     // Phase 3: Chunking + embeddings
     await sendTypingIndicator(chatId);
     await sendMessage(chatId, 'Фаза 3/3: Индексация для поиска...');
-    const chunksCreated = await createChunks(rawText, document.id, domainIds);
+    const chunksCreated = await createChunks(rawText, document.id, domainIds, document.scenarioKey);
 
     // Mark document as completed
     const completed = await prisma.document.update({
@@ -350,7 +350,12 @@ async function extractKnowledge(
   return { rulesCreated, qaPairsCreated, ruleCodeToId, rulesList, qaPairsList };
 }
 
-async function createChunks(rawText: string, documentId: string, domainIds: string[]): Promise<number> {
+async function createChunks(
+  rawText: string,
+  documentId: string,
+  domainIds: string[],
+  scenarioKey: string | null
+): Promise<number> {
   const { splitTextIntoChunks } = await import('@/lib/ai/chunker');
 
   const chunks = splitTextIntoChunks(rawText);
@@ -369,6 +374,7 @@ async function createChunks(rawText: string, documentId: string, domainIds: stri
       const createdChunk = await prisma.docChunk.create({
         data: {
           documentId,
+          scenarioKey,
           chunkIndex: chunk.index,
           content: chunk.content,
           embedding,

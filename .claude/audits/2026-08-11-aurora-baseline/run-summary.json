@@ -1,0 +1,93 @@
+{
+  "ranAt": "2026-08-10T22:52:09.815Z",
+  "docPath": "C:\\dev\\translation\\scripts\\fixtures\\semantic-rule-extraction-test-pack\\uchebnaya_instrukciya_semanticheskoe_izvlechenie_pravil.docx",
+  "extractionRuns": 1,
+  "questionCount": 16,
+  "taintedShingleCount": 344,
+  "unguardedSecretCount": 0,
+  "runIds": [
+    "run-1-2026-08-10T22-29-49-384Z"
+  ],
+  "dispositionCountsByRun": [
+    {
+      "runId": "run-1-2026-08-10T22-29-49-384Z",
+      "DIRECT_ANSWER": 10,
+      "UNVERIFIED_ANSWER": 2,
+      "HOLD": 2,
+      "ERROR": 2
+    }
+  ],
+  "cost": {
+    "totalUsd": 0.81688578,
+    "totalAttemptCount": 93,
+    "reservedPaidCallCount": 95,
+    "maxPaidCalls": 300,
+    "byPurpose": [
+      {
+        "purpose": "query-frame",
+        "callCount": 21,
+        "attemptCount": 21,
+        "totalUsd": 0.1086056,
+        "pricedAttemptCount": 19,
+        "unpricedAttemptCount": 0,
+        "unverifiableSuccessCount": 0
+      },
+      {
+        "purpose": "query-embedding",
+        "callCount": 17,
+        "attemptCount": 17,
+        "totalUsd": 0.000012179999999999999,
+        "pricedAttemptCount": 17,
+        "unpricedAttemptCount": 0,
+        "unverifiableSuccessCount": 0
+      },
+      {
+        "purpose": "reranker",
+        "callCount": 17,
+        "attemptCount": 17,
+        "totalUsd": 0.30060400000000004,
+        "pricedAttemptCount": 17,
+        "unpricedAttemptCount": 0,
+        "unverifiableSuccessCount": 0
+      },
+      {
+        "purpose": "decision-relevance",
+        "callCount": 17,
+        "attemptCount": 17,
+        "totalUsd": 0.257466,
+        "pricedAttemptCount": 17,
+        "unpricedAttemptCount": 0,
+        "unverifiableSuccessCount": 0
+      },
+      {
+        "purpose": "synthesis",
+        "callCount": 12,
+        "attemptCount": 12,
+        "totalUsd": 0.07724199999999999,
+        "pricedAttemptCount": 12,
+        "unpricedAttemptCount": 0,
+        "unverifiableSuccessCount": 0
+      },
+      {
+        "purpose": "challenge-compatibility",
+        "callCount": 4,
+        "attemptCount": 4,
+        "totalUsd": 0.046096,
+        "pricedAttemptCount": 4,
+        "unpricedAttemptCount": 0,
+        "unverifiableSuccessCount": 0
+      },
+      {
+        "purpose": "condition-preservation",
+        "callCount": 5,
+        "attemptCount": 5,
+        "totalUsd": 0.026860000000000002,
+        "pricedAttemptCount": 5,
+        "unpricedAttemptCount": 0,
+        "unverifiableSuccessCount": 0
+      }
+    ]
+  },
+  "callTracePath": "scratchpad\\codex-controlled-live-quality-v3-2026-08-11\\call-trace.jsonl",
+  "abortedBy": null
+}

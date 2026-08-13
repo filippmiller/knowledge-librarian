@@ -19,6 +19,7 @@ import { expandAbbreviations, selectKeyTerms } from '@/lib/knowledge/glossary';
 import { polishCanonicalAnswer } from '@/lib/ai/canonical-answer-polisher';
 import { type QAPair } from '@prisma/client';
 import { verifyAnswer, type ConsistencyReport } from '@/lib/ai/consistency-gate';
+import { recordHallucinationLog, type TelemetryMode } from '@/lib/ai/answer-telemetry';
 import { checkClaimGrounding } from '@/lib/ai/claim-grounding';
 import {
   detectIssuingRegion,
@@ -46,11 +47,27 @@ import {
   checkClientSafety,
   type Audience,
 } from '@/lib/knowledge/audience';
+import { filterCrossInstitutionEvidence } from '@/lib/knowledge/institution-scope';
+import { resolveMainPathAnswerSource, type AnswerSource } from '@/lib/ai/answer-source';
 
 // Confidence thresholds
 const CONFIDENCE_THRESHOLD_HIGH = 0.7;    // Answer confidently
 const CONFIDENCE_THRESHOLD_MEDIUM = 0.5;  // Answer with caveat
 const CONFIDENCE_THRESHOLD_LOW = 0.3;     // Ask for clarification
+
+// Feature flag (Beads translation-2yt): scenarioKey=null means "no leaf in
+// the scenario taxonomy for this content's topic", NOT "applies to
+// everything" — PR #53 already enforces the stricter null-content bar in
+// the open-lookup branch (scenario unrecognized). This flag extends the
+// SAME policy to the known-scenario branch too, which the open-lookup-only
+// fix left wide open (Grok finding during plan review).
+//
+// Off by default: ~79% Rule / ~90% DocChunk currently have scenarioKey=null
+// (2026-08-05 audit), so flipping this on for the known-scenario branch too
+// is a real hold-rate risk, not just a bug fix. Dry-run against the golden
+// corpus (scripts/run-eval-corpus.ts) before enabling in prod — see that
+// script's hold-rate in its aggregate output.
+const SCOPE_NULL_STRICT = process.env.SCOPE_NULL_STRICT === 'true';
 
 export interface EnhancedAnswerResult {
   answer: string;
@@ -117,7 +134,7 @@ export interface EnhancedAnswerResult {
     prompt: string;
     options: Array<{ id: string; label: string; targetScenarioKey: string }>;
   };
-  answerSource?: 'knowledge_base' | 'general_ai' | 'deterministic_guardrail';
+  answerSource?: AnswerSource;
   requiresHumanReview?: boolean;
   consistency?: {
     allSupported: boolean;
@@ -341,15 +358,29 @@ async function multiQuerySearch(
     queries.map(q => hybridSearch(q, domainSlugs, limit, 0.7, scenarioAncestors, audience))
   );
 
-  // Merge and deduplicate results using max score
+  // Merge and deduplicate, keeping the STRONGEST signal seen for each chunk
+  // across query variants — not just whichever variant had the best
+  // combinedScore. combinedScore is an RRF rank-fusion score: a chunk found
+  // by one variant with the best RANK can still carry a lower raw
+  // semanticScore/keywordScore than the SAME chunk found by another variant
+  // with a worse rank (Codex review on PR #53). selectContextChunks' null-
+  // scenario eligibility bar reads semantic/keyword scores directly, so
+  // keeping only the best-combinedScore duplicate could wrongly discard a
+  // chunk that actually clears that bar via a different variant.
   const mergedResults = new Map<string, HybridSearchResult>();
 
   for (const results of allResults) {
     for (const result of results) {
       const existing = mergedResults.get(result.id);
-      if (!existing || result.combinedScore > existing.combinedScore) {
+      if (!existing) {
         mergedResults.set(result.id, result);
+        continue;
       }
+      mergedResults.set(result.id, {
+        ...(result.combinedScore > existing.combinedScore ? result : existing),
+        semanticScore: Math.max(existing.semanticScore, result.semanticScore),
+        keywordScore: Math.max(existing.keywordScore, result.keywordScore),
+      });
     }
   }
 
@@ -363,16 +394,36 @@ async function multiQuerySearch(
  */
 function selectContextChunks(
   chunks: HybridSearchResult[],
-  maxChunks: number = 5
+  maxChunks: number = 5,
+  openLookup: boolean = false
 ): HybridSearchResult[] {
   if (chunks.length === 0) return [];
 
   // RRF is a rank-fusion score, not an absolute relevance measurement. First
   // require real semantic support or a strong keyword match; otherwise "the
   // best five bad results" would still be sent to the synthesizer.
-  const eligible = chunks.filter(
-    (chunk) => chunk.semanticScore >= 0.4 || chunk.keywordScore >= 0.65
-  );
+  //
+  // Открытый поиск (сценарий не определён) не фильтрует чанки по теме вообще
+  // — ни на кого не похожая формулировка вопроса допускает любой документ. Для
+  // чанка с scenarioKey=null это вдвойне опасно: null означает не «применимо
+  // ко всему», а «для темы документа нет узла в дереве сценариев» (см. аудит
+  // .claude/audits/2026-08-05-moscow-oryol-bad-answer.md — узкий факт про
+  // партнёра в Орле выиграл top-1 в ответе про логистику в Минск только по
+  // случайному пересечению слов). Планка для такого чанка в открытом поиске
+  // выше обычной — не запрет (правило остаётся годным), а требование более
+  // сильного сигнала, прежде чем узкий факт попадёт в синтез без темы-щита.
+  //
+  // SCOPE_NULL_STRICT (Beads translation-2yt) extends the SAME higher bar to
+  // the known-scenario branch too — a recognized scenario doesn't make a
+  // scenarioKey=null chunk any more "about" that scenario, it just means the
+  // question was easier to classify. Off by default: see the flag's own
+  // comment near the top of this file for the hold-rate risk.
+  const eligible = chunks.filter((chunk) => {
+    const passesNormalBar = chunk.semanticScore >= 0.4 || chunk.keywordScore >= 0.65;
+    const needsHigherBar = chunk.scenarioKey === null && (openLookup || SCOPE_NULL_STRICT);
+    if (!needsHigherBar) return passesNormalBar;
+    return chunk.semanticScore >= 0.62 || chunk.keywordScore >= 0.85;
+  });
   if (eligible.length === 0) return [];
 
   // Find the "elbow" in similarity scores
@@ -671,6 +722,16 @@ async function findCanonicalQaOverride(
   question: string,
   audience: Audience
 ): Promise<QAPair | null> {
+  // Beads translation-2yt (Grok/Codex, ревью плана): fuzzy term-overlap не
+  // доказывает применимость пары к ЭТОМУ вопросу — но и точное совпадение
+  // текста тоже не доказывает, пара могла быть про другой город/услугу со
+  // случайно тем же текстом. Подмена ответа целиком с confidence=1.0 и
+  // requiresHumanReview=false остаётся только там, где оператор увидит хит и
+  // может поймать ложное совпадение — audience=internal. Для клиента этот
+  // быстрый путь отключён полностью; вопрос идёт через обычный синтез со
+  // всеми его проверками (checkClientSafety, claim grounding, price
+  // attribution).
+  if (audience !== 'internal') return null;
   try {
     // Выборка по authority-маркеру, а не по свежести. Раньше брались 200
     // последних активных пар: после импорта корпуса старые утверждённые эталоны
@@ -693,7 +754,20 @@ async function findCanonicalQaOverride(
     });
     if (authorityCandidates.length === 0) return null;
 
-    const ranked = authorityCandidates
+    // Аудит 2026-08-13 (1.2): канонический override шёл МИМО фильтра
+    // учреждений — одобренная операторская пара про ЗАГС ЛО могла целиком
+    // подменить ответ на вопрос про КЗАГС СПб с confidence=1.0. Тот же
+    // фильтр, что у чанков/правил/QA в основном пути.
+    const scopedCandidates = filterCrossInstitutionEvidence(
+      question,
+      undefined,
+      authorityCandidates,
+      (qa) => `${qa.question}\n${qa.answer}`,
+      (qa) => qa.scenarioKey
+    );
+    if (scopedCandidates.length === 0) return null;
+
+    const ranked = scopedCandidates
       .map((qa) => ({ qa, overlap: questionTermOverlap(question, qa.question) }))
       // Порог по длинной стороне отсекает главный класс ложных совпадений:
       // короткий общий вопрос против длинного специфичного канонического.
@@ -778,6 +852,13 @@ export interface AnswerRequest {
   audience: Audience;
   sessionId?: string;
   includeDebug?: boolean;
+  /**
+   * 'disabled' глушит fire-and-forget телеметрию качества ответа
+   * (`HallucinationLog`). Только для прогонов золотого корпуса: они бьют по
+   * продовой базе и не должны подмешивать синтетику в статистику по реальным
+   * пользователям. Не задан = 'enabled' = сегодняшнее поведение.
+   */
+  telemetryMode?: TelemetryMode;
 }
 
 /**
@@ -786,7 +867,7 @@ export interface AnswerRequest {
 export async function answerQuestionEnhanced(
   req: AnswerRequest
 ): Promise<EnhancedAnswerResult> {
-  const { question, audience, sessionId, includeDebug = false } = req;
+  const { question, audience, sessionId, includeDebug = false, telemetryMode } = req;
   console.log(
     `[enhanced-answering] Starting for question (audience=${audience}):`,
     question.substring(0, 100)
@@ -879,28 +960,31 @@ export async function answerQuestionEnhanced(
     return buildClarificationResult(question, scenarioDecision);
   }
 
-  // out_of_scope handling. The classifier marks a question out_of_scope when
-  // it doesn't map to a concrete apostille scenario — but the scenario tree
-  // only covers apostille (ЗАГС/нотариалка/опека). Lots of legitimate bureau
-  // questions (education apostille, criminal-record certs, prices, translation)
-  // land here even though the KB DOES hold the answer. So:
-  //   1) deterministic region guardrail still wins (Moscow↔СПб);
-  //   2) if the question is about a bureau topic at all → reclassify to an
-  //      OPEN knowledge lookup over the whole KB (general_ai stays a last
-  //      resort, only if open retrieval finds nothing — handled downstream);
-  //   3) only genuinely off-topic questions (no bureau keyword: weather,
-  //      crypto, …) get the honest "no data" short-circuit, never general_ai.
+  // out_of_scope handling. Дерево сценариев покрывает только апостиль, поэтому
+  // сюда попадает масса законных вопросов, ответ на которые в базе ЕСТЬ:
+  // образование, несудимость, цены, перевод, порядок оформления заказа.
+  //
+  // Раньше здесь стоял список ключевых слов: вопрос без слова «апостиль»,
+  // «перевод», «документ» и т.п. отказывался ДО поиска. Это отсекало базу от
+  // вопросов, заданных обычным языком: «как оформить заказ онлайн?», «что
+  // делать при обнаружении ошибки?» — в них нет ни одного слова из списка,
+  // и поиск по 1535 активным правилам не запускался вовсе. Проверено на проде
+  // 2026-08-05: все 8 последних вопросов пользователей получили confidence 0
+  // и захардкоженный отказ, ни один не дошёл до retrieval.
+  //
+  // Отказ должен быть ЗАРАБОТАН поиском, а не предположён по словарю: ищем
+  // всегда, а «нет данных» выдаём ниже по потоку, когда retrieval действительно
+  // ничего не нашёл. Вопросы вне области («сколько стоит биткоин») получают тот
+  // же честный отказ — просто после того, как мы посмотрели, а не вместо этого:
+  // shouldUseGeneralKnowledgeFallback не пустит их в general_ai, а синтез при
+  // confidenceLevel='insufficient' отвечает «в базе знаний нет данных».
   if (scenarioDecision.kind === 'out_of_scope') {
     // Таблица уже спрошена выше и промолчала — повторять нечего.
-    if (!isBureauTopic(question)) {
-      return buildOutOfScopeResult(question, scenarioDecision);
-    }
-
-    console.log('[enhanced-answering] out_of_scope but bureau topic → open knowledge lookup');
+    console.log('[enhanced-answering] out_of_scope → open knowledge lookup');
     scenarioDecision = {
       kind: 'knowledge_lookup',
       label: 'Открытый поиск по базе знаний',
-      reasoning: `out_of_scope reclassified to open lookup (bureau topic): ${scenarioDecision.reasoning}`,
+      reasoning: `out_of_scope reclassified to open lookup: ${scenarioDecision.reasoning}`,
     };
   }
 
@@ -988,8 +1072,17 @@ export async function answerQuestionEnhanced(
     }
   }
 
-  // Step 4: Select context chunks dynamically
-  const contextChunks = selectContextChunks(chunks, 5);
+  // Step 4: Select context chunks dynamically.
+  // Сначала выкидываем чанки чужого учреждения: фильтр сценария пускает
+  // `scenarioKey=null`, и график ЗАГС ЛО иначе попадает в ответ про КЗАГС.
+  const scopedChunks = filterCrossInstitutionEvidence(
+    question,
+    scenarioKeyForAnswer,
+    chunks,
+    (chunk) => `${chunk.content}\n${chunk.documentId ? (docTitleMap.get(chunk.documentId) ?? '') : ''}`,
+    (chunk) => chunk.scenarioKey
+  );
+  const contextChunks = selectContextChunks(scopedChunks, 5, openKnowledgeLookup);
   console.log('[enhanced-answering] Step 4: Selected', contextChunks.length, 'context chunks');
 
   // Group context chunks by document for source attribution
@@ -1076,18 +1169,41 @@ export async function answerQuestionEnhanced(
       )
     );
     const keywordMatched = perTerm.flat();
+    // Этот пул берёт топ по ОБЩЕЙ уверенности правила, безотносительно к
+    // самому вопросу — здесь и проходит утечка узкого факта без темы (см.
+    // аудит про Орёл/FPM). У keywordMatched выше уже есть реальная проверка:
+    // терм вопроса физически встречается в теле правила. Поэтому правило без
+    // темы может попасть в кандидаты ТОЛЬКО через keywordMatched — не
+    // бесплатным топом по уверенности. У правил с назначенной темой это
+    // ограничение не действует: тема сама по себе уже сигнал релевантности.
+    //
+    // В открытом поиске (scenario не определён) это уже безусловно так —
+    // PR #53. SCOPE_NULL_STRICT (translation-2yt) добавляет то же самое и в
+    // ветку с распознанным сценарием: известный сценарий не делает
+    // scenarioKey=null правило более «про этот сценарий», он лишь означает,
+    // что вопрос было легче классифицировать.
     const byConfidence = await prisma.rule.findMany({
-      where: { status: 'ACTIVE', ...scenarioWhere, ...audienceWhere },
+      where: {
+        status: 'ACTIVE',
+        ...audienceWhere,
+        AND: [scenarioWhere, ...((openKnowledgeLookup || SCOPE_NULL_STRICT) ? [{ NOT: { scenarioKey: null } }] : [])],
+      },
       include: { document: { select: { title: true } } },
       take: 100,
       orderBy: { confidence: 'desc' },
     });
     const seenRule = new Set<string>();
-    const ruleCandidates = [...keywordMatched, ...byConfidence].filter((r) => {
-      if (seenRule.has(r.id)) return false;
-      seenRule.add(r.id);
-      return true;
-    });
+    const ruleCandidates = filterCrossInstitutionEvidence(
+      question,
+      scenarioKeyForAnswer,
+      [...keywordMatched, ...byConfidence].filter((r) => {
+        if (seenRule.has(r.id)) return false;
+        seenRule.add(r.id);
+        return true;
+      }),
+      (rule) => `${rule.ruleCode} ${rule.title} ${rule.body} ${rule.document?.title ?? ''}`,
+      (rule) => rule.scenarioKey
+    );
     rules = rankByQuestion(
       ruleCandidates,
       relevanceText,
@@ -1125,17 +1241,32 @@ export async function answerQuestionEnhanced(
         })
       )
     );
+    // Тот же принцип, что у byConfidence для правил чуть выше (см. этот
+    // комментарий и SCOPE_NULL_STRICT там же): этот пул берёт топ по
+    // свежести без всякой связи с вопросом, и пара без темы могла пройти
+    // бесплатно. qaPerTerm выше уже требует реального совпадения терма в
+    // question/answer.
     const qaRecent = await prisma.qAPair.findMany({
-      where: { status: 'ACTIVE', ...scenarioWhere, ...audienceWhere },
+      where: {
+        status: 'ACTIVE',
+        ...audienceWhere,
+        AND: [scenarioWhere, ...((openKnowledgeLookup || SCOPE_NULL_STRICT) ? [{ NOT: { scenarioKey: null } }] : [])],
+      },
       take: 100,
       orderBy: { createdAt: 'desc' },
     });
     const seenQa = new Set<string>();
-    const qaCandidates = [...qaPerTerm.flat(), ...qaRecent].filter((q) => {
-      if (seenQa.has(q.id)) return false;
-      seenQa.add(q.id);
-      return true;
-    });
+    const qaCandidates = filterCrossInstitutionEvidence(
+      question,
+      scenarioKeyForAnswer,
+      [...qaPerTerm.flat(), ...qaRecent].filter((q) => {
+        if (seenQa.has(q.id)) return false;
+        seenQa.add(q.id);
+        return true;
+      }),
+      (qa) => `${qa.question} ${qa.answer}`,
+      (qa) => qa.scenarioKey
+    );
     qaPairs = rankByQuestion(
       qaCandidates,
       relevanceText,
@@ -1305,7 +1436,7 @@ export async function answerQuestionEnhanced(
     audience === 'client'
       ? `Тема обращения: ${scenarioLabelForAnswer}. Ниже — проверенные сведения по ней. Опирайся только на них; не называй их, не описывай, откуда они у тебя, и не сообщай, если чего-то в них не оказалось. Не упоминай процедуры и учреждения, которых там нет.\n`
       : openKnowledgeLookup
-        ? `СЦЕНАРИЙ: ${scenarioLabelForAnswer}\nВсе цитаты ниже найдены открытым поиском по базе знаний. Отвечай только по приведенным цитатам.\n`
+        ? `СЦЕНАРИЙ: ${scenarioLabelForAnswer}\nВсе цитаты ниже найдены открытым поиском по базе знаний. Отвечай только по приведенным цитатам. НЕ упоминай другие процедуры, регионы или учреждения, которых нет в этих цитатах.\n`
         : `СЦЕНАРИЙ: ${scenarioLabelForAnswer}  (ключ: ${scenarioKeyForAnswer})\n` +
           `Все цитаты ниже относятся к этому сценарию. НЕ упоминай другие процедуры (например другие регионы или учреждения), даже если они существуют вообще.\n`;
 
@@ -1411,18 +1542,19 @@ ${fixList}
         }
 
         // Persist telemetry — fire-and-forget, never block the response.
-        prisma.hallucinationLog.create({
-          data: {
-            sessionId: sessionId ?? null,
-            question,
-            scenarioKey: scenarioKeyForAnswer ?? null,
-            initialAnswer: initialAnswerForLog,
-            regeneratedAnswer: regenerated ? answer : null,
-            unsupportedClaims: detectedUnsupported as unknown as object,
-            unsupportedCount: detectedUnsupported.length,
-            regenerated,
-          },
-        }).catch((e) => console.warn('[enhanced-answering] HallucinationLog write failed:', e));
+        // Молчит только при telemetryMode==='disabled' (прогон золотого
+        // корпуса); для реального пользователя режим не задаётся и запись идёт
+        // как прежде.
+        recordHallucinationLog(telemetryMode, {
+          sessionId: sessionId ?? null,
+          question,
+          scenarioKey: scenarioKeyForAnswer ?? null,
+          initialAnswer: initialAnswerForLog,
+          regeneratedAnswer: regenerated ? answer : null,
+          unsupportedClaims: detectedUnsupported as unknown as object,
+          unsupportedCount: detectedUnsupported.length,
+          regenerated,
+        });
       }
     } catch (e) {
       console.warn('[enhanced-answering] Consistency gate failed; requiring human review:', e);
@@ -1505,6 +1637,17 @@ ${fixList}
     );
   }
 
+  // Под SCOPE_NULL_STRICT confidence-top пулы (byConfidence/qaRecent/чанки
+  // выше нормального порога) уже не пропускают scenarioKey=null бесплатно —
+  // такой контент попадает в финальный ответ ТОЛЬКО через keyword-match пул
+  // (реальное вхождение терма вопроса в тело). Раз он всё же прошёл — тема
+  // не подтверждена, только keyword; оператор должен это увидеть.
+  const unscopedContentInAnswer =
+    SCOPE_NULL_STRICT &&
+    (rules.some((r) => r.scenarioKey === null) ||
+      qaPairs.some((qa) => qa.scenarioKey === null) ||
+      contextChunks.some((c) => c.scenarioKey === null));
+
   // Причины собираются ЗДЕСЬ ЖЕ, из тех же выражений, а не отдельной функцией:
   // объяснение, посчитанное второй раз, разойдётся с решением, которое оно
   // объясняет. Ровно так у песочницы появилась вторая копия политики отправки.
@@ -1532,6 +1675,14 @@ ${fixList}
         ? {
             reason: 'unsupported_claims',
             detail: consistency.unsupported.map((c) => `«${c.claim}»`).join('; '),
+          }
+        : null,
+    unscoped_content: () =>
+      unscopedContentInAnswer
+        ? {
+            reason: 'unscoped_content',
+            detail:
+              'ответ опирается на правило/QA/чанк без узла в дереве сценариев (scenarioKey=null), допущенный только через keyword-совпадение',
           }
         : null,
     knowledge_gap_phrase: () =>
@@ -1673,13 +1824,18 @@ ${fixList}
     };
   });
 
+  // Отказ не опирается на цитаты: модель получила приказ «нет данных».
+  // Оставлять правила в «источниках» — тот же обман, что и knowledge_base.
+  const answerSource = resolveMainPathAnswerSource(confidenceLevel);
+  const grounded = answerSource === 'knowledge_base';
+
   const result: EnhancedAnswerResult = {
     answer,
     confidence: overallConfidence,
     confidenceLevel,
     needsClarification,
     suggestedClarification,
-    citations,
+    citations: grounded ? citations : [],
     domainsUsed: intentResult.domains,
     queryAnalysis: {
       originalQuery: question,
@@ -1688,11 +1844,11 @@ ${fixList}
       isAmbiguous: expandedQueries.isAmbiguous,
     },
     clarificationQuestion,
-    primarySource,
-    supplementarySources,
+    primarySource: grounded ? primarySource : undefined,
+    supplementarySources: grounded ? supplementarySources : undefined,
     scenarioKey: scenarioKeyForAnswer,
     scenarioLabel: scenarioLabelForAnswer,
-    answerSource: 'knowledge_base',
+    answerSource,
     requiresHumanReview,
     consistency: consistency ? {
       allSupported: consistency.allSupported,
@@ -2203,35 +2359,12 @@ function buildInternalGuardrailResult(question: string): EnhancedAnswerResult | 
   };
 }
 
-// Does the question concern a service/document the bureau actually deals with?
-// Used to decide whether an out_of_scope verdict should fall through to an
-// OPEN knowledge-base lookup (bureau topic) or be honestly refused (off-topic).
+// Пускать ли вопрос в general_ai — ответ БЕЗ опоры на базу знаний.
 //
-// IMPORTANT: the trigger is a SERVICE or DOCUMENT word — NOT a generic
-// price/time word. "сколько стоит биткоин" must stay off-topic, so "стоит"
-// alone must never qualify; it only counts when paired with a service below.
-//
-// Domain owner: extend this list as the bureau's services grow. Each entry is
-// a stem. /iu flags are used so uppercase ВНЖ/РВП/etc. match without calling
-// toLowerCase(), which silently corrupts Cyrillic on some Alpine/Node environments.
-const BUREAU_TOPIC_PATTERN_CI = new RegExp(
-  'апостил|легализац|нотари|загс|кзагс|минюст|' +
-  'мвд|мю|' +  // мвд | мю  (Unicode escapes — immune to source encoding)
-  'перевод|доверенност|свидетельств|справк|диплом|аттестат|образован|судим|паспорт|' +
-  'истреб|консульск|заверен|печат|штамп|загранпаспорт|гражданств|виз|опек|документ|' +
-  'миграц|' +
-  'внж|' +                    // внж  (ВНЖ lowercase)
-  'вид[уаео]? на жительств|' + // вид[уаео]? на жительств
-  'рвп|' +                    // рвп  (РВП lowercase)
-  'вид на временн|' + // вид на временн
-  'содействи',                       // содействи
-  'iu'
-);
-
-function isBureauTopic(question: string): boolean {
-  return BUREAU_TOPIC_PATTERN_CI.test(question);
-}
-
+// Здесь словарь услуг уместен, в отличие от снятого гейта на входе в поиск:
+// это не «пускать ли к базе», а «разрешено ли отвечать по общим знаниям модели,
+// когда база промолчала». Для вопроса вне области ответа быть не должно вовсе,
+// поэтому отсутствие услуги в вопросе — законное основание не отвечать.
 function shouldUseGeneralKnowledgeFallback(question: string): boolean {
   // /iu flags on original question — same reason as buildDeterministicGuardrailResult.
   const mentionsKnownService =
@@ -2596,24 +2729,3 @@ function buildClarificationResult(
   };
 }
 
-function buildOutOfScopeResult(
-  question: string,
-  decision: Extract<ScenarioDecision, { kind: 'out_of_scope' }>
-): EnhancedAnswerResult {
-  return {
-    answer:
-      'В базе знаний нет данных по этому вопросу. Уточните, пожалуйста, о какой услуге идёт речь — апостиль, перевод, нотариальное заверение?',
-    confidence: 0,
-    confidenceLevel: 'insufficient',
-    needsClarification: true,
-    suggestedClarification: decision.reasoning,
-    citations: [],
-    domainsUsed: [],
-    queryAnalysis: {
-      originalQuery: question,
-      expandedQueries: [],
-      extractedEntities: { dates: [], prices: [], documentTypes: [], services: [] },
-      isAmbiguous: false,
-    },
-  };
-}

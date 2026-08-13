@@ -20,19 +20,27 @@
  *   railway run npx tsx scripts/diagnose-answer.ts "вопрос 1" "вопрос 2"
  *   railway run npx tsx scripts/diagnose-answer.ts --runs=3 "один вопрос"   # detect non-determinism
  *   railway run npx tsx scripts/diagnose-answer.ts --file=scripts/questions.txt
+ *   railway run npx tsx scripts/diagnose-answer.ts --audience=client "вопрос"  # default: internal
  *
  * Questions can come from argv, from --file=<path> (one per line, # = comment),
  * or from stdin (one per line) if neither is given.
+ *
+ * `--audience` calls answerQuestionEnhanced() directly (no HTTP layer), the
+ * same in-process read-only pattern used by both 2026-08-05 audits — no
+ * escalation/draft side effects to sandbox against, unlike the HTTP-facing
+ * probe in scripts/probe-live-contours.ts.
  */
 
 import { readFileSync } from 'node:fs';
 import { answerQuestionEnhanced, type EnhancedAnswerResult } from '../src/lib/ai/enhanced-answering-engine';
 import { classifyScenario, type ScenarioDecision } from '../src/lib/knowledge/scenario-classifier';
+import type { Audience } from '../src/lib/knowledge/audience';
 
 const SOURCE_BADGE: Record<string, string> = {
   knowledge_base: '🟢 ИЗ ДОКУМЕНТОВ (RAG: чанки + правила + Q&A)',
   general_ai: '🔴 ИЗ ОБЩЕГО ЗНАНИЯ МОДЕЛИ (НЕ из документов!)',
   deterministic_guardrail: '🟡 ХАРДКОД-GUARDRAIL (захардкожено в коде)',
+  none: '⚪ ОТКАЗ — в документах опоры нет',
 };
 
 function badgeForResult(r: EnhancedAnswerResult): string {
@@ -60,18 +68,18 @@ function fmtScore(n: number): string {
   return n.toFixed(4);
 }
 
-async function diagnoseOnce(question: string, runLabel: string): Promise<EnhancedAnswerResult> {
+async function diagnoseOnce(question: string, runLabel: string, audience: Audience): Promise<EnhancedAnswerResult> {
   // Run the gate separately first so we see its raw decision even when the
   // engine later overrides routing (e.g. out_of_scope → general AI fallback).
   const gate = await classifyScenario(question);
   const result = await answerQuestionEnhanced({
     question,
-    audience: 'internal',
+    audience,
     includeDebug: true,
   });
 
   const lines: string[] = [];
-  lines.push(`\n  ── ${runLabel} ──────────────────────────────────────────`);
+  lines.push(`\n  ── ${runLabel} (audience=${audience}) ──────────────────────────────────────────`);
   lines.push(`  1. ВОРОТА СЦЕНАРИЯ: ${describeGate(gate)}`);
   lines.push(`  2. ИСТОЧНИК ОТВЕТА: ${badgeForResult(result)}`);
   lines.push(
@@ -139,6 +147,12 @@ function loadQuestions(): string[] {
 async function main() {
   const runsArg = process.argv.slice(2).find((a) => a.startsWith('--runs='));
   const runs = runsArg ? Math.max(1, parseInt(runsArg.slice('--runs='.length), 10) || 1) : 1;
+  const audienceArg = process.argv.slice(2).find((a) => a.startsWith('--audience='))?.slice('--audience='.length);
+  if (audienceArg && audienceArg !== 'internal' && audienceArg !== 'client') {
+    console.error(`--audience должен быть "internal" или "client", получено: "${audienceArg}"`);
+    process.exit(1);
+  }
+  const audience: Audience = audienceArg === 'client' ? 'client' : 'internal';
   const questions = loadQuestions();
 
   if (questions.length === 0) {
@@ -149,7 +163,7 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`Диагностика движка ответов. Вопросов: ${questions.length}, прогонов на вопрос: ${runs}.`);
+  console.log(`Диагностика движка ответов. Вопросов: ${questions.length}, прогонов на вопрос: ${runs}, audience: ${audience}.`);
 
   for (let q = 0; q < questions.length; q++) {
     const question = questions[q];
@@ -160,7 +174,7 @@ async function main() {
     const sources: string[] = [];
     for (let r = 0; r < runs; r++) {
       try {
-        const result = await diagnoseOnce(question, `прогон ${r + 1}/${runs}`);
+        const result = await diagnoseOnce(question, `прогон ${r + 1}/${runs}`, audience);
         sources.push(result.answerSource ?? 'none');
       } catch (e) {
         // A transient failure (e.g. dropped embedding API socket) must not abort

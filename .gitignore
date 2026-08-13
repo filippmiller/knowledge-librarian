@@ -81,3 +81,10 @@ docs/bot-audit/.tariff-shadow-results.jsonl
 .claude/worktrees/
 docs/bot-audit/.contours*.jsonl
 docs/bot-audit/.sent-error-rate*.jsonl
+
+# Beads local runtime state (issues.jsonl is the tracked passive export; DB syncs via refs/dolt/data)
+.beads/.local_version
+.beads/backup/
+.beads/embeddeddolt/
+.beads/export-state.json
+.beads/last-touched

@@ -9,6 +9,7 @@ import prisma from '@/lib/db';
 import { generateEmbeddings, EMBEDDING_DIMENSIONS } from '@/lib/openai';
 import { Prisma } from '@prisma/client';
 import { admissibleAudiences, audienceSqlValues, type Audience } from '@/lib/knowledge/audience';
+import { reciprocalRankFusion } from './reciprocal-rank-fusion';
 
 export interface SearchResult {
   id: string;
@@ -16,6 +17,18 @@ export interface SearchResult {
   documentId: string;
   similarity: number;
   metadata?: Record<string, unknown>;
+  /**
+   * Тема из дерева сценариев, к которой привязан чанк. `null` означает не
+   * «применимо ко всему», а «для темы этого документа нет узла в дереве» —
+   * пробел в таксономии, не факт универсальности (см. аудит
+   * .claude/audits/2026-08-05-moscow-oryol-bad-answer.md: 60 правил документа
+   * об апостиле образовательных документов получили scenarioKey=null только
+   * потому, что для «апостиль на дипломы» не было листа в дереве, и узкий
+   * факт про конкретного партнёра в Орле выиграл top-1 в ответе про
+   * произвольную логистику). Нужно вызывающему коду, чтобы применить более
+   * строгий порог именно к такому контенту в открытом поиске.
+   */
+  scenarioKey: string | null;
 }
 
 export interface HybridSearchResult extends SearchResult {
@@ -131,13 +144,15 @@ export async function searchSimilarChunksPgvector(
       documentId: string;
       similarity: number;
       metadata: Prisma.JsonValue;
+      scenarioKey: string | null;
     }>>`
       SELECT
         c.id,
         c.content,
         c."documentId",
         1 - (c."embeddingVector" <=> ${embeddingStr}::vector) as similarity,
-        c.metadata
+        c.metadata,
+        c."scenarioKey"
       FROM "DocChunk" c
       WHERE c."embeddingVector" IS NOT NULL
       ${Prisma.raw(domainFilter)}
@@ -154,6 +169,7 @@ export async function searchSimilarChunksPgvector(
       documentId: r.documentId,
       similarity: Number(r.similarity),
       metadata: r.metadata as Record<string, unknown> | undefined,
+      scenarioKey: r.scenarioKey,
     }));
   } catch (error) {
     // If pgvector query fails, reset availability flag so we use in-memory next time
@@ -166,7 +182,7 @@ export async function searchSimilarChunksPgvector(
 /**
  * Fallback: In-memory cosine similarity search (for when pgvector is unavailable)
  */
-function cosineSimilarity(a: number[], b: number[]): number {
+export function cosineSimilarity(a: number[], b: number[]): number {
   if (a.length !== b.length) return 0;
 
   let dotProduct = 0;
@@ -209,6 +225,7 @@ async function searchSimilarChunksInMemory(
       documentId: true,
       embedding: true,
       metadata: true,
+      scenarioKey: true,
     },
   });
 
@@ -227,6 +244,7 @@ async function searchSimilarChunksInMemory(
       documentId: chunk.documentId,
       similarity,
       metadata: chunk.metadata as Record<string, unknown> | undefined,
+      scenarioKey: chunk.scenarioKey,
     });
   }
 
@@ -310,12 +328,14 @@ export async function searchByKeywords(
       content: string;
       documentId: string;
       rank: number;
+      scenarioKey: string | null;
     }>>`
       SELECT
         c.id,
         c.content,
         c."documentId",
-        ts_rank(to_tsvector('russian', c.content), plainto_tsquery('russian', ${query})) as rank
+        ts_rank(to_tsvector('russian', c.content), plainto_tsquery('russian', ${query})) as rank,
+        c."scenarioKey"
       FROM "DocChunk" c
       WHERE to_tsvector('russian', c.content) @@ plainto_tsquery('russian', ${query})
       ${Prisma.raw(domainFilter)}
@@ -331,6 +351,7 @@ export async function searchByKeywords(
         content: r.content,
         documentId: r.documentId,
         similarity: Math.min(Number(r.rank) / 0.5, 1), // Normalize rank to 0-1
+        scenarioKey: r.scenarioKey,
       }));
     }
   } catch {
@@ -384,6 +405,7 @@ async function searchByKeywordTerms(
       id: true,
       content: true,
       documentId: true,
+      scenarioKey: true,
     },
   });
 
@@ -397,6 +419,7 @@ async function searchByKeywordTerms(
         content: chunk.content,
         documentId: chunk.documentId,
         similarity: Math.min(0.15 + hits / Math.max(terms.length, 1), 1),
+        scenarioKey: chunk.scenarioKey,
       };
     })
     .sort((a, b) => b.similarity - a.similarity)
@@ -421,62 +444,30 @@ export async function hybridSearch(
     searchByKeywords(query, domainSlugs, limit * 2, scenarioAncestors, audience),
   ]);
 
-  // Build combined results using RRF
+  // RRF — чистая функция (PR G, [R4a]), не второй раз своя копия формулы:
+  // и этот DocChunk-путь, и in-memory JSONL-путь зовут одну и ту же
+  // reciprocal-rank-fusion.ts. Parity-тест подтверждает неизменность
+  // ранжирования после этого рефакторинга.
   const k = 60; // RRF constant
-  const combinedScores = new Map<string, {
-    result: SearchResult;
-    semanticScore: number;
-    keywordScore: number;
-    semanticRank: number;
-    keywordRank: number;
-  }>();
+  const fused = reciprocalRankFusion(
+    [semanticResults.map((r) => ({ id: r.id })), keywordResults.map((r) => ({ id: r.id }))],
+    { k, weights: [semanticWeight, 1 - semanticWeight] }
+  );
 
-  // Process semantic results
-  semanticResults.forEach((result, index) => {
-    combinedScores.set(result.id, {
-      result,
-      semanticScore: result.similarity,
-      keywordScore: 0,
-      semanticRank: index + 1,
-      keywordRank: Infinity,
-    });
-  });
+  const resultById = new Map<string, SearchResult>();
+  for (const r of semanticResults) resultById.set(r.id, r);
+  for (const r of keywordResults) if (!resultById.has(r.id)) resultById.set(r.id, r);
+  const semanticScoreById = new Map(semanticResults.map((r) => [r.id, r.similarity]));
+  const keywordScoreById = new Map(keywordResults.map((r) => [r.id, r.similarity]));
 
-  // Process keyword results
-  keywordResults.forEach((result, index) => {
-    const existing = combinedScores.get(result.id);
-    if (existing) {
-      existing.keywordScore = result.similarity;
-      existing.keywordRank = index + 1;
-    } else {
-      combinedScores.set(result.id, {
-        result,
-        semanticScore: 0,
-        keywordScore: result.similarity,
-        semanticRank: Infinity,
-        keywordRank: index + 1,
-      });
-    }
-  });
+  const results: HybridSearchResult[] = fused.map((f) => ({
+    ...resultById.get(f.id)!,
+    semanticScore: semanticScoreById.get(f.id) ?? 0,
+    keywordScore: keywordScoreById.get(f.id) ?? 0,
+    combinedScore: f.score,
+  }));
 
-  // Calculate RRF scores
-  const results: HybridSearchResult[] = Array.from(combinedScores.values()).map(entry => {
-    const semanticRRF = entry.semanticRank !== Infinity ? 1 / (k + entry.semanticRank) : 0;
-    const keywordRRF = entry.keywordRank !== Infinity ? 1 / (k + entry.keywordRank) : 0;
-    const combinedScore = semanticWeight * semanticRRF + (1 - semanticWeight) * keywordRRF;
-
-    return {
-      ...entry.result,
-      semanticScore: entry.semanticScore,
-      keywordScore: entry.keywordScore,
-      combinedScore,
-    };
-  });
-
-  // Sort by combined score and return top results
-  return results
-    .sort((a, b) => b.combinedScore - a.combinedScore)
-    .slice(0, limit);
+  return results.slice(0, limit);
 }
 
 /**

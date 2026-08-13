@@ -1,0 +1,1163 @@
+[
+  {
+    "kind": "TERM_DEFINITION",
+    "statement": "Термин «чесать» — глагол, обозначающий действие, совершаемое для снятия зуда.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b3",
+      "quote": "Глагол «чесать» обозначает действие для снятия зуда"
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b3",
+        "quote": "Глагол «чесать» обозначает действие для снятия зуда"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "8340968212c100c9",
+    "unitId": "117669679cc7201e",
+    "contentHash": "89a0822baefd1c7c",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "TERM_DEFINITION",
+    "statement": "Термин «чесание» обозначает сам процесс чесания.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b3",
+      "quote": "«чесание» — сам процесс"
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b3",
+        "quote": "«чесание» — сам процесс"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "8340968212c100c9",
+    "unitId": "4d9b46615cb95b59",
+    "contentHash": "21df64d5273beb4e",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "TERM_DEFINITION",
+    "statement": "Термин «почесание» обозначает одно короткое действие.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b3",
+      "quote": "«почесание» — одно короткое действие"
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b3",
+        "quote": "«почесание» — одно короткое действие"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "8340968212c100c9",
+    "unitId": "8a47f080f094527e",
+    "contentHash": "5c377dbaeb2886ae",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "TERM_DEFINITION",
+    "statement": "Термин «почёсывание» обозначает несколько мягких повторяющихся движений.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b3",
+      "quote": "«почёсывание» — несколько мягких повторяющихся движений"
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b3",
+        "quote": "«почёсывание» — несколько мягких повторяющихся движений"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "8340968212c100c9",
+    "unitId": "c981314d90e7563e",
+    "contentHash": "7020f06b9e3bf02d",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "TERM_DEFINITION",
+    "statement": "Термин «расчёсывание» означает чрезмерное воздействие с раздражением или повреждением кожи; такое действие в данной инструкции не допускается.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b3",
+      "quote": "«Расчёсывание» означает чрезмерное воздействие с раздражением или повреждением кожи и в настоящей инструкции не допускается"
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b3",
+        "quote": "«Расчёсывание» означает чрезмерное воздействие с раздражением или повреждением кожи и в настоящей инструкции не допускается"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "8340968212c100c9",
+    "unitId": "3d8c3080ed5e360a",
+    "contentHash": "861fda97b2ad9729",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Действия, близкие по описанию к «тереть», «скрести», «царапать», «раздражать кожу» и «устранять зуд», разрешены только теми способами, которые прямо указаны далее в инструкции; иные способы использовать нельзя.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b3",
+      "quote": "Слова «тереть», «скрести», «царапать», «раздражать кожу» и «устранять зуд» могут описывать близкие действия, но разрешены только способы, прямо указанные ниже"
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b3",
+        "quote": "Слова «тереть», «скрести», «царапать», «раздражать кожу» и «устранять зуд» могут описывать близкие действия, но разрешены только способы, прямо указанные ниже"
+      }
+    },
+    "uncertainties": [
+      {
+        "kind": "OTHER",
+        "description": "Правило ссылается на способы, указанные «ниже», но их перечень отсутствует в предоставленном фрагменте документа, поэтому конкретные разрешённые способы не могут быть извлечены.",
+        "quote": "разрешены только способы, прямо указанные ниже"
+      }
+    ],
+    "sourceBlockAnchor": "8340968212c100c9",
+    "unitId": "eac60ba304d87ea5",
+    "contentHash": "a5ec130a97a37a0c",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "TERM_DEFINITION",
+    "statement": "Слово «нельзя» означает безусловный запрет.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b4",
+      "quote": "Формулировка «нельзя» означает безусловный запрет"
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b4",
+        "quote": "Формулировка «нельзя» означает безусловный запрет"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "0a9e5fabea1de1ac",
+    "unitId": "a53adab67aa19fea",
+    "contentHash": "05eb2f6ca30ef58d",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "TERM_DEFINITION",
+    "statement": "Формулировка «только после» означает обязательное предварительное условие, которое должно быть выполнено перед действием.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b4",
+      "quote": "«только после» задаёт обязательное предварительное условие"
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b4",
+        "quote": "«только после» задаёт обязательное предварительное условие"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "0a9e5fabea1de1ac",
+    "unitId": "998902c70310115c",
+    "contentHash": "b3109d4fece0e373",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "TERM_DEFINITION",
+    "statement": "Формулировка «допускается» вводит узкое исключение и не отменяет остальные ограничения.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b4",
+      "quote": "«допускается» вводит узкое исключение и не отменяет остальные ограничения"
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b4",
+        "quote": "«допускается» вводит узкое исключение и не отменяет остальные ограничения"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "0a9e5fabea1de1ac",
+    "unitId": "28c466edc64bb222",
+    "contentHash": "6cf8e1e550ef7287",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "TERM_DEFINITION",
+    "statement": "Если к ситуации подходят несколько пунктов правил, применяются все они одновременно, при этом специальное правило имеет приоритет над общим; например, разрешённое краткое надавливание в общественном месте не даёт права на полноценное чесание через одежду.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b4",
+      "quote": "Если к ситуации подходят несколько пунктов, применяются все, а специальное правило имеет приоритет над общим. Например, разрешённое краткое надавливание в общественном месте не превращается в разрешение на полноценное чесание через одежду."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b4",
+        "quote": "Если к ситуации подходят несколько пунктов, применяются все, а специальное правило имеет приоритет над общим. Например, разрешённое краткое надавливание в общественном месте не превращается в разрешение на полноценное чесание через одежду."
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "0a9e5fabea1de1ac",
+    "unitId": "31d54a3b64736657",
+    "contentHash": "fad2cb71ffc53450",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Перед началом чесания необходимо перейти в закрытое место, где действия не видны окружающим.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b5",
+      "quote": "Перед началом чесания человек должен перейти в закрытое место, где его действия не видны окружающим."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b5",
+        "quote": "Перед началом чесания человек должен перейти в закрытое место, где его действия не видны окружающим."
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "dc02f76478c9548c",
+    "unitId": "1327bf198bb7d729",
+    "contentHash": "050c385412a3b3a0",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Брюки и нижнее бельё нужно ослабить или спустить настолько, чтобы открыть нужный участок кожи; полностью снимать одежду не требуется.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b5",
+      "quote": "Брюки и нижнее бельё следует ослабить или спустить настолько, чтобы открыть нужный участок кожи; полностью снимать одежду не требуется."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b5",
+        "quote": "Брюки и нижнее бельё следует ослабить или спустить настолько, чтобы открыть нужный участок кожи; полностью снимать одежду не требуется."
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "dc02f76478c9548c",
+    "unitId": "2af7f264b5595de6",
+    "contentHash": "5d2eecdd7c272650",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Регулярное почёсывание через ткань одежды не считается надлежащим способом выполнения процедуры.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b5",
+      "quote": "Регулярное почёсывание через ткань не считается надлежащим способом."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b5",
+        "quote": "Регулярное почёсывание через ткань не считается надлежащим способом."
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "dc02f76478c9548c",
+    "unitId": "92d030d6747d5ce2",
+    "contentHash": "dbbb8c5e2cb04f7b",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Прямое прикосновение к коже разрешается только после мытья рук с мылом не менее 20 секунд и их высушивания.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": {
+      "factKey": "длительность мытья рук с мылом",
+      "value": 20,
+      "unit": "seconds"
+    },
+    "sourceSpan": {
+      "anchor": "b6",
+      "quote": "Прямое прикосновение к коже разрешается только после мытья рук с мылом не менее 20 секунд и их высушивания."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b6",
+        "quote": "Прямое прикосновение к коже разрешается только после мытья рук с мылом не менее 20 секунд и их высушивания."
+      },
+      "numericConstraint": {
+        "anchor": "b6",
+        "quote": "не менее 20 секунд"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "77d05c2bd4fd130b",
+    "unitId": "5e4c37752f276af8",
+    "contentHash": "61285d17902d292f",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "EXCEPTION_RULE",
+    "statement": "При отсутствии воды для мытья рук допустимо использовать кожный антисептик вместо мытья с мылом.",
+    "facets": {},
+    "triggerCondition": {
+      "all": [
+        {
+          "fact": "resourceAvailability",
+          "equals": "UNAVAILABLE"
+        }
+      ]
+    },
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b6",
+      "quote": "При отсутствии воды допустим кожный антисептик."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b6",
+        "quote": "При отсутствии воды допустим кожный антисептик."
+      },
+      "triggerCondition": {
+        "anchor": "b6",
+        "quote": "При отсутствии воды допустим кожный антисептик."
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "77d05c2bd4fd130b",
+    "unitId": "7af0b080ef317faf",
+    "contentHash": "00f19aed4885519b",
+    "parentRuleRef": "5e4c37752f276af8"
+  },
+  {
+    "kind": "TERM_DEFINITION",
+    "statement": "Руки, которые лишь выглядят чистыми внешне, не считаются вымытыми в значении данного правила.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b6",
+      "quote": "Руки, которые лишь выглядят чистыми, вымытыми не считаются."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b6",
+        "quote": "Руки, которые лишь выглядят чистыми, вымытыми не считаются."
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "77d05c2bd4fd130b",
+    "unitId": "7251a7d09efdd0d2",
+    "contentHash": "e5aecc227d52f2e5",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "После завершения процедуры чесания руки необходимо очистить повторно.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b6",
+      "quote": "После завершения процедуры руки очищают повторно."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b6",
+        "quote": "После завершения процедуры руки очищают повторно."
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "77d05c2bd4fd130b",
+    "unitId": "60f3399bf2378a59",
+    "contentHash": "4ccaffd9976225fb",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Почесывание следует выполнять подушечками двух или трёх пальцев короткими плавными движениями.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b7",
+      "quote": "Почесание выполняют подушечками двух или трёх пальцев короткими плавными движениями."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b7",
+        "quote": "Почесание выполняют подушечками двух или трёх пальцев короткими плавными движениями."
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "5655cb22c834fe3d",
+    "unitId": "8754ccc98af59dd6",
+    "contentHash": "57f75eb0d2176610",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Ногти должны быть коротко подстрижены.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b7",
+      "quote": "Ногти должны быть короткими."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b7",
+        "quote": "Ногти должны быть короткими."
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "5655cb22c834fe3d",
+    "unitId": "ca9ecf65ffa1b725",
+    "contentHash": "564c30bd1953f266",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Нельзя использовать ногти в качестве скребка, а также расчёски, ключи, банковские карты, линейки, ручки и любые другие острые, жёсткие или загрязнённые предметы для почесывания.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b7",
+      "quote": "Нельзя использовать ногти как скребок, а также расчёски, ключи, банковские карты, линейки, ручки и любые острые, жёсткие либо загрязнённые предметы."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b7",
+        "quote": "Нельзя использовать ногти как скребок, а также расчёски, ключи, банковские карты, линейки, ручки и любые острые, жёсткие либо загрязнённые предметы."
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "5655cb22c834fe3d",
+    "unitId": "359343b0e7f03fc0",
+    "contentHash": "4581247fb764acef",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "В общественных местах (транспорт, очередь, кабинет, общий стол, рабочее место) нельзя открывать одежду и прикасаться к коже.",
+    "facets": {},
+    "triggerCondition": {
+      "all": [
+        {
+          "fact": "privacyContext",
+          "equals": "PUBLIC"
+        }
+      ]
+    },
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b9",
+      "quote": "В транспорте, очереди, кабинете, за общим столом или на рабочем месте нельзя открывать одежду и касаться кожи."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b9",
+        "quote": "В транспорте, очереди, кабинете, за общим столом или на рабочем месте нельзя открывать одежду и касаться кожи."
+      },
+      "triggerCondition": {
+        "anchor": "b9",
+        "quote": "В транспорте, очереди, кабинете, за общим столом или на рабочем месте"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "fee7fdde224ba201",
+    "unitId": "e7c384418150cc85",
+    "contentHash": "5878c8fb971308cb",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "EXCEPTION_RULE",
+    "statement": "При внезапном зуде в публичном месте разрешено один раз прижать ладонь через чистую одежду не более чем на три секунды.",
+    "facets": {},
+    "triggerCondition": {
+      "all": [
+        {
+          "fact": "privacyContext",
+          "equals": "PUBLIC"
+        }
+      ]
+    },
+    "numericConstraint": {
+      "factKey": "длительность однократного прижатия ладони через одежду",
+      "value": 3,
+      "unit": "seconds"
+    },
+    "sourceSpan": {
+      "anchor": "b9",
+      "quote": "При внезапном зуде разрешено один раз прижать ладонь через чистую одежду не более чем на три секунды"
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b9",
+        "quote": "При внезапном зуде разрешено один раз прижать ладонь через чистую одежду не более чем на три секунды"
+      },
+      "triggerCondition": {
+        "anchor": "b9",
+        "quote": "В транспорте, очереди, кабинете, за общим столом или на рабочем месте"
+      },
+      "numericConstraint": {
+        "anchor": "b9",
+        "quote": "не более чем на три секунды"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "fee7fdde224ba201",
+    "unitId": "b4a9f07af40342af",
+    "contentHash": "8a95f692f8dfdc98",
+    "parentRuleRef": "e7c384418150cc85"
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "После однократного прижатия ладони через одежду в публичном месте следует перейти в туалетную комнату или иное уединённое место.",
+    "facets": {},
+    "triggerCondition": {
+      "all": [
+        {
+          "fact": "privacyContext",
+          "equals": "PUBLIC"
+        }
+      ]
+    },
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b9",
+      "quote": "после чего следует перейти в туалетную комнату или иное уединённое место"
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b9",
+        "quote": "после чего следует перейти в туалетную комнату или иное уединённое место"
+      },
+      "triggerCondition": {
+        "anchor": "b9",
+        "quote": "В транспорте, очереди, кабинете, за общим столом или на рабочем месте"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "fee7fdde224ba201",
+    "unitId": "8e648fe83318be6b",
+    "contentHash": "e5af32ca0a0b3739",
+    "parentRuleRef": "b4a9f07af40342af"
+  },
+  {
+    "kind": "EXCEPTION_RULE",
+    "statement": "Повторное трение кожи через ткань в публичном месте запрещено (нельзя повторять однократно разрешённое прижатие ладони).",
+    "facets": {},
+    "triggerCondition": {
+      "all": [
+        {
+          "fact": "privacyContext",
+          "equals": "PUBLIC"
+        }
+      ]
+    },
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b9",
+      "quote": "Повторное трение через ткань запрещено."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b9",
+        "quote": "Повторное трение через ткань запрещено."
+      },
+      "triggerCondition": {
+        "anchor": "b9",
+        "quote": "В транспорте, очереди, кабинете, за общим столом или на рабочем месте"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "fee7fdde224ba201",
+    "unitId": "0f2a7c950991a0c4",
+    "contentHash": "1c959e20cfd9b090",
+    "parentRuleRef": "b4a9f07af40342af"
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "При появлении боли, жжения, онемения, заметного тепла, мокнутия, сыпи, припухлости, крови или повреждения кожи почесывание немедленно прекращают.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b10",
+      "quote": "Если почесание вызывает боль, жжение, онемение, заметное тепло, мокнутие, сыпь, припухлость, кровь или повреждение кожи, воздействие прекращают сразу."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b10",
+        "quote": "Если почесание вызывает боль, жжение, онемение, заметное тепло, мокнутие, сыпь, припухлость, кровь или повреждение кожи, воздействие прекращают сразу."
+      }
+    },
+    "uncertainties": [
+      {
+        "kind": "UNRECOGNIZED_TRIGGER_CONDITION",
+        "description": "Условие остановки описывается через перечень телесных симптомов (боль, жжение, онемение и т.д.), которые не входят в каталог фактов triggerCondition.",
+        "quote": "Если почесание вызывает боль, жжение, онемение, заметное тепло, мокнутие, сыпь, припухлость, кровь или повреждение кожи, воздействие прекращают сразу."
+      }
+    ],
+    "sourceBlockAnchor": "5dc17cd68b2d6db8",
+    "unitId": "2385f10c0cb94933",
+    "contentHash": "6885e5f1bb820e21",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "После прекращения из-за тревожных признаков участок аккуратно промывают водой, промакивают чистой салфеткой и больше не расчёсывают до исчезновения признаков.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b10",
+      "quote": "Участок аккуратно промывают водой, промакивают чистой салфеткой и больше не расчёсывают до исчезновения признаков."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b10",
+        "quote": "Участок аккуратно промывают водой, промакивают чистой салфеткой и больше не расчёсывают до исчезновения признаков."
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "5dc17cd68b2d6db8",
+    "unitId": "12ba2483bf9ec920",
+    "contentHash": "ae7a2bd95e098a64",
+    "parentRuleRef": "2385f10c0cb94933"
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Если потребность чесать одну и ту же область возникает часто, повторяется много дней подряд либо мешает спать, дальнейшее почёсывание не считается решением — следует искать причину раздражения и обратиться за профессиональной консультацией.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b11",
+      "quote": "Если потребность чесать одну и ту же область возникает более трёх раз за час, повторяется ежедневно дольше двух суток либо мешает спать, дальнейшее почёсывание не считается решением. Следует искать причину раздражения и обратиться за профессиональной консультацией."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b11",
+        "quote": "Если потребность чесать одну и ту же область возникает более трёх раз за час, повторяется ежедневно дольше двух суток либо мешает спать, дальнейшее почёсывание не считается решением. Следует искать причину раздражения и обратиться за профессиональной консультацией."
+      }
+    },
+    "uncertainties": [
+      {
+        "kind": "UNRECOGNIZED_TRIGGER_CONDITION",
+        "description": "Составное условие возвращающегося зуда (частота в час ИЛИ длительность повторения ИЛИ нарушение сна) не выражается через доступный каталог triggerCondition фактов.",
+        "quote": "Если потребность чесать одну и ту же область возникает более трёх раз за час, повторяется ежедневно дольше двух суток либо мешает спать"
+      }
+    ],
+    "sourceBlockAnchor": "01ffc288ce9b8818",
+    "unitId": "3912e8aa9e61eba4",
+    "contentHash": "43068d9f50fc5e30",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Возникновение потребности чесать одну область более трёх раз за час считается признаком возвращающегося зуда, требующим не продолжать почёсывание, а искать консультацию.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": {
+      "factKey": "частота потребности чесать одну область в час",
+      "value": 3,
+      "unit": "times per hour"
+    },
+    "sourceSpan": {
+      "anchor": "b11",
+      "quote": "более трёх раз за час"
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b11",
+        "quote": "более трёх раз за час"
+      },
+      "numericConstraint": {
+        "anchor": "b11",
+        "quote": "более трёх раз за час"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "01ffc288ce9b8818",
+    "unitId": "6d10042607831d16",
+    "contentHash": "f90f0e87bbf99977",
+    "parentRuleRef": "3912e8aa9e61eba4"
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Ежедневное повторение зуда дольше двух суток считается признаком возвращающегося зуда, требующим не продолжать почёсывание, а искать консультацию.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": {
+      "factKey": "длительность ежедневного повторения зуда",
+      "value": 172800,
+      "unit": "seconds"
+    },
+    "sourceSpan": {
+      "anchor": "b11",
+      "quote": "повторяется ежедневно дольше двух суток"
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b11",
+        "quote": "повторяется ежедневно дольше двух суток"
+      },
+      "numericConstraint": {
+        "anchor": "b11",
+        "quote": "дольше двух суток"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "01ffc288ce9b8818",
+    "unitId": "356d691a82069c21",
+    "contentHash": "2abf4df4a0dc80c8",
+    "parentRuleRef": "3912e8aa9e61eba4"
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "После завершения процедуры нужно убедиться, что кожа сухая и не повреждена, вернуть одежду в обычное положение, вымыть или обработать руки и очистить предметы, которых касались до гигиенической обработки.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b12",
+      "quote": "После последнего движения нужно убедиться, что кожа сухая и не повреждена, вернуть одежду в обычное положение, вымыть или обработать руки и очистить предметы, которых касались до гигиенической обработки."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b12",
+        "quote": "После последнего движения нужно убедиться, что кожа сухая и не повреждена, вернуть одежду в обычное положение, вымыть или обработать руки и очистить предметы, которых касались до гигиенической обработки."
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "1f5485f0c665fd41",
+    "unitId": "d6cdd7a55083be4c",
+    "contentHash": "a5a9e57a91cb3ae5",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Использованную салфетку нужно выбросить; повторно применять её нельзя.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b12",
+      "quote": "Использованную салфетку выбрасывают; повторно применять её нельзя."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b12",
+        "quote": "Использованную салфетку выбрасывают; повторно применять её нельзя."
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "1f5485f0c665fd41",
+    "unitId": "e344f96a150eb9f0",
+    "contentHash": "b66df19e22e38337",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Другой человек может выполнить почесание только после ясного (явного) согласия того, кому помогают.",
+    "facets": {},
+    "triggerCondition": {
+      "all": [
+        {
+          "fact": "consentStatus",
+          "equals": "EXPLICIT"
+        }
+      ]
+    },
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b13",
+      "quote": "Другой человек может выполнить почесание только после ясного согласия того, кому помогают."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b13",
+        "quote": "Другой человек может выполнить почесание только после ясного согласия того, кому помогают."
+      },
+      "triggerCondition": {
+        "anchor": "b13",
+        "quote": "только после ясного согласия того, кому помогают"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "a56cd55a8c8e95c8",
+    "unitId": "a40ffc867393ca19",
+    "contentHash": "369260857ad512ca",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Помощник обязан надеть чистые одноразовые перчатки, соблюдать ограничения по силе и времени и немедленно остановиться по первой просьбе.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b13",
+      "quote": "Помощник обязан надеть чистые одноразовые перчатки, соблюдать ограничения по силе и времени и немедленно остановиться по первой просьбе."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b13",
+        "quote": "Помощник обязан надеть чистые одноразовые перчатки, соблюдать ограничения по силе и времени и немедленно остановиться по первой просьбе."
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "a56cd55a8c8e95c8",
+    "unitId": "e1218dd9d534e665",
+    "contentHash": "ba4af7f254240894",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Согласие, данное ранее, не считается бессрочным — его нужно получать заново каждый раз.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b13",
+      "quote": "Согласие, данное ранее, не считается бессрочным."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b13",
+        "quote": "Согласие, данное ранее, не считается бессрочным."
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "a56cd55a8c8e95c8",
+    "unitId": "fd3c2dbcbeb10812",
+    "contentHash": "d7322c8e838f720c",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Если человек не может дотянуться до участка рукой из-за ограниченной подвижности, допускается помощь ухаживающего лица либо использование чистой мягкой ткани, обёрнутой вокруг ладони.",
+    "facets": {},
+    "triggerCondition": {
+      "all": [
+        {
+          "fact": "reachability",
+          "equals": "LIMITED"
+        }
+      ]
+    },
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b14",
+      "quote": "Если человек не может дотянуться до участка рукой, допускается помощь ухаживающего лица либо чистая мягкая ткань, обёрнутая вокруг ладони."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b14",
+        "quote": "Если человек не может дотянуться до участка рукой, допускается помощь ухаживающего лица либо чистая мягкая ткань, обёрнутая вокруг ладони."
+      },
+      "triggerCondition": {
+        "anchor": "b14",
+        "quote": "Если человек не может дотянуться до участка рукой"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "808641eaf1a9f170",
+    "unitId": "1ac089a2ebdfd4c7",
+    "contentHash": "522858a51cfff7cb",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "EXCEPTION_RULE",
+    "statement": "При использовании ткани или помощи из-за ограниченной подвижности приспособление с твёрдым или острым концом применять нельзя.",
+    "facets": {},
+    "triggerCondition": {
+      "all": [
+        {
+          "fact": "reachability",
+          "equals": "LIMITED"
+        }
+      ]
+    },
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b14",
+      "quote": "Приспособление с твёрдым или острым концом применять нельзя."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b14",
+        "quote": "Приспособление с твёрдым или острым концом применять нельзя."
+      },
+      "triggerCondition": {
+        "anchor": "b14",
+        "quote": "Если человек не может дотянуться до участка рукой, допускается помощь ухаживающего лица либо чистая мягкая ткань, обёрнутая вокруг ладони. Приспособление с твёрдым или острым концом применять нельзя."
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "808641eaf1a9f170",
+    "unitId": "c39e90ec7d5f2790",
+    "contentHash": "9da2f09b98080391",
+    "parentRuleRef": "1ac089a2ebdfd4c7"
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Для ребёнка продолжительность и гигиену процедуры контролирует взрослый.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b14",
+      "quote": "Для ребёнка продолжительность и гигиену контролирует взрослый."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b14",
+        "quote": "Для ребёнка продолжительность и гигиену контролирует взрослый."
+      }
+    },
+    "uncertainties": [
+      {
+        "kind": "UNRECOGNIZED_TRIGGER_CONDITION",
+        "description": "Условие 'если участник процедуры — ребёнок' не выражается ни одним fact из каталога (нет понятия возраста/статуса ребёнка).",
+        "quote": "Для ребёнка продолжительность и гигиену контролирует взрослый."
+      }
+    ],
+    "sourceBlockAnchor": "808641eaf1a9f170",
+    "unitId": "380d8515b89e6fb8",
+    "contentHash": "e587e293cbfdc7a7",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Расчёсывание (чрезмерное воздействие с раздражением или повреждением кожи) в настоящей инструкции запрещено.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b3",
+      "quote": "«Расчёсывание» означает чрезмерное воздействие с раздражением или повреждением кожи и в настоящей инструкции не допускается"
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b3",
+        "quote": "«Расчёсывание» означает чрезмерное воздействие с раздражением или повреждением кожи и в настоящей инструкции не допускается"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "8340968212c100c9",
+    "unitId": "81b06ab155858134",
+    "contentHash": "a5bc81377f45f3bb",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "EXCEPTION_RULE",
+    "statement": "При внезапном зуде в публичном месте прижатие ладони через чистую одежду разрешено не более одного раза за эпизод.",
+    "facets": {},
+    "triggerCondition": {
+      "all": [
+        {
+          "fact": "privacyContext",
+          "equals": "PUBLIC"
+        }
+      ]
+    },
+    "numericConstraint": {
+      "factKey": "количество разрешённых прижатий ладони через одежду за эпизод",
+      "value": 1,
+      "unit": "times"
+    },
+    "sourceSpan": {
+      "anchor": "b9",
+      "quote": "разрешено один раз прижать ладонь через чистую одежду не более чем на три секунды"
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b9",
+        "quote": "разрешено один раз прижать ладонь через чистую одежду не более чем на три секунды"
+      },
+      "triggerCondition": {
+        "anchor": "b9",
+        "quote": "В транспорте, очереди, кабинете, за общим столом или на рабочем месте"
+      },
+      "numericConstraint": {
+        "anchor": "b9",
+        "quote": "разрешено один раз прижать ладонь"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "fee7fdde224ba201",
+    "unitId": "cb05cac11445ee2b",
+    "contentHash": "04bb4ac5063b79d5",
+    "parentRuleRef": "e7c384418150cc85"
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Давление во время почёсывания должно оставаться слабым и не оставлять следов на коже/поверхности.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b8",
+      "quote": "Давление должно оставаться слабым и не оставлять следов."
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b8",
+        "quote": "Давление должно оставаться слабым и не оставлять следов."
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "d9e946dfcdcb3d2a",
+    "unitId": "0b046081cc537a39",
+    "contentHash": "c7bdb092d8ece2a3",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Непрерывное почёсывание допускается вести не дольше установленного лимита времени, прежде чем сделать паузу.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": {
+      "factKey": "продолжительность непрерывного почёсывания",
+      "value": 15,
+      "unit": "seconds"
+    },
+    "sourceSpan": {
+      "anchor": "b8",
+      "quote": "Непрерывное почёсывание допускается не дольше 15 секунд"
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b8",
+        "quote": "Непрерывное почёсывание допускается не дольше 15 секунд, после чего требуется пауза не менее 30 секунд."
+      },
+      "numericConstraint": {
+        "anchor": "b8",
+        "quote": "не дольше 15 секунд"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "d9e946dfcdcb3d2a",
+    "unitId": "b722091ca8e373e6",
+    "contentHash": "f051b257e13be927",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "После окончания непрерывного почёсывания требуется сделать паузу минимальной длительности, прежде чем продолжать.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": {
+      "factKey": "минимальная длительность паузы между циклами почёсывания",
+      "value": 30,
+      "unit": "seconds"
+    },
+    "sourceSpan": {
+      "anchor": "b8",
+      "quote": "после чего требуется пауза не менее 30 секунд"
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b8",
+        "quote": "после чего требуется пауза не менее 30 секунд"
+      },
+      "numericConstraint": {
+        "anchor": "b8",
+        "quote": "пауза не менее 30 секунд"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "d9e946dfcdcb3d2a",
+    "unitId": "9d27f1e2ad2f0378",
+    "contentHash": "8c9bb1c6916996f6",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "В рамках одного эпизода разрешено выполнить ограниченное число циклов почёсывания (цикл почёсывания + пауза).",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": {
+      "factKey": "максимальное количество циклов почёсывания за один эпизод",
+      "value": 3,
+      "unit": "cycles"
+    },
+    "sourceSpan": {
+      "anchor": "b8",
+      "quote": "За один эпизод разрешено не более трёх таких циклов"
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b8",
+        "quote": "За один эпизод разрешено не более трёх таких циклов"
+      },
+      "numericConstraint": {
+        "anchor": "b8",
+        "quote": "не более трёх таких циклов"
+      }
+    },
+    "uncertainties": [],
+    "sourceBlockAnchor": "d9e946dfcdcb3d2a",
+    "unitId": "3e1de43a83fd230f",
+    "contentHash": "5351922b140ab726",
+    "parentRuleRef": null
+  },
+  {
+    "kind": "PROCEDURE_STEP",
+    "statement": "Ограничение по количеству циклов и их длительности не отменяется даже при наличии желания продолжить почёсывание сверх установленного лимита.",
+    "facets": {},
+    "triggerCondition": null,
+    "numericConstraint": null,
+    "sourceSpan": {
+      "anchor": "b8",
+      "quote": "желание продолжить не отменяет ограничение"
+    },
+    "evidenceByField": {
+      "statement": {
+        "anchor": "b8",
+        "quote": "желание продолжить не отменяет ограничение"
+      }
+    },
+    "uncertainties": [
+      {
+        "kind": "UNRECOGNIZED_TRIGGER_CONDITION",
+        "description": "Условие 'желание продолжить' не выражается ни одним фактом из каталога triggerCondition (privacyContext, consentStatus, reachability, helperPresent, resourceAvailability), поэтому triggerCondition оставлен null.",
+        "quote": "желание продолжить не отменяет ограничение"
+      }
+    ],
+    "sourceBlockAnchor": "d9e946dfcdcb3d2a",
+    "unitId": "b3bfb5117f87274a",
+    "contentHash": "03f1b1c5d6f5767a",
+    "parentRuleRef": null
+  }
+]

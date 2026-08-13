@@ -485,6 +485,17 @@ export async function GET(
                 data: `\n[Batch ${progressData.current}/${progressData.total}]\n`,
               });
               console.log(`[process-stream] Knowledge extraction batch ${progressData.current}/${progressData.total}`);
+            } else if (event.type === 'llm_call') {
+              // Фактический исполнитель каждого батча/retry. В логе, а не
+              // только в артефакте харнесса: иначе на проде разъезд моделей
+              // внутри одного документа остался бы невидимым.
+              const call = event.data;
+              console.log(
+                `[process-stream] llm_call ${call.role} ${call.label}: ${call.outcome}, ` +
+                  `запрошено ${call.requestedProvider}/${call.requestedModel}, ` +
+                  `фактически ${call.servedByProvider ?? '-'}/${call.servedByModel ?? '-'}` +
+                  `${call.fallbackUsed ? ' (через резерв)' : ''}`
+              );
             } else if (event.type === 'batch_skipped') {
               // A batch failed to parse even after retry — log a warning to the stream but keep going
               const skipData = event.data as { batchIndex: number; total: number; reason: string };

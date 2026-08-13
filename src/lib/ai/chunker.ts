@@ -110,6 +110,15 @@ export async function createDocumentChunks(
     return [];
   }
 
+  // Наследуется от родительского документа один раз на весь набор чанков, а не
+  // додумывается ретривером из null: null означает «нет узла в дереве
+  // сценариев для темы документа», а не «применимо ко всему» (см.
+  // .claude/audits/2026-08-05-moscow-oryol-bad-answer.md).
+  const document = await prisma.document.findUnique({
+    where: { id: documentId },
+    select: { scenarioKey: true },
+  });
+
   const createdChunkIds: string[] = [];
 
   // Process chunks in batches to reduce memory usage
@@ -129,6 +138,7 @@ export async function createDocumentChunks(
       const created = await prisma.docChunk.create({
         data: {
           documentId,
+          scenarioKey: document?.scenarioKey ?? null,
           chunkIndex: chunk.index,
           content: chunk.content,
           embedding: embedding,

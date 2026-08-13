@@ -1,12 +1,21 @@
 import type { EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
 import type { Audience } from '@/lib/knowledge/audience';
+import { getAutoAnswerSettings } from '@/lib/telegram/auto-answer-policy';
 import {
+  CLIENT_HOLDING_ANSWER,
   decideDelivery,
   explainAutoAnswer,
-  getAutoAnswerSettings,
+  isAnswerWithheld,
+  type AutoAnswerBlocker,
   type DeliveryDecision,
-} from '@/lib/telegram/auto-answer-policy';
-import type { AutoAnswerBlocker } from '@/lib/ai/delivery-decision';
+} from '@/lib/ai/delivery-decision';
+
+/**
+ * Реэкспорт: текст удержания переехал в `delivery-decision` вместе с правилом,
+ * которое решает, когда его подставлять, — чтобы у золотого корпуса и тестов
+ * был доступ к обоим без Prisma.
+ */
+export { CLIENT_HOLDING_ANSWER };
 
 /**
  * Одна политика доставки на все каналы.
@@ -41,17 +50,6 @@ export interface DeliveryOutcome {
   blocker: AutoAnswerBlocker | null;
 }
 
-/**
- * Что видит клиент вместо забракованного черновика.
- *
- * Не извинение и не «в базе нет данных»: цель клиентского контура — привести
- * человека в бюро, а не отчитаться о своём устройстве. Поэтому обещание
- * персонального ответа и удержание контакта.
- */
-export const CLIENT_HOLDING_ANSWER =
-  'Уточню детали по вашему вопросу у коллеги и вернусь с точным ответом — обычно это занимает несколько минут. ' +
-  'Чтобы не терять время, пришлите, пожалуйста, скан или фото документа: так я сразу назову стоимость и срок.';
-
 export async function resolveDelivery(
   result: EnhancedAnswerResult,
   audience: Audience
@@ -64,8 +62,10 @@ export async function resolveDelivery(
   const draftAnswer = result.answer;
 
   // Уточняющий вопрос — это вопрос клиенту, а не утверждение о фактах: его
-  // подменять нечем и незачем.
-  const withheld = decision === 'escalate' && audience === 'client';
+  // подменять нечем и незачем. Само правило — в `delivery-decision`, единственной
+  // реализацией: тот же предикат спрашивает золотой корпус, вычисляя, увидел бы
+  // клиент этот текст вообще.
+  const withheld = isAnswerWithheld(decision, audience);
 
   return {
     decision,

@@ -1,0 +1,126 @@
+import type { CompletionAttempt } from './chat-provider';
+
+/**
+ * Cost meter (Task 37, 2026-08-09). Built after a real-world audit found
+ * $19.79 spent on Sonnet 5 in one day with zero cost visibility anywhere in
+ * the codebase — this module is the source of truth for turning real token
+ * usage (chat-provider.ts's `CompletionAttempt.usage`) into a dollar figure.
+ *
+ * Pricing provenance matters here — a wrong number defeats the entire point
+ * of a cost meter. Anthropic prices below are sourced from the authoritative
+ * `claude-api` skill (Anthropic's own current pricing reference), checked
+ * 2026-08-09 — not from training-data memory, which can be stale (see that
+ * skill's own "API Drift" warning). OpenAI prices are best-effort public
+ * knowledge; this session had no equivalent authoritative live source for
+ * them, so they're explicitly flagged below — verify against
+ * platform.openai.com/pricing before trusting an exact total that includes
+ * OpenAI calls.
+ */
+
+export interface ModelPricing {
+  readonly inputPerMillion: number;
+  readonly outputPerMillion: number;
+}
+
+export const MODEL_PRICING: Readonly<Record<string, ModelPricing>> = {
+  // Anthropic — verified against the claude-api skill, 2026-08-09.
+  // Sonnet 5's $2/$10 is INTRO pricing, valid through 2026-08-31; standard
+  // pricing after that is $3/$15 — this table will need updating then.
+  'claude-sonnet-5': { inputPerMillion: 2.0, outputPerMillion: 10.0 },
+  'claude-haiku-4-5': { inputPerMillion: 1.0, outputPerMillion: 5.0 },
+  'claude-haiku-4-5-20251001': { inputPerMillion: 1.0, outputPerMillion: 5.0 },
+  'claude-opus-5': { inputPerMillion: 5.0, outputPerMillion: 25.0 },
+
+  // OpenAI — NOT verified via an authoritative live source this session.
+  // Best-effort public pricing as of this codebase's last known rates;
+  // confirm against platform.openai.com/pricing before trusting exact
+  // totals for runs that include OpenAI calls.
+  'gpt-4o': { inputPerMillion: 2.5, outputPerMillion: 10.0 },
+  // Official OpenAI model documentation, checked 2026-08-10.
+  'gpt-4o-mini': { inputPerMillion: 0.15, outputPerMillion: 0.60 },
+  // Embeddings are input-only — outputPerMillion is structurally 0, not a
+  // placeholder for "unknown."
+  'text-embedding-3-small': { inputPerMillion: 0.02, outputPerMillion: 0 },
+};
+
+/**
+ * Множители Anthropic к базовой ЦЕНЕ ВХОДА для prompt caching: запись в кэш
+ * дороже обычного входа, чтение — заметно дешевле (5-минутный TTL, тот, что
+ * ставит chat-provider.ts). Источник — официальная документация по
+ * prompt caching, сверено 2026-08-10.
+ */
+const CACHE_WRITE_MULTIPLIER = 1.25;
+const CACHE_READ_MULTIPLIER = 0.1;
+
+/** `null` for an unpriced model — never fabricate a 0, which would read as
+ *  "this call was free" rather than "we don't have a price for this yet."
+ *
+ *  Кэш-токены тарифицируются ОТДЕЛЬНО и обязаны учитываться: у Anthropic
+ *  `input_tokens` — это только НЕкэшированный остаток промпта, а не весь вход
+ *  (полный вход = inputTokens + cacheCreation + cacheRead). Без этих двух
+ *  слагаемых и отчёт, и потолок `maxTotalUsd` занижали бы расход ровно в тот
+ *  момент, когда кэширование заработало — то есть отказывали бы ОТКРЫТО,
+ *  как раз тот класс дыры, что закрывался в Task 38 (кросс-аудит 2026-08-10). */
+export function estimateCostUsd(
+  model: string,
+  usage: {
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+    readonly cacheCreationInputTokens?: number;
+    readonly cacheReadInputTokens?: number;
+  }
+): number | null {
+  const pricing = MODEL_PRICING[model];
+  if (!pricing) return null;
+  const perInputToken = pricing.inputPerMillion / 1_000_000;
+  return (
+    usage.inputTokens * perInputToken +
+    (usage.cacheCreationInputTokens ?? 0) * perInputToken * CACHE_WRITE_MULTIPLIER +
+    (usage.cacheReadInputTokens ?? 0) * perInputToken * CACHE_READ_MULTIPLIER +
+    (usage.outputTokens / 1_000_000) * pricing.outputPerMillion
+  );
+}
+
+export interface AttemptCostSummary {
+  readonly totalUsd: number;
+  /** SUCCESS attempts with usage AND a known model price. */
+  readonly pricedAttemptCount: number;
+  /** SUCCESS attempts with usage but an unpriced model — real spend not
+   *  reflected in totalUsd. Surface this count, don't silently under-report. */
+  readonly unpricedAttemptCount: number;
+  /** SUCCESS attempts with NO usage at all (a malformed/incomplete provider
+   *  response — the call still happened and still cost money). Distinct
+   *  from ERROR/ABORTED attempts, which legitimately never carry usage —
+   *  those are correctly excluded from this count (found by Codex review,
+   *  2026-08-10: a hard cost budget built on `totalUsd` alone fails OPEN
+   *  for exactly this case — real spend it can neither price nor even see). */
+  readonly unverifiableSuccessCount: number;
+}
+
+/** Only SUCCESS attempts carry `usage` at all on the real path
+ *  (chat-provider.ts never fabricates usage for a failed/aborted attempt
+ *  with no response) — but a malformed real response COULD still be
+ *  SUCCESS with no usage, which is why outcome is checked explicitly below
+ *  rather than assuming "no usage" always means ERROR/ABORTED. */
+export function estimateCostFromAttempts(attempts: readonly CompletionAttempt[]): AttemptCostSummary {
+  let totalUsd = 0;
+  let pricedAttemptCount = 0;
+  let unpricedAttemptCount = 0;
+  let unverifiableSuccessCount = 0;
+
+  for (const attempt of attempts) {
+    if (!attempt.usage) {
+      if (attempt.outcome === 'SUCCESS') unverifiableSuccessCount++;
+      continue;
+    }
+    const cost = estimateCostUsd(attempt.model, attempt.usage);
+    if (cost === null) {
+      unpricedAttemptCount++;
+      continue;
+    }
+    totalUsd += cost;
+    pricedAttemptCount++;
+  }
+
+  return { totalUsd, pricedAttemptCount, unpricedAttemptCount, unverifiableSuccessCount };
+}

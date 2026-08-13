@@ -1,0 +1,295 @@
+{
+  "gradedAt": "2026-08-11T16:24:32.674Z",
+  "runDirs": [
+    "run-1-2026-08-11T16-15-33-202Z"
+  ],
+  "dependencyGraphSkipped": true,
+  "perRunSummary": [
+    {
+      "runId": "run-1-2026-08-11T16-15-33-202Z",
+      "positivePassed": 4,
+      "positiveTotal": 10,
+      "negativePassed": 3,
+      "negativeTotal": 6,
+      "dependencyGraphSkipped": true
+    }
+  ],
+  "passRateByCase": [
+    {
+      "caseId": "Q01",
+      "passCount": 0,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q02",
+      "passCount": 1,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q03",
+      "passCount": 0,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q04",
+      "passCount": 1,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q05",
+      "passCount": 0,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q06",
+      "passCount": 1,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q07",
+      "passCount": 0,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q08",
+      "passCount": 0,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q09",
+      "passCount": 1,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q10",
+      "passCount": 0,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q01-M1",
+      "passCount": 1,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q04-N1",
+      "passCount": 0,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q05-N1",
+      "passCount": 0,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q05-M1",
+      "passCount": 1,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q09-N1",
+      "passCount": 0,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q10-N1",
+      "passCount": 1,
+      "totalRuns": 1
+    }
+  ],
+  "casesFailingInAnyRun": [
+    "Q01",
+    "Q03",
+    "Q04-N1",
+    "Q05",
+    "Q05-N1",
+    "Q07",
+    "Q08",
+    "Q09-N1",
+    "Q10"
+  ],
+  "allVerdicts": [
+    {
+      "runId": "run-1-2026-08-11T16-15-33-202Z",
+      "caseId": "Q01",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "RESOLUTION_ERROR",
+      "diagnosticFlags": [
+        "EVIDENCE_GROUP_UNCOVERED (rule 1): до начала перейти в закрытое место, невидимое окружающим"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-11T16-15-33-202Z",
+      "caseId": "Q02",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": [],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-11T16-15-33-202Z",
+      "caseId": "Q03",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "UNVERIFIED_ANSWER",
+      "primaryFailureStage": "APPLICABILITY_ERROR",
+      "diagnosticFlags": [
+        "verified answer blocked because it depends on probabilistic candidate exclusion"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-11T16-15-33-202Z",
+      "caseId": "Q04",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": [],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-11T16-15-33-202Z",
+      "caseId": "Q05",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "HOLD",
+      "primaryFailureStage": "RESOLUTION_ERROR",
+      "diagnosticFlags": [
+        "unexpected CLARIFY resolution for positive case",
+        "resolution: privacyContext_unknown",
+        "resolution: exception_trigger_unknown",
+        "resolution: clarification_required_missing_trigger_fact"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-11T16-15-33-202Z",
+      "caseId": "Q06",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": [],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-11T16-15-33-202Z",
+      "caseId": "Q07",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "UNVERIFIED_ANSWER",
+      "primaryFailureStage": "SYNTHESIS_ERROR",
+      "diagnosticFlags": [
+        "condition_not_preserved: условие применимости unit 3912e8aa9e61eba4 не сохранено однозначно"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-11T16-15-33-202Z",
+      "caseId": "Q08",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "UNVERIFIED_ANSWER",
+      "primaryFailureStage": "SYNTHESIS_ERROR",
+      "diagnosticFlags": [
+        "uncited_answer: ответ не сослался ни на один unit — обоснование непроверяемо"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-11T16-15-33-202Z",
+      "caseId": "Q09",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": [],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-11T16-15-33-202Z",
+      "caseId": "Q10",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "RESOLUTION_ERROR",
+      "diagnosticFlags": [
+        "EVIDENCE_GROUP_UNCOVERED (rule 10): альтернативный способ при невозможности дотянуться; текущее ясное согласие на помощь; чистые одноразовые перчатки помощника; ограничения по силе воздействия и времени; немедленная остановка по первой просьбе"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-11T16-15-33-202Z",
+      "caseId": "Q01-M1",
+      "pass": true,
+      "expectedDisposition": "HOLD",
+      "actualDisposition": "HOLD",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": [],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-11T16-15-33-202Z",
+      "caseId": "Q04-N1",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "EVIDENCE_ERROR",
+      "diagnosticFlags": [
+        "selected evidence misses required numeric(s): 15 seconds"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-11T16-15-33-202Z",
+      "caseId": "Q05-N1",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "RESOLUTION_ERROR",
+      "diagnosticFlags": [
+        "required selected rule(s) 1 not selected",
+        "missing expected reason code(s): privacyContext_violated, exception_trigger_inactive"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-11T16-15-33-202Z",
+      "caseId": "Q05-M1",
+      "pass": true,
+      "expectedDisposition": "HOLD",
+      "actualDisposition": "HOLD",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": [],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-11T16-15-33-202Z",
+      "caseId": "Q09-N1",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "APPLICABILITY_ERROR",
+      "diagnosticFlags": [
+        "required negative-evidence rule(s) 9 also appeared in operative selected"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-11T16-15-33-202Z",
+      "caseId": "Q10-N1",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": [],
+      "dependencyGraphSkipped": true
+    }
+  ],
+  "note": "Deterministic grading only — no LLM semantic judge this session (see final report for that gap)."
+}

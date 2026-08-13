@@ -21,11 +21,15 @@ export interface LintInput {
 
 export interface LintWarning {
   ruleCode: string;
-  kind: 'hallucinated_fact' | 'placeholder' | 'too_short' | 'too_long' | 'filler';
+  kind: 'hallucinated_fact' | 'placeholder' | 'too_short' | 'too_long' | 'filler' | 'polarity_conflict';
   detail: string;
 }
 
-const PLACEHOLDER = /\b(lorem ipsum|todo|tbd|placeholder|xxxx+|\.\.\.\.\.+|пример текста|заполнить)\b/i;
+// Два регекса, не один: JS \b — ASCII-only (см. CYR_BEFORE ниже), поэтому
+// `\bпример текста\b` не срабатывал НИКОГДА — кириллические маркеры проверяются
+// своими границами (аудит 2026-08-13).
+const PLACEHOLDER_ASCII = /\b(lorem ipsum|todo|tbd|placeholder|xxxx+|\.\.\.\.\.+)\b/i;
+const PLACEHOLDER_CYR = /(?<![а-яёa-z])(пример текста|заполнить|черновик|шаблон ответа)(?![а-яёa-z])/i;
 
 // Generic marketing/atmospheric filler that has no place in an operational rule.
 // Russian tails use [а-яё]*, NOT \w* — JS \w is ASCII-only, so "волшебная" /
@@ -34,6 +38,10 @@ const FILLER = /(незабываем|атмосфер[ауеоы]|погруз�
 
 const MIN_BODY = 12;     // chars — shorter than this carries no operational content
 const MAX_BODY = 4000;   // chars — a single rule this long is really many rules
+
+// JS \b = ASCII \w only. In Russian `/\bтребуется\b/` never matches.
+const CYR_BEFORE = '(?<![а-яёa-z])';
+const CYR_AFTER = '(?![а-яёa-z])';
 
 /** Extract "hard" facts (numbers, prices, phones) that must be traceable to the source.
  *
@@ -54,6 +62,62 @@ function hardFacts(text: string): string[] {
 }
 
 /**
+ * Имена улиц/площадей из тела. Числовая проверка выше берёт только 3+ цифры,
+ * поэтому «Исаакиевская площадь 11» против цитаты «ул. Оптиков, 35к1» молчала:
+ * 11 и 35 — по две цифры, а текст адреса не сравнивался вовсе.
+ */
+function addressNames(text: string): string[] {
+  const names = new Set<string>();
+  const patterns = [
+    new RegExp(
+      `${CYR_BEFORE}(?:ул\\.?|улица|пр\\.?-?кт\\.?|проспект|пер\\.?|переулок|наб\\.?|набережная|ш\\.?|шоссе|бул\\.?|бульвар)\\s+([а-яё-]{4,})${CYR_AFTER}`,
+      'giu'
+    ),
+    new RegExp(`${CYR_BEFORE}([а-яё-]{4,})\\s+площад`, 'giu'),
+  ];
+  for (const re of patterns) {
+    for (const match of text.matchAll(re)) {
+      names.add(match[1].toLowerCase().replace(/ё/g, 'е'));
+    }
+  }
+  return [...names];
+}
+
+type StemPolarity = 'pos' | 'neg' | 'mixed' | 'absent';
+
+// Аудит 2026-08-13: точная форма «требуется» пропускала «требуются» /
+// «потребуется» — инверсия «запись не требуются» ↔ «запись обязательна»
+// проходила мимо. Стемы расширены на число/вид; «обязательн*» добавлен как
+// самостоятельная полярная пара. Фразовые антонимы разных стемов («без
+// записи» ↔ «запись обязательна») стемовой механикой не ловятся — это
+// уровень claim-grounding, не lint.
+const POLARITY_STEMS: Array<{ id: string; stem: string }> = [
+  { id: 'требуется', stem: '(?:по)?требу(?:ет|ют)ся' },
+  { id: 'нуж', stem: 'нуж(?:ен|на|но|ны)' },
+  { id: 'можно', stem: 'можно' },
+  { id: 'входит', stem: 'входит' },
+  { id: 'обязательн', stem: 'обязательн[а-яё]*' },
+];
+
+function polarityOf(text: string, stem: string): StemPolarity {
+  const re = new RegExp(`${CYR_BEFORE}((?:не)\\s+)?${stem}${CYR_AFTER}`, 'giu');
+  let pos = 0;
+  let neg = 0;
+  for (const match of text.matchAll(re)) {
+    if (match[1]) neg += 1;
+    else pos += 1;
+  }
+  if (pos > 0 && neg > 0) return 'mixed';
+  if (pos > 0) return 'pos';
+  if (neg > 0) return 'neg';
+  return 'absent';
+}
+
+function oppositePolarity(a: StemPolarity, b: StemPolarity): boolean {
+  return (a === 'pos' && b === 'neg') || (a === 'neg' && b === 'pos');
+}
+
+/**
  * Lint one extracted rule against its source. Returns 0+ warnings.
  * The anti-hallucination check compares digit-runs (>=3 digits) in the rule body
  * to those in the source quote: a 3+ digit number in the body that is absent from
@@ -62,6 +126,8 @@ function hardFacts(text: string): string[] {
 export function lintRule(input: LintInput): LintWarning[] {
   const warnings: LintWarning[] = [];
   const body = (input.body ?? '').trim();
+  const title = (input.title ?? '').trim();
+  const quote = input.sourceQuote ?? '';
   const code = input.ruleCode;
 
   if (body.length < MIN_BODY) {
@@ -70,20 +136,49 @@ export function lintRule(input: LintInput): LintWarning[] {
   if (body.length > MAX_BODY) {
     warnings.push({ ruleCode: code, kind: 'too_long', detail: `body is ${body.length} chars — likely several rules` });
   }
-  if (PLACEHOLDER.test(body)) {
+  if (PLACEHOLDER_ASCII.test(body) || PLACEHOLDER_CYR.test(body)) {
     warnings.push({ ruleCode: code, kind: 'placeholder', detail: 'contains placeholder text' });
   }
   if (FILLER.test(body)) {
     warnings.push({ ruleCode: code, kind: 'filler', detail: 'contains marketing/atmospheric filler' });
   }
 
-  const sourceFacts = new Set(hardFacts(input.sourceQuote ?? ''));
+  const sourceFacts = new Set(hardFacts(quote));
   for (const fact of hardFacts(body)) {
     if (!sourceFacts.has(fact)) {
       warnings.push({
         ruleCode: code,
         kind: 'hallucinated_fact',
         detail: `number "${fact}" is in the rule but not in its source quote`,
+      });
+    }
+  }
+
+  const quoteNorm = quote.toLowerCase().replace(/ё/g, 'е');
+  for (const name of addressNames(body)) {
+    if (!quoteNorm.includes(name)) {
+      warnings.push({
+        ruleCode: code,
+        kind: 'hallucinated_fact',
+        detail: `address "${name}" is in the rule but not in its source quote`,
+      });
+    }
+  }
+
+  // Полярность по ОДНОМУ стему. Смешанное предложение («паспорт требуется,
+  // запись не требуется») не помечаем: иначе ловим любое «не» в том же абзаце.
+  // Покрытие узкое — цитата и тело делят предикат редко, — но инверсия
+  // «требуется» / «не требуется» в одном правиле это уже готовое враньё.
+  for (const { id, stem } of POLARITY_STEMS) {
+    const bodyPol = polarityOf(body, stem);
+    if (bodyPol === 'absent' || bodyPol === 'mixed') continue;
+    const quotePol = polarityOf(quote, stem);
+    const titlePol = polarityOf(title, stem);
+    if (oppositePolarity(bodyPol, quotePol) || oppositePolarity(bodyPol, titlePol)) {
+      warnings.push({
+        ruleCode: code,
+        kind: 'polarity_conflict',
+        detail: `body asserts ${bodyPol} «${id}», but title/quote assert the opposite`,
       });
     }
   }

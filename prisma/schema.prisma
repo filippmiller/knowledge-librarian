@@ -60,6 +60,7 @@ model Document {
   processingAttempts ProcessingAttempt[]
   revisions          DocumentRevision[]
   tariffs            Tariff[]
+  extractionRuns     KnowledgeExtractionRun[]
 
   @@index([parseStatus])
   @@index([scenarioKey])
@@ -515,19 +516,19 @@ enum TelegramUserRole {
 }
 
 model TelegramUser {
-  id         String           @id @default(cuid())
-  telegramId String           @unique // Telegram user ID (numeric string)
-  username   String? // @username, may change
-  firstName  String?
-  role       TelegramUserRole @default(USER)
-  grantedBy  String? // telegramId of who granted access
-  isActive   Boolean          @default(true)
+  id                   String           @id @default(cuid())
+  telegramId           String           @unique // Telegram user ID (numeric string)
+  username             String? // @username, may change
+  firstName            String?
+  role                 TelegramUserRole @default(USER)
+  grantedBy            String? // telegramId of who granted access
+  isActive             Boolean          @default(true)
   // Получать ли рассылки бота: эскалации, отчёты /report, просьбы /helpme.
   // Отдельно от роли намеренно: «не беспокоить» и «лишить прав управлять базой
   // знаний» — разные решения, и первое не должно тянуть за собой второе.
-  notificationsEnabled Boolean @default(true)
-  createdAt  DateTime         @default(now())
-  updatedAt  DateTime         @updatedAt
+  notificationsEnabled Boolean          @default(true)
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
 
   @@index([telegramId])
   @@index([role])
@@ -615,6 +616,50 @@ model HallucinationLog {
 
   @@index([scenarioKey])
   @@index([createdAt])
+}
+
+/// LLM call telemetry — every request/response through chat-provider.ts.
+///
+/// Schema-only baseline (Beads translation-uuy, Задача 0.3): this table
+/// already exists in prod (introduced by an unmerged instrumentation branch
+/// that wrote to it directly, ahead of this model landing in git). Adding
+/// the model here reconciles schema.prisma with real prod state — it does
+/// NOT wire up the writes. Retention/redaction policy for the PII this table
+/// can hold (system prompt, user message, raw response) is a separate,
+/// deliberately unblocked decision — see Задача 0.3b in
+/// docs/plans/2026-08-05-aurora-knowledge-engine-v2.md.
+model LlmCallLog {
+  id             String  @id @default(cuid())
+  /// Метка вызывающего кода: какая именно функция дёрнула модель.
+  callSite       String
+  provider       String
+  model          String
+  /// Полный system prompt. Обрезается на 20000 символов с пометкой "...[truncated]" —
+  /// в прод-инцидентах system prompt редко превышает это, а неограниченный
+  /// текст рискует раздуть таблицу на аномальных запросах.
+  systemPrompt   String  @db.Text
+  /// Полный user-контент (вопрос + собранный контекст: чанки, правила, Q&A).
+  userMessage    String  @db.Text
+  /// Сырой ответ модели ДО normalizeJsonResponse / любого пост-парсинга.
+  /// `null`, если вызов упал до получения ответа.
+  rawResponse    String? @db.Text
+  temperature    Float?
+  maxTokens      Int?
+  responseFormat String?
+  streaming      Boolean @default(false)
+  latencyMs      Int?
+  /// Текст ошибки, если вызов (или все ретраи/фолбэк) завершился неудачей.
+  error          String? @db.Text
+  sessionId      String?
+  /// Вопрос пользователя, вызвавший всю цепочку — общий якорь, чтобы собрать
+  /// все 5-9 записей одного ответа одним запросом.
+  question       String? @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([callSite])
+  @@index([sessionId])
 }
 
 // ============================================
@@ -1043,20 +1088,20 @@ model Tariff {
 /// Строка пишется в момент удержания, вердикт проставляется позже — одной
 /// кнопкой под сообщением об эскалации.
 model HeldAnswer {
-  id       String @id @default(cuid())
-  question String @db.Text
+  id              String  @id @default(cuid())
+  question        String  @db.Text
   /// Черновик, который забраковали. Именно его оценивает человек.
-  draftAnswer String @db.Text
-  audience String
+  draftAnswer     String  @db.Text
+  audience        String
   /// Канал: API, TELEGRAM, MINI_APP.
-  source   String
+  source          String
   /// Решение политики доставки на момент удержания.
-  delivery String
+  delivery        String
   /// Первая помеха из политики: выключенный автоответ, низкая уверенность и т.д.
-  blocker  String?
+  blocker         String?
   /// Сработавшие контроли целиком: [{ reason, detail }]. Не первая, а ВСЕ —
   /// иначе статистика превратится в статистику приоритетов `if`.
-  reasons  Json
+  reasons         Json
   confidence      Float
   confidenceLevel String
   answerSource    String?
@@ -1066,10 +1111,80 @@ model HeldAnswer {
   verdict   String?
   verdictBy String?
   verdictAt DateTime?
-  comment   String?  @db.Text
+  comment   String?   @db.Text
 
   createdAt DateTime @default(now())
 
   @@index([createdAt])
   @@index([verdict])
+}
+
+// ============================================
+// AURORA V2: TYPED KNOWLEDGE UNITS (новый движок извлечения)
+// ============================================
+
+/// Один независимый прогон извлечения нового движка. Поля происхождения —
+/// EvaluationSnapshotMetadata (src/lib/eval/evaluation-snapshot.ts): прогоны
+/// никогда не смешиваются, extractionRunId уникален. documentId намеренно
+/// НЕ каскадный: удаление Document оставляет историю извлечений (SetNull) —
+/// прежний reprocess-путь терял человеческую работу каскадом, этот не теряет.
+model KnowledgeExtractionRun {
+  id                      String    @id @default(cuid())
+  extractionRunId         String    @unique
+  documentId              String?
+  /// Путь фикстуры для пилотных прогонов вне БД (scripts/fixtures/...).
+  sourceDocPath           String?
+  sourceRevisionHash      String
+  canonicalTextHash       String
+  parserVersion           String
+  extractionProvider      String
+  extractionModel         String
+  extractionPromptVersion String
+  extractionSchemaVersion String
+  /// true только после прохождения человеческого ревью (Gate 1) — до этого
+  /// юниты прогона не имеют права попадать в ответы (reviewed-snapshot.ts).
+  humanReviewed           Boolean   @default(false)
+  qualifiedAt             DateTime?
+  createdAt               DateTime  @default(now())
+
+  document Document?             @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  units    KnowledgeUnitRecord[]
+
+  @@index([documentId])
+  @@index([canonicalTextHash])
+}
+
+/// Один persisted knowledge unit. Источник истины — payload (канонический
+/// JSON юнита, persistedKnowledgeUnitSchema валидирует его и на записи, и на
+/// чтении); колонки рядом — денормализация для выборок и индексов.
+model KnowledgeUnitRecord {
+  id                String   @id @default(cuid())
+  runId             String
+  unitId            String
+  contentHash       String
+  kind              String
+  sourceBlockAnchor String
+  parentRuleRef     String?
+  payload           Json
+  createdAt         DateTime @default(now())
+
+  run KnowledgeExtractionRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, unitId])
+  @@index([unitId])
+  @@index([contentHash])
+  @@index([kind])
+}
+
+/// Review-решение оператора по unitId — last-write-wins (та же семантика, что
+/// upsertReviewDecision в review-decision.ts): повторный прогон по
+/// неизменному документу дубликат не создаёт, новое решение заменяет старое.
+model KnowledgeUnitReviewDecision {
+  id         String   @id @default(cuid())
+  unitId     String   @unique
+  decision   String
+  reviewedBy String
+  reviewedAt DateTime
+  notes      String?  @db.Text
+  updatedAt  DateTime @updatedAt
 }

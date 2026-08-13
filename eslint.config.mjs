@@ -33,6 +33,11 @@ const eslintConfig = defineConfig([
     "build/**",
     "src/generated/**",
     "next-env.d.ts",
+    // Flat config does not read .gitignore automatically — without this,
+    // ESLint walks into leftover agent worktrees under .claude/worktrees/,
+    // including their compiled .next bundles, and reports thousands of
+    // bogus errors from minified output and duplicated source files.
+    ".claude/worktrees/**",
   ]),
 ]);
 

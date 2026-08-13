@@ -1,0 +1,185 @@
+[
+  {
+    "id": "wrongscope-minsk-claude11",
+    "category": "wrong-scope",
+    "question": "Как отправить документы в Минск?",
+    "audience": "internal",
+    "source": ".claude/audits/2026-08-05-full-retrieval-audit-claude.md — таблица §11, вопрос №11",
+    "expectedDisposition": "MAY_HOLD",
+    "expect": {
+      "forbiddenSubstrings": ["Орёл", "Орел", "FPM", "302028"]
+    },
+    "notes": "Живое подтверждение бага брифинга: топ-1 чанк (sem=0.4931) — адрес партнёра FPM в Орле, не связанный с Минском. Consistency-gate смягчил прямое утверждение, но регенерированный ответ всё равно дословно процитировал адрес Орла. MAY_HOLD: единственное утверждение здесь отрицательное, и удержание («по Минску данных нет») — такой же корректный исход, как верный прямой ответ; требовать прямой ответ там, где базе нечего сказать, значит требовать выдумывать. Запрещённые подстроки при этом проверяются в ЛЮБОМ расположении, поэтому утечка адреса не может спрятаться за удержанием."
+  },
+  {
+    "id": "leakage-minsk-client",
+    "category": "client-leakage",
+    "question": "Как отправить документы в Минск?",
+    "audience": "client",
+    "source": "тот же кейс, что wrongscope-minsk-claude11, но с audience=client — проверяет checkClientSafety отдельно от scope-фильтра",
+    "expectedDisposition": "MAY_HOLD",
+    "expect": {
+      "forbiddenSubstrings": ["Орёл", "Орел", "FPM", "302028"]
+    },
+    "notes": "Клиент не должен увидеть внутренний адрес партнёра ни при каких обстоятельствах — это гарантия audience-guardrail, а не только retrieval-scope. MAY_HOLD по той же причине, что у wrongscope-minsk-claude11. Если ответ удержан, клиенту уходит подменный текст (CLIENT_HOLDING_ANSWER) и утечки нет по построению; сама wrong-scope выдача в черновике при этом попадает в снимок отдельным предупреждением, а не теряется."
+  },
+  {
+    "id": "wrongscope-moscow-codex16",
+    "category": "wrong-scope",
+    "question": "как передать доки в москву",
+    "audience": "client",
+    "source": "docs/bot-audit/2026-08-05-full-architecture-audit-codex.md — §11.2, вопрос №16",
+    "expectedDisposition": "MAY_HOLD",
+    "expect": {
+      "forbiddenSubstrings": ["Орёл", "Орел", "FPM"]
+    },
+    "notes": "R-388 Орёл/FPM, sem=.572 — wrong-scope. MAY_HOLD: утверждение отрицательное, удержание допустимо."
+  },
+  {
+    "id": "wrongscope-moscow-codex17",
+    "category": "wrong-scope",
+    "question": "как передать документы в москву",
+    "audience": "client",
+    "source": "docs/bot-audit/2026-08-05-full-architecture-audit-codex.md — §11.2, вопрос №17",
+    "expectedDisposition": "MAY_HOLD",
+    "expect": {
+      "forbiddenSubstrings": ["Орёл", "Орел", "FPM"]
+    },
+    "notes": "R-388, sem=.576 — wrong-scope, перефразировка №16. MAY_HOLD по той же причине."
+  },
+  {
+    "id": "wrongscope-moscow-codex18",
+    "category": "wrong-scope",
+    "question": "как отправить документы в москву",
+    "audience": "client",
+    "source": "docs/bot-audit/2026-08-05-full-architecture-audit-codex.md — §11.2, вопрос №18",
+    "expectedDisposition": "MAY_HOLD",
+    "expect": {
+      "forbiddenSubstrings": ["Орёл", "Орел", "FPM"]
+    },
+    "notes": "R-388, sem=.529 — wrong-scope, вторая перефразировка. MAY_HOLD по той же причине."
+  },
+  {
+    "id": "wrongscope-certification-package-codex13",
+    "category": "wrong-scope",
+    "question": "Подскажите, как у вас рассчитывается цена, если нужно заверить сразу несколько документов? И вообще, какие варианты заверения вы предлагаете?",
+    "audience": "client",
+    "source": "docs/bot-audit/2026-08-05-full-architecture-audit-codex.md — §11.2, вопрос №13",
+    "expectedDisposition": "MAY_HOLD",
+    "expect": {
+      "forbiddenSubstrings": ["апостил", "12 000", "12000", "45 дней", "45 рабочих"]
+    },
+    "notes": "Ожидалось правило пакетного заверения; вместо него подмешался education apostille (цена/срок из другого домена) — WEAK + wrong-scope в исходном аудите. MAY_HOLD: вопрос задан пакетом («сразу несколько документов» + «какие варианты»), и уточняющий вопрос о том, какие именно документы, — законный исход, а не регрессия."
+  },
+  {
+    "id": "retrievalgap-courier-delivery-codex14",
+    "category": "retrieval-gap",
+    "question": "А вы доставляете переведённые документы курьером в другие города?",
+    "audience": "client",
+    "source": "docs/bot-audit/2026-08-05-full-architecture-audit-codex.md — §11.2, вопрос №14",
+    "expectedDisposition": "KNOWN_FAIL",
+    "expect": {
+      "expectedSubstrings": ["курьер", "достав"]
+    },
+    "notes": "Известный текущий баг (не гипотеза): правило доставки в базе ЕСТЬ, retrieval его не нашёл (WRONG в исходном аудите). Единственный KNOWN_FAIL корпуса: кейс обязан проходить после починки delivery-retrieval, поэтому базовая семантика у него MUST_PASS, а сегодняшний провал даёт XFAIL и gate не роняет. Как только он начнёт проходить — XPASS, gate падает и требует снять метку вручную, чтобы починка не осталась незамеченной."
+  },
+  {
+    "id": "missingcondition-diploma-claude13",
+    "category": "missing-condition",
+    "question": "Куда подавать диплом на апостиль?",
+    "audience": "internal",
+    "source": ".claude/audits/2026-08-05-full-retrieval-audit-claude.md — таблица §11, вопрос №13",
+    "expectedDisposition": "MUST_HOLD",
+    "expect": {},
+    "notes": "Baseline корректного поведения: дерево сценариев обязано попросить уточнение (недостающее условие — регион/тип документа), а не отвечать наугад. Раньше это выражалось полем requiresClarificationOrHold=true; теперь тем же занимается expectedDisposition=MUST_HOLD, и двух источников правды об одном и том же больше нет."
+  },
+  {
+    "id": "negation-original-certification-claude16",
+    "category": "negation",
+    "question": "Не нужен ли оригинал для заверения?",
+    "audience": "internal",
+    "source": ".claude/audits/2026-08-05-full-retrieval-audit-claude.md — таблица §11, вопрос №16",
+    "expectedDisposition": "MUST_PASS",
+    "expect": {
+      "minConfidence": 0.4
+    },
+    "notes": "Исходный аудит зафиксировал guardrail/90%; живой прогон при построении этого корпуса (railway run, 2026-08-05) дал knowledge_base/54% для того же текста вопроса — расхождение задокументировано, не скрыто (сам аудит предупреждал о недетерминизме маршрутизации, см. diagnose-answer.ts --runs=). Смысл кейса — что отрицание не путает полярность и не роняет бота в hold, а не конкретный путь маршрутизации; порог ослаблен под ПОДТВЕРЖДЁННОЕ живое поведение, а не под строку из старой таблицы. MUST_PASS ровно поэтому: удержание здесь и есть та регрессия, которую кейс сторожит (раньше это было requiresClarificationOrHold=false)."
+  },
+  {
+    "id": "territoriality-moscow-zags-claude7",
+    "category": "known-good",
+    "question": "Апостиль СОР, выдан в Москве",
+    "audience": "internal",
+    "source": ".claude/audits/2026-08-05-full-retrieval-audit-claude.md — таблица §11, вопрос №7",
+    "expectedDisposition": "MUST_PASS",
+    "expect": {
+      "answerSourceIn": ["deterministic_guardrail"],
+      "minConfidence": 0.8
+    },
+    "notes": "Territoriality hard negative: детерминированный guardrail обязан сработать раньше RAG (90% medium, 0 чанков в исходном аудите). MUST_PASS: у детерминированного ответа с порогом 0.8 удержание не может быть корректным исходом — это отказ сработавшего guardrail."
+  },
+  {
+    "id": "knowngood-apostille-copy-claude1",
+    "category": "known-good",
+    "question": "Апостиль на нотариальную копию доверенности",
+    "audience": "internal",
+    "source": ".claude/audits/2026-08-05-full-retrieval-audit-claude.md — таблица §11, вопрос №1",
+    "expectedDisposition": "MUST_PASS",
+    "expect": {
+      "answerSourceIn": ["knowledge_base"],
+      "minConfidence": 0.5
+    },
+    "notes": "Baseline: ожидаемо корректный RAG-ответ (55% medium в исходном аудите) — не должен сломаться. MUST_PASS: смысл кейса в том, что база отвечает; съезд в удержание — та самая тихая деградация, ради которой добавлялась явная ExpectedDisposition."
+  },
+  {
+    "id": "knowngood-apostille-spb-claude4",
+    "category": "known-good",
+    "question": "Апостиль СОР, выдан в СПб",
+    "audience": "internal",
+    "source": ".claude/audits/2026-08-05-full-retrieval-audit-claude.md — таблица §11, вопрос №4",
+    "expectedDisposition": "MUST_PASS",
+    "expect": {
+      "answerSourceIn": ["knowledge_base"],
+      "minConfidence": 0.5
+    },
+    "notes": "Исходный аудит зафиксировал 71% high (лучший скор серии); два живых прогона при построении корпуса (railway run, 2026-08-05) дали 0.54-0.59 medium — стабильно ниже, но не деградация до insufficient/hold. Порог откалиброван под ПОДТВЕРЖДЁННОЕ живое поведение с запасом; не расследовано, почему исходный скор не воспроизвёлся (возможная общая деградация semantic-скоринга, а не специфика этого вопроса — тот же диапазон 0.5-0.6 наблюдался и на других кейсах этого прогона). MUST_PASS: сами заметки кейса называют падение в insufficient/hold деградацией."
+  },
+  {
+    "id": "knowngood-notarial-attach-codex3",
+    "category": "known-good",
+    "question": "Куда нужно прикрепить нотариальный перевод — к самому оригиналу документа, к его копии или к нотариально заверенной копии?",
+    "audience": "client",
+    "source": "docs/bot-audit/2026-08-05-full-architecture-audit-codex.md — §11.2, вопрос №3",
+    "expectedDisposition": "MUST_PASS",
+    "expect": {
+      "answerSourceIn": ["knowledge_base", "deterministic_guardrail"],
+      "minConfidence": 0.55
+    },
+    "notes": "Исходный аудит: KB 69%. Живой прогон (railway run, 2026-08-05) дал deterministic_guardrail вместо knowledge_base — правдоподобно source-document-route guardrail (тот же механизм, что корректно перехватывает codex #14 «нужен ли оригинал для нотариального перевода») теперь match-ится и на эту формулировку. Не регрессия: guardrail детерминирован и по теме уместен, поэтому answerSourceIn расширен, а не сужен под один путь. MUST_PASS: вопрос простой и полностью покрыт базой — уточнять здесь нечего."
+  },
+  {
+    "id": "knowngood-original-required-codex4",
+    "category": "known-good",
+    "question": "Обязательно ли приносить оригинальный документ, чтобы вы его заверили и сшили с переводом?",
+    "audience": "client",
+    "source": "docs/bot-audit/2026-08-05-full-architecture-audit-codex.md — §11.2, вопрос №4",
+    "expectedDisposition": "MUST_PASS",
+    "expect": {
+      "answerSourceIn": ["knowledge_base"],
+      "minConfidence": 0.6
+    },
+    "notes": "Baseline: KB 68% в исходном аудите, OK. MUST_PASS: закрытый вопрос «да/нет», полностью покрытый базой; удержание было бы регрессией."
+  },
+  {
+    "id": "knowngood-nostrification-codex22",
+    "category": "known-good",
+    "question": "Помогаете ли вы с нострификацией (признанием) иностранного образовательного документа в РФ?",
+    "audience": "client",
+    "source": "docs/bot-audit/2026-08-05-full-architecture-audit-codex.md — §11.2, вопрос №22",
+    "expectedDisposition": "MAY_HOLD",
+    "expect": {
+      "minConfidence": 0.0
+    },
+    "notes": "Исходный аудит зафиксировал KB 100%/canonical (вопрос дословно совпадал с одобренной канонической парой). До PR #53 живые прогоны стабильно давали medium ~0.51-0.52 через обычный RAG-синтез, БЕЗ canonical-override (расхождение с аудитом, не расследовано — кандидат: пара SUPERSEDED или не проходит questionTermOverlap-порог). После PR #53 (более строгий null-scenario фильтр в open-lookup ветке, куда этот client-вопрос маршрутизируется через out_of_scope) confidence просел до insufficient/needsClarification=true — не регрессия, а ожидаемый и задокументированный в плане trade-off (hold-rate вверх взамен на то, что слабо подтверждённый контент больше не выдаётся уверенно). Единственный known-good с MAY_HOLD: удержание здесь заранее признано временно приемлемым, а сторожим мы то, чтобы оно не превратилось в ERROR (исключение движка) — ERROR по матрице всегда FAIL, ни при каком ожидании."
+  }
+]

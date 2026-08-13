@@ -319,6 +319,7 @@ export async function commitDocumentKnowledge(documentId: string, options: Commi
       const created = await prisma.docChunk.create({
         data: {
           documentId,
+          scenarioKey: document.scenarioKey,
           chunkIndex: data.index,
           content: data.content,
           embedding: batchEmbeddings[i],
