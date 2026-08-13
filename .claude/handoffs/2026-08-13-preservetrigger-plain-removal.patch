@@ -1,0 +1,1162 @@
+diff --git a/.beads/interactions.jsonl b/.beads/interactions.jsonl
+index fc25272..65b5abe 100644
+--- a/.beads/interactions.jsonl
++++ b/.beads/interactions.jsonl
+@@ -58,3 +58,7 @@
+ {"id":"int-1c5f3e36","kind":"field_change","created_at":"2026-08-10T13:37:24.4674799Z","actor":"Filipp Miller","issue_id":"translation-v49","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Implemented and live-verified resumable paid-stage journal for initial extraction, audits, focused repair, taint resample, plus semantic checkpoint before embeddings; 4/4 funded batches replayed with zero Anthropic calls."}}
+ {"id":"int-12a55f1f","kind":"field_change","created_at":"2026-08-10T13:37:28.1996133Z","actor":"Filipp Miller","issue_id":"translation-j0z","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Implemented per-attempt usage/cache/cost and run/stage/batch/block/question correlation with ledger reconciliation tests."}}
+ {"id":"int-f3b75ec7","kind":"field_change","created_at":"2026-08-10T13:37:30.37532Z","actor":"Filipp Miller","issue_id":"translation-smy","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Implemented compact finding-scoped repair, exact schema prompt, seeded omission coverage, accounting, and duplicate schema retry suppression."}}
++{"id":"int-dfb1eef5","kind":"field_change","created_at":"2026-08-11T08:37:46.4376774Z","actor":"Filipp Miller","issue_id":"translation-gy3","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Починено в ae54eb7: безусловный stream:true для Anthropic, общий SSE-парсер parseAnthropicSseFrames для обоих потребителей, обработка error-фрейма, гейт полноты потока (провизорный output_tokens из message_start больше не попадает в итоговый usage; успех требует message_start с input_tokens и message_delta с финальным output_tokens, иначе retryable incomplete_stream), сброс TextDecoder в конце потока. Тесты 92/1839, typecheck чист. Подтверждено вживую: 35 реальных вызовов к Anthropic по новому пути, ноль транспортных ошибок, usage тарифицируется."}}
++{"id":"int-a7d4d1c6","kind":"field_change","created_at":"2026-08-11T10:07:56.2434425Z","actor":"Filipp Miller","issue_id":"translation-kgh","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Извлечение прошло все 15 блоков под HEAD и выдало валидный артефакт (phase=COMPLETE, 44 эмбеддинга). Блок b4 больше не падает на откате намеренно очищенного поля. Починка в cbfce62."}}
++{"id":"int-0e70f75e","kind":"field_change","created_at":"2026-08-11T10:07:58.3474487Z","actor":"Filipp Miller","issue_id":"translation-oxu","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Извлечение прошло все 15 блоков. Блок b6 закрывается: заведён факт resourceAvailability, самопротиворечивый пример в промпте заменён, планка правила про override не менялась. Починка в cbfce62."}}
++{"id":"int-2235d52c","kind":"field_change","created_at":"2026-08-11T10:07:59.5293765Z","actor":"Filipp Miller","issue_id":"translation-cv0","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Извлечение прошло все 15 блоков. AMBIGUOUS теперь маршрутизируется в ремонт, финальное требование все-COVERED не менялось. Починка в 4b4d9fc."}}
+diff --git a/scripts/__tests__/run-aurora-fixture-taint-resample.test.ts b/scripts/__tests__/run-aurora-fixture-taint-resample.test.ts
+index 0049c16..a90d1a7 100644
+--- a/scripts/__tests__/run-aurora-fixture-taint-resample.test.ts
++++ b/scripts/__tests__/run-aurora-fixture-taint-resample.test.ts
+@@ -5,8 +5,11 @@ import {
+   buildExceptionRepairPromptMessages,
+   exceptionRepairResponseSchema,
+   findMalformedExceptions,
++  mergeMalformedExceptionAuditRepairUnits,
+   resolveMalformedExceptions,
+   resolveTaintedCandidates,
++  summarizeMalformedExceptionAuditRepairs,
++  type MalformedExceptionAuditRepairLog,
+ } from '../run-aurora-fixture';
+ import { assignIdentity, type SourceBlockLocation } from '../../src/lib/knowledge/applicability/identity-assignment';
+ import type { ExtractedKnowledgeUnit } from '../../src/lib/knowledge/applicability/extraction';
+@@ -348,15 +351,21 @@ describe('targeted malformed exception repair', () => {
+       hasGap: false,
+       unresolved: false,
+     }));
++    // A replacement that passes its FIRST post-replacement audit must behave
++    // exactly as before this fix: zero calls to the audit-repair machinery,
++    // zero entries in the new auditRepairLogs.
++    const focusedRepairExtractor = vi.fn();
+ 
+     const result = await resolveMalformedExceptions(
+       malformed,
+       new Map([[BLOCK.anchor, BLOCK]]),
+       'rev-1',
+       repairExtractor,
++      focusedRepairExtractor,
+       auditor,
+       { runConfig, maxTokens: 100 },
+-      2
++      2,
++      3
+     );
+ 
+     const repairedException = result.units.find((unit) => unit.kind === 'EXCEPTION_RULE')!;
+@@ -365,6 +374,9 @@ describe('targeted malformed exception repair', () => {
+     expect(repairedException.triggerCondition).not.toBeNull();
+     expect(result.repairLogs).toHaveLength(1);
+     expect(result.auditResults).toHaveLength(1);
++    expect(result.auditRepairLogs).toEqual([]);
++    expect(focusedRepairExtractor).not.toHaveBeenCalled();
++    expect(auditor).toHaveBeenCalledTimes(1);
+   });
+ 
+   it('fails closed when bounded repair rounds keep returning a malformed exception', async () => {
+@@ -391,16 +403,23 @@ describe('targeted malformed exception repair', () => {
+       hasGap: false,
+       unresolved: false,
+     }));
++    const focusedRepairExtractor = vi.fn();
+ 
+     await expect(resolveMalformedExceptions(
+       malformed,
+       new Map([[BLOCK.anchor, BLOCK]]),
+       'rev-1',
+       repairExtractor,
++      focusedRepairExtractor,
+       auditor,
+       { runConfig, maxTokens: 100 },
+-      2
++      2,
++      3
+     )).rejects.toThrow('did not converge after 2 round');
+     expect(repairExtractor).toHaveBeenCalledTimes(2);
++    // The audit itself never returns a gap here (findMalformedExceptions --
++    // structural, not coverage -- is what keeps failing); the audit-repair
++    // retry this fix adds must stay uninvolved.
++    expect(focusedRepairExtractor).not.toHaveBeenCalled();
+   });
+ });
+diff --git a/scripts/run-aurora-fixture.ts b/scripts/run-aurora-fixture.ts
+index 56db580..dff9595 100644
+--- a/scripts/run-aurora-fixture.ts
++++ b/scripts/run-aurora-fixture.ts
+@@ -59,6 +59,7 @@ import {
+   coverageAuditNeedsReview,
+   type AuditBlockCoverageOptions,
+   type BlockCoverageAuditResult,
++  type CoverageFinding,
+ } from '../src/lib/knowledge/extraction-coverage-auditor';
+ import {
+   ChatCompletionError,
+@@ -859,6 +860,19 @@ export interface ExceptionRepairLog {
+   readonly malformed: readonly MalformedExceptionFinding[];
+ }
+ 
++/** Recorded only when a block's post-replacement coverage audit did NOT
++ *  clear on the first attempt and needed `resolveMalformedExceptions`'s
++ *  bounded focused-repair retry to converge. No entry for a given block
++ *  means its replacement cleared immediately -- exactly today's behaviour,
++ *  unchanged. Surfaced in run-summary.json (`summarizeMalformedExceptionAuditRepairs`)
++ *  so a run that needed this safety net is never indistinguishable from one
++ *  that didn't. */
++export interface MalformedExceptionAuditRepairLog {
++  readonly blockAnchor: string;
++  readonly round: number;
++  readonly auditRepairRoundsUsed: number;
++}
++
+ export interface ExceptionRepairOptions extends Omit<ExtractKnowledgeUnitsOptions, 'blocks'> {
+   readonly block: SourceBlock;
+   readonly malformed: readonly MalformedExceptionFinding[];
+@@ -1112,30 +1126,146 @@ export async function resolveTaintedCandidates(
+   return { units, resampleLogs, auditResults };
+ }
+ 
++/** Shared `AuditBlockCoverageOptions.extractedStatements` mapping for every
++ *  audit/re-audit call `resolveMalformedExceptions` makes -- factored out
++ *  (rather than inlined per call site) because the bounded audit-repair loop
++ *  below calls this up to `auditRepairMaxRounds + 1` times per block. */
++function toExceptionRepairAuditStatement(unit: ExtractedKnowledgeUnit) {
++  return {
++    kind: unit.kind,
++    statement: unit.statement,
++    quote: unit.sourceSpan.quote,
++    extractionRef: unit.extractionRef,
++    parentExtractionRef: unit.parentExtractionRef,
++    triggerCondition: unit.triggerCondition,
++    numericConstraint: unit.numericConstraint,
++    uncertainties: unit.uncertainties,
++  };
++}
++
++/** A finding the bounded audit-repair retry (below) can act on. Equivalent
++ *  to "not COVERED" by construction of the closed COVERAGE_VERDICTS tuple
++ *  (COVERED | POSSIBLE_OMISSION | UNREPRESENTED_CLAUSE | AMBIGUOUS) --
++ *  re-derived here rather than imported, because audited-extraction.ts's own
++ *  `isActionableCoverageFinding` is a private, unexported helper. Written as
++ *  an exclusion rather than an enumeration on purpose: a future verdict
++ *  added to COVERAGE_VERDICTS without updating this predicate is treated as
++ *  actionable (the fail-safe default for a fail-closed gate), never silently
++ *  ignored. */
++function isActionableMalformedExceptionAuditFinding(finding: CoverageFinding): boolean {
++  return finding.verdict !== 'COVERED';
++}
++
++/** Narrower merge for the bounded audit-repair retry below, DELIBERATELY not
++ *  reusing audited-extraction.ts's preserveTrigger/preserveFacets/
++ *  preserveNumeric/preserveParent heuristics (besides being private to that
++ *  file, they exist for a materially different shape: units accumulated
++ *  there come from MULTIPLE independent extraction calls across several
++ *  repair rounds, so "did the model mean to clear this field or just forget
++ *  it" is a genuine ambiguity -- translation-kgh's whole defect was exactly
++ *  that ambiguity). Here every unit in `current` comes from ONE coherent
++ *  wholesale-replacement response for ONE block, and a patch response is
++ *  produced by the SAME full-object-per-unit contract
++ *  (FOCUSED_REPAIR_SYSTEM_PROMPT already instructs the model to copy forward
++ *  every field a finding doesn't ask it to change) -- so a same-ref
++ *  candidate is trusted as a full replacement, consistent with
++ *  `resolveMalformedExceptions`'s own "replaced wholesale" philosophy for
++ *  the outer repair this nests inside. If the model DOES drop an untouched
++ *  field despite the prompt's instruction, the re-audit called immediately
++ *  after this merge is the safety net (bounded by `auditRepairMaxRounds`),
++ *  not a second layer of field-preservation code.
++ *
++ *  `parentExtractionRef` remapping is safe by construction: every unit this
++ *  function receives as `patch` already passed `validateParentRefs(patch,
++ *  refs-of-current)` inside `extractFocusedRepairUnits`, so every non-null
++ *  parentExtractionRef resolves either within `patch` itself or within
++ *  `current` -- never a truly dangling ref -- and both cases are exactly the
++ *  two branches `remapParent` below handles. */
++export function mergeMalformedExceptionAuditRepairUnits(
++  current: readonly ExtractedKnowledgeUnit[],
++  patch: readonly ExtractedKnowledgeUnit[],
++  newRefPrefix: string
++): ExtractedKnowledgeUnit[] {
++  const currentRefs = new Set(current.map((unit) => unit.extractionRef));
++  const remapParent = (ref: string | null): string | null =>
++    ref === null || currentRefs.has(ref) ? ref : `${newRefPrefix}${ref}`;
++  const byRef = new Map(current.map((unit) => [unit.extractionRef, unit] as const));
++  for (const candidate of patch) {
++    const isReplacement = currentRefs.has(candidate.extractionRef);
++    const extractionRef = isReplacement ? candidate.extractionRef : `${newRefPrefix}${candidate.extractionRef}`;
++    byRef.set(extractionRef, {
++      ...candidate,
++      extractionRef,
++      parentExtractionRef: remapParent(candidate.parentExtractionRef),
++    });
++  }
++  return [...byRef.values()];
++}
++
+ /** Bounded structural repair before the trusted-artifact boundary. Each
+  * affected block is replaced wholesale, then coverage and identity are
+- * re-proven for the exact replacement. */
++ * re-proven for the exact replacement.
++ *
++ * The post-replacement coverage audit used to be a single shot with zero
++ * repair budget: any non-COVERED verdict aborted the ENTIRE RUN instantly,
++ * even for a block whose pre-replacement units had already passed their own
++ * coverage audit clean (live case, run aurora-v14: block b4 was COVERED,
++ * got swept into a wholesale replacement while repairing a malformed
++ * EXCEPTION_RULE elsewhere among its units, and the replacement's re-audit
++ * came back UNREPRESENTED_CLAUSE x2 with no chance to fix it -- after $0.78
++ * of paid work). This now mirrors the main path's audited-extraction.ts
++ * shape instead: audit -> focused repair on the actionable findings ->
++ * re-audit, bounded by `auditRepairMaxRounds`, still failing loudly (with a
++ * message distinct from every other throw in this function) if it does not
++ * clear within budget. `auditRepairMaxRounds` must never exceed
++ * FOCUSED_REPAIR_MAX_ROUNDS -- this is a second, narrower instance of the
++ * SAME bounded-repair primitive, not a separate budget to tune upward.
++ *
++ * DISCARD WAS CONSIDERED AND REJECTED. An alternative to failing loudly here
++ * would be: after the budget is exhausted, throw away the replacement, keep
++ * the pre-replacement units, and let the run continue (the malformed
++ * EXCEPTION_RULE stays malformed). Rejected because a malformed
++ * EXCEPTION_RULE is not an inert imperfection: `resolution.ts`'s resolver
++ * fail-closed-excludes any EXCEPTION_RULE with `parentRuleRef === null` or a
++ * null trigger AND sets `requiresHumanReview = true` for every future
++ * question that touches it -- a PERMANENT, ONGOING tax (every relevant
++ * answer degraded or flagged from then on), not a bounded one-time cost like
++ * losing this one run. It would also knowingly manufacture exactly the
++ * corrupted-record shape `persisted-unit.ts`'s own `parentRuleRef` comment
++ * says the trusted-artifact boundary exists to forbid for a FRESH
++ * extraction (the runtime fail-closed path there is documented as a
++ * backstop for migrations/legacy artifacts, not a designed acceptance path
++ * for new output). Losing the run is expensive but bounded and one-time;
++ * shipping a known-corrupt EXCEPTION_RULE is cheap now and unbounded later.
++ * Two prior instances of this exact "verdict kills the run instead of using
++ * the existing repair loop" defect class (translation-cv0, translation-hh0)
++ * were both fixed by routing into repair and STILL failing if unresolved,
++ * never by tolerating the unresolved state -- this keeps that precedent. */
+ export async function resolveMalformedExceptions(
+   initialUnits: readonly PersistedKnowledgeUnit[],
+   blocksByAnchor: ReadonlyMap<string, SourceBlockLocation>,
+   sourceRevisionHash: string,
+   repairExtractor: (options: ExceptionRepairOptions) => Promise<ExtractKnowledgeUnitsResult>,
++  focusedRepairExtractor: (options: FocusedRepairOptions) => Promise<ExtractKnowledgeUnitsResult>,
+   auditor: (options: AuditBlockCoverageOptions) => Promise<BlockCoverageAuditResult>,
+   optionsPerCall: Omit<ExtractKnowledgeUnitsOptions, 'blocks'>,
+   maxRounds: number,
++  auditRepairMaxRounds: number,
+   checkpoint?: ExceptionRepairCheckpoint
+ ): Promise<{
+   units: PersistedKnowledgeUnit[];
+   repairLogs: ExceptionRepairLog[];
++  auditRepairLogs: MalformedExceptionAuditRepairLog[];
+   auditResults: BlockCoverageAuditResult[];
+ }> {
+   let units = [...initialUnits];
+   const repairLogs: ExceptionRepairLog[] = [];
++  const auditRepairLogs: MalformedExceptionAuditRepairLog[] = [];
+   const auditResults: BlockCoverageAuditResult[] = [];
+ 
+   for (let round = 1; round <= maxRounds; round++) {
+     const malformed = findMalformedExceptions(units);
+-    if (malformed.length === 0) return { units, repairLogs, auditResults };
++    if (malformed.length === 0) return { units, repairLogs, auditRepairLogs, auditResults };
+     const byAnchor = new Map<string, MalformedExceptionFinding[]>();
+     for (const finding of malformed) {
+       byAnchor.set(finding.blockAnchor, [...(byAnchor.get(finding.blockAnchor) ?? []), finding]);
+@@ -1162,7 +1292,7 @@ export async function resolveMalformedExceptions(
+       if (restored === undefined) checkpoint?.saveExceptionRepair(round, sourceBlock, repairMessages, result.units);
+ 
+       const prefix = `exception-repair-${round}-${anchor}-`;
+-      const namespaced = result.units.map((unit) => ({
++      let namespaced = result.units.map((unit) => ({
+         ...unit,
+         extractionRef: `${prefix}${unit.extractionRef}`,
+         parentExtractionRef:
+@@ -1172,24 +1302,71 @@ export async function resolveMalformedExceptions(
+         blockAnchor: block.anchor,
+         blockText: block.text,
+         ...(block.kind !== undefined && { blockKind: block.kind }),
+-        extractedStatements: namespaced.map((unit) => ({
+-          kind: unit.kind,
+-          statement: unit.statement,
+-          quote: unit.sourceSpan.quote,
+-          extractionRef: unit.extractionRef,
+-          parentExtractionRef: unit.parentExtractionRef,
+-          triggerCondition: unit.triggerCondition,
+-          numericConstraint: unit.numericConstraint,
+-          uncertainties: unit.uncertainties,
+-        })),
++        extractedStatements: namespaced.map(toExceptionRepairAuditStatement),
+         runConfig: optionsPerCall.runConfig,
+       };
+       const restoredAudit = checkpoint?.loadExceptionRepairAudit(round, auditOptions);
+       const audit = restoredAudit ?? await auditor(auditOptions);
+       if (restoredAudit === undefined) checkpoint?.saveExceptionRepairAudit(round, auditOptions, audit);
+       auditResults.push(audit);
++
+       if (coverageAuditNeedsReview(audit)) {
+-        throw new Error(`malformed exception repair: replacement for block "${anchor}" did not pass coverage audit`);
++        // The replacement -- not just the original malformed unit, the WHOLE
++        // block, since this pass replaces wholesale -- gets the same bounded
++        // second chance the main path gives an ordinary coverage gap,
++        // instead of aborting the run on the very first non-COVERED verdict.
++        // See the function doc comment above for why this retries rather
++        // than discarding the replacement.
++        let pendingAudit = audit;
++        let pendingUnits = namespaced;
++        let cleared = false;
++        let auditRepairRoundsUsed = 0;
++
++        for (let auditRepairRound = 1; auditRepairRound <= auditRepairMaxRounds; auditRepairRound += 1) {
++          const actionableFindings = pendingAudit.findings.filter(isActionableMalformedExceptionAuditFinding);
++          // Only reachable via a hand-built/replayed audit result bypassing
++          // coverageAuditResponseSchema's real-call min(1)-findings guard --
++          // coverageAuditNeedsReview()===true from a schema-valid response
++          // always implies at least one non-COVERED (hence actionable)
++          // finding. Nothing here for a focused repair to act on; stop
++          // retrying and fall through to the fail-closed throw below.
++          if (actionableFindings.length === 0) break;
++          auditRepairRoundsUsed = auditRepairRound;
++
++          const focusedRepairOptions: FocusedRepairOptions = {
++            ...optionsPerCall,
++            block: sourceBlock,
++            findings: actionableFindings,
++            existingUnits: pendingUnits,
++          };
++          const retryResult = await focusedRepairExtractor(focusedRepairOptions);
++          const patchPrefix = `${prefix}audit-fix-${auditRepairRound}-`;
++          pendingUnits = mergeMalformedExceptionAuditRepairUnits(pendingUnits, retryResult.units, patchPrefix);
++
++          const reAuditOptions: AuditBlockCoverageOptions = {
++            blockAnchor: block.anchor,
++            blockText: block.text,
++            ...(block.kind !== undefined && { blockKind: block.kind }),
++            extractedStatements: pendingUnits.map(toExceptionRepairAuditStatement),
++            runConfig: optionsPerCall.runConfig,
++          };
++          pendingAudit = await auditor(reAuditOptions);
++          auditResults.push(pendingAudit);
++          if (!coverageAuditNeedsReview(pendingAudit)) {
++            cleared = true;
++            break;
++          }
++        }
++
++        if (!cleared) {
++          throw new Error(
++            auditRepairRoundsUsed === 0
++              ? `malformed exception repair: replacement for block "${anchor}" did not pass coverage audit (no actionable findings for focused repair)`
++              : `malformed exception repair: replacement for block "${anchor}" still did not pass coverage audit after ${auditRepairRoundsUsed} focused repair round(s)`
++          );
++        }
++        namespaced = pendingUnits;
++        auditRepairLogs.push({ blockAnchor: anchor, round, auditRepairRoundsUsed });
+       }
+ 
+       const identity = assignIdentity(namespaced, blocksByAnchor, sourceRevisionHash);
+@@ -1212,7 +1389,7 @@ export async function resolveMalformedExceptions(
+         remaining.map((finding) => `${finding.unitId}[${finding.missingFields.join(',')}]`).join('; ')
+     );
+   }
+-  return { units, repairLogs, auditResults };
++  return { units, repairLogs, auditRepairLogs, auditResults };
+ }
+ 
+ const answerSchema = z.strictObject({
+@@ -1720,6 +1897,11 @@ interface ExtractionRunOutcome {
+   readonly batchLogs: readonly BatchExtractionLog[];
+   readonly auditResults: readonly BlockCoverageAuditResult[];
+   readonly focusedRetryLogs: readonly FocusedRetryLog[];
++  /** Empty for a `--reuse-extraction` run: `resolveMalformedExceptions`
++   *  never runs fresh in that mode, and this signal isn't part of the
++   *  persisted extraction-artifact schema (unlike `focusedRetryLogs` above),
++   *  so a reused/frozen extraction has nothing of its own to report here. */
++  readonly malformedExceptionAuditRepairLogs: readonly MalformedExceptionAuditRepairLog[];
+   /** `null` only for `--dependency-graph=skip` — see ReadyDependencyGraph. */
+   readonly dependencyGraphArtifactPath: string | null;
+   readonly dependencyGraphArtifactContentDigest: string;
+@@ -1817,6 +1999,30 @@ export function resolveDependencyGraphSummaryFields(
+     : { dependencyGraphStage: 'REQUIRED' };
+ }
+ 
++/** run-summary.json's per-run signal for `resolveMalformedExceptions`'s
++ *  bounded audit-repair retry -- pulled out as its own pure function
++ *  (mirrors `resolveDependencyGraphSummaryFields` immediately above, same
++ *  reason: a test can assert on run-summary.json's exact shape for this
++ *  field without running the full pipeline). `blocksNeedingAuditRepair`
++ *  is 0 and `entries` is `[]` for the ordinary case (every replacement's
++ *  audit cleared on the first try, or no malformed EXCEPTION_RULE existed at
++ *  all) -- a block that never needed the safety net leaves no entry, exactly
++ *  like `resolveMalformedExceptions`'s own `auditRepairLogs` it reads from. */
++export function summarizeMalformedExceptionAuditRepairs(
++  runId: string,
++  auditRepairLogs: readonly MalformedExceptionAuditRepairLog[]
++): {
++  readonly runId: string;
++  readonly blocksNeedingAuditRepair: number;
++  readonly entries: readonly MalformedExceptionAuditRepairLog[];
++} {
++  return {
++    runId,
++    blocksNeedingAuditRepair: auditRepairLogs.length,
++    entries: auditRepairLogs,
++  };
++}
++
+ /** Exported for tests only: production call sites are both inside this
+  *  module. Letting a test pass its own `buildGraph` is what makes it
+  *  possible to prove the REQUIRED path still invokes the graph stage and the
+@@ -2462,9 +2668,16 @@ async function runOneExtractionRun(
+     blocksByAnchor,
+     canonical.sourceRevisionHash,
+     retryingExceptionRepairExtractor,
++    // Same wrapped, ledger/trace-instrumented focused-repair extractor the
++    // main path (extractKnowledgeUnitsWithCompletenessAudit) already uses
++    // above -- reusing it rather than a second wrapper keeps these calls
++    // billed under the same 'focused-repair' ledger purpose as every other
++    // focused repair in this run.
++    retryingFocusedRepairExtractor,
+     retryingAuditor,
+     { runConfig: exceptionRepairRunConfig, maxTokens: 8_000 },
+     MALFORMED_EXCEPTION_REPAIR_MAX_ROUNDS,
++    MALFORMED_EXCEPTION_AUDIT_REPAIR_MAX_ROUNDS,
+     rawCheckpoint
+   );
+   if (exceptionRepaired.repairLogs.length > 0) {
+@@ -2473,6 +2686,12 @@ async function runOneExtractionRun(
+         `across ${new Set(exceptionRepaired.repairLogs.map((log) => log.blockAnchor)).size} block(s)`
+     );
+   }
++  if (exceptionRepaired.auditRepairLogs.length > 0) {
++    console.log(
++      `malformed exception repair: ${exceptionRepaired.auditRepairLogs.length} replacement(s) needed bounded ` +
++        `focused audit-repair to clear coverage (max ${MALFORMED_EXCEPTION_AUDIT_REPAIR_MAX_ROUNDS} round(s) each)`
++    );
++  }
+ 
+   const snapshot = buildEvaluationSnapshot(
+     {
+@@ -2597,6 +2816,7 @@ async function runOneExtractionRun(
+     batchLogs: audited.batchLogs,
+     auditResults: finalAuditResults,
+     focusedRetryLogs: audited.focusedRetryLogs,
++    malformedExceptionAuditRepairLogs: exceptionRepaired.auditRepairLogs,
+     dependencyGraphArtifactPath: readyDependencyGraph.artifactPath,
+     dependencyGraphArtifactContentDigest: readyDependencyGraph.artifactContentDigest,
+     dependencyGraphFingerprint: readyDependencyGraph.graph.fingerprint,
+@@ -2708,6 +2928,10 @@ async function reuseExtractionRun(
+     batchLogs: artifact.batchLogs,
+     auditResults: artifact.auditResults,
+     focusedRetryLogs: artifact.focusedRetryLogs,
++    // See ExtractionRunOutcome's doc comment on this field: --reuse-extraction
++    // never runs resolveMalformedExceptions, and the frozen artifact carries
++    // no persisted record of its original run's audit-repair activity.
++    malformedExceptionAuditRepairLogs: [],
+     dependencyGraphArtifactPath: readyDependencyGraph.artifactPath,
+     dependencyGraphArtifactContentDigest: readyDependencyGraph.artifactContentDigest,
+     dependencyGraphFingerprint: readyDependencyGraph.graph.fingerprint,
+@@ -2742,6 +2966,26 @@ const MAX_TAINT_RETRY_ATTEMPTS = 6;
+ const TAINT_RESAMPLE_MAX_ROUNDS = 3;
+ const MALFORMED_EXCEPTION_REPAIR_MAX_ROUNDS = 2;
+ 
++/** `resolveMalformedExceptions`'s `auditRepairMaxRounds` -- the bounded
++ *  focused-repair-then-reaudit budget for a SINGLE block replacement's
++ *  post-replacement coverage audit (goal-shift continuation, 2026-08-11:
++ *  this used to be a single shot with zero repair budget at all, see the
++ *  function's doc comment for the aurora-v14/block-b4 failure this fixes).
++ *  Deliberately equal to, never greater than, FOCUSED_REPAIR_MAX_ROUNDS
++ *  (imported from audited-extraction.ts): it is the SAME bounded-repair
++ *  primitive (focused repair on the actionable findings, then re-audit)
++ *  applied to a second entry point, not an independently-tuned budget. No
++ *  evidence favors fewer rounds here specifically -- the single observed
++ *  failure (2 co-occurring UNREPRESENTED_CLAUSE findings, on a re-audit that
++ *  had never been given ANY repair attempt) gives no signal about where
++ *  between 1 and 3 rounds this call shape actually converges, and the main
++ *  path's own empirically-set ceiling for the identical mechanism is the
++ *  least arbitrary number available absent that data. Must never exceed
++ *  MALFORMED_EXCEPTION_REPAIR_MAX_ROUNDS's sibling budget upward either --
++ *  see `malformedExceptionAuditRepairStructuredCallCeiling` below for how
++ *  this multiplies into the pre-run cost ceiling. */
++const MALFORMED_EXCEPTION_AUDIT_REPAIR_MAX_ROUNDS = 3;
++
+ /** Оборачивает `runOneExtractionRun` bounded-ретраем СПЕЦИФИЧНО на
+  *  `OracleTaintError` — короткие формулировки в узком юридическом домене
+  *  документа иногда случайно совпадают у независимо сгенерированного
+@@ -2795,6 +3039,28 @@ export function focusedRepairStructuredCallCeiling(
+   return blockCount * FOCUSED_REPAIR_MAX_ROUNDS * 2 * structuredRetryCeiling;
+ }
+ 
++/** Worst case for `resolveMalformedExceptions`'s bounded audit-repair retry:
++ *  EVERY outer malformed-exception round (`MALFORMED_EXCEPTION_REPAIR_MAX_ROUNDS`),
++ *  for EVERY block, could need the FULL inner budget
++ *  (`MALFORMED_EXCEPTION_AUDIT_REPAIR_MAX_ROUNDS`) of (focused repair + full
++ *  re-audit) pairs to clear. Pulled out as its own named, exported function
++ *  --mirroring `focusedRepairStructuredCallCeiling` immediately above, for
++ *  the identical reason -- so this term cannot silently drift out of sync
++ *  with `printPreRunCeiling`'s formula the way Codex review finding 4
++ *  (2026-08-10) found `TAINT_RESAMPLE_MAX_ROUNDS`'s multiplier had. */
++export function malformedExceptionAuditRepairStructuredCallCeiling(
++  blockCount: number,
++  structuredRetryCeiling: number
++): number {
++  return (
++    blockCount *
++    MALFORMED_EXCEPTION_REPAIR_MAX_ROUNDS *
++    MALFORMED_EXCEPTION_AUDIT_REPAIR_MAX_ROUNDS *
++    2 *
++    structuredRetryCeiling
++  );
++}
++
+ function printPreRunCeiling(blockCount: number, args: CliArgs, questionCount: number): void {
+   const STRUCTURED_RETRY_CEILING = 6; // caller-level schema/transport retries
+   const RAW_CHAT_ATTEMPTS_PER_STRUCTURED_CALL = 4; // primary + MAX_RETRIES=3; runner configs disable fallback
+@@ -2810,6 +3076,9 @@ function printPreRunCeiling(blockCount: number, args: CliArgs, questionCount: nu
+     blockCount * TAINT_RESAMPLE_MAX_ROUNDS * 2 * STRUCTURED_RETRY_CEILING +
+     // malformed EXCEPTION_RULE replacement + coverage audit, bounded by round
+     blockCount * MALFORMED_EXCEPTION_REPAIR_MAX_ROUNDS * 2 * STRUCTURED_RETRY_CEILING +
++    // each replacement's own post-replacement audit may need its own bounded
++    // focused-repair-then-reaudit budget (resolveMalformedExceptions)
++    malformedExceptionAuditRepairStructuredCallCeiling(blockCount, STRUCTURED_RETRY_CEILING) +
+     // global dependency proposal + up to two repair/re-audit rounds
+     dependencyGraphStructuredCallCeiling() * DEPENDENCY_GRAPH_STAGE_MAX_ATTEMPTS;
+   const extractionRawCalls =
+@@ -3011,6 +3280,9 @@ async function main() {
+           HOLD: r.results.filter((x) => x.actualDisposition === 'HOLD').length,
+           ERROR: r.results.filter((x) => x.actualDisposition === 'ERROR').length,
+         })),
++        malformedExceptionAuditRepairsByRun: runs.map((r) =>
++          summarizeMalformedExceptionAuditRepairs(r.runId, r.malformedExceptionAuditRepairLogs)
++        ),
+         cost: {
+           totalUsd: ledger.totalUsd(),
+           totalAttemptCount: ledger.totalAttemptCount(),
+diff --git a/src/lib/knowledge/__tests__/audited-extraction.test.ts b/src/lib/knowledge/__tests__/audited-extraction.test.ts
+index b7f05a7..a057467 100644
+--- a/src/lib/knowledge/__tests__/audited-extraction.test.ts
++++ b/src/lib/knowledge/__tests__/audited-extraction.test.ts
+@@ -233,6 +233,122 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
+     expect(repaired.triggerCondition).toEqual({ all: [{ fact: 'privacyContext', equals: 'PUBLIC' }] });
+   });
+ 
++  // translation-kgh follow-up (goal-shift continuation, 2026-08-11):
++  // triggerHandedToNewChild (tested above) only covers "the trigger moved to
++  // a sibling child." It does NOT cover "the repairer deliberately deleted a
++  // trigger that should never have existed," which is the LIVE shape
++  // observed in scratchpad/aurora-v12 block b5 and scratchpad/aurora-v13
++  // block b12: the auditor flagged a fabricated resourceAvailability
++  // trigger on an unconditional prohibition, repair correctly answered with
++  // triggerCondition:null and no new child, and the OLD preserveTrigger
++  // re-injected the fabricated value -- so the re-audit saw the identical
++  // defect again, verbatim, and both runs exhausted their repair rounds and
++  // aborted on this exact mechanism.
++  it('b5/b12 shape: a finding naming the existing triggerCondition lets a deliberate null win with no new child', async () => {
++    const text = 'Регулярное почёсывание через ткань не считается надлежащим способом.';
++    const extractor = async () => ({
++      units: [unit({
++        kind: 'PROCEDURE_STEP',
++        extractionRef: 'u1',
++        statement: text,
++        triggerCondition: { all: [{ fact: 'resourceAvailability', equals: 'UNAVAILABLE' }] },
++        parentExtractionRef: null,
++        sourceSpan: { anchor: 'b5', quote: text },
++      })],
++      structuredResult: {} as never,
++    });
++    // Correct repair response: nulls the fabricated trigger, no sibling/
++    // child unit created to receive it -- the OLD heuristic's only escape
++    // valve (triggerHandedToNewChild) does not apply here.
++    const repairExtractor = async () => ({
++      units: [unit({
++        kind: 'PROCEDURE_STEP',
++        extractionRef: 'b0-u1',
++        statement: text,
++        triggerCondition: null,
++        parentExtractionRef: null,
++        sourceSpan: { anchor: 'b5', quote: text },
++      })],
++      structuredResult: {} as never,
++    });
++    let audits = 0;
++    const auditor = async (): Promise<BlockCoverageAuditResult> => ++audits === 1
++      ? {
++          blockAnchor: 'b5',
++          findings: [{
++            verdict: 'UNREPRESENTED_CLAUSE',
++            quote: text,
++            explanation: 'Unit u1 приписывает этому утверждению triggerCondition resourceAvailability=UNAVAILABLE, но в исходном тексте нет упоминания о доступности ресурсов -- добавленный triggerCondition является выдуманным; фраза должна быть безусловным правилом.',
++            quoteVerified: true,
++          }],
++          hasGap: true,
++        }
++      : { blockAnchor: 'b5', findings: [{ verdict: 'COVERED', quote: '', explanation: 'clean', quoteVerified: false }], hasGap: false };
++
++    const result = await extractKnowledgeUnitsWithCompletenessAudit(
++      [block('b5', text)], 5, { runConfig: {} as never }, {} as never, { extractor, repairExtractor, auditor }
++    );
++
++    const repaired = result.units.find((item) => item.extractionRef === 'b0-u1')!;
++    expect(repaired.triggerCondition).toBeNull();
++    expect(result.auditResults[0].findings[0].verdict).toBe('COVERED');
++    expect(audits).toBe(2);
++  });
++
++  // Companion proof that the new veto cannot be spoofed: the finding DOES
++  // overlap the existing unit's evidence (same quote, same block) -- so
++  // `actionableFindingOverlapsExisting` (the broad signal already used a
++  // few lines below for mayClearMalformedExceptionParent) is true -- but its
++  // explanation objects to `kind`, never naming triggerCondition or any of
++  // the five closed-catalog facts. The populated trigger must still be
++  // protected, exactly like the pre-existing "repair forgot to restate it"
++  // case this whole guard exists for.
++  it('preserveTrigger is not spoofed by an overlapping finding that objects to a different field', async () => {
++    const text = 'Правило с корректным триггером и спорным kind.';
++    const extractor = async () => ({
++      units: [unit({
++        kind: 'EXCEPTION_RULE',
++        extractionRef: 'u1',
++        statement: text,
++        triggerCondition: { all: [{ fact: 'privacyContext', equals: 'PUBLIC' }] },
++        parentExtractionRef: null,
++        sourceSpan: { anchor: 'b1', quote: text },
++      })],
++      structuredResult: {} as never,
++    });
++    const repairExtractor = async () => ({
++      units: [unit({
++        kind: 'EXCEPTION_RULE',
++        extractionRef: 'b0-u1',
++        statement: text,
++        triggerCondition: null,
++        parentExtractionRef: null,
++        sourceSpan: { anchor: 'b1', quote: text },
++      })],
++      structuredResult: {} as never,
++    });
++    let audits = 0;
++    const auditor = async (): Promise<BlockCoverageAuditResult> => ++audits === 1
++      ? {
++          blockAnchor: 'b1',
++          findings: [{
++            verdict: 'UNREPRESENTED_CLAUSE',
++            quote: text,
++            explanation: 'kind EXCEPTION_RULE спорен: правило не изменяет и не отменяет базовое, это скорее самостоятельное уточнение.',
++            quoteVerified: true,
++          }],
++          hasGap: true,
++        }
++      : { blockAnchor: 'b1', findings: [{ verdict: 'COVERED', quote: '', explanation: 'clean', quoteVerified: false }], hasGap: false };
++
++    const result = await extractKnowledgeUnitsWithCompletenessAudit(
++      [block('b1', text)], 5, { runConfig: {} as never }, {} as never, { extractor, repairExtractor, auditor }
++    );
++
++    const repaired = result.units.find((item) => item.extractionRef === 'b0-u1')!;
++    expect(repaired.triggerCondition).toEqual({ all: [{ fact: 'privacyContext', equals: 'PUBLIC' }] });
++  });
++
+   it('quality-v2 b13: разделяет широкую составную evidence-цитату на три доказуемые clause spans', () => {
+     const quote = 'Помощник обязан надеть чистые одноразовые перчатки, соблюдать ограничения по силе и времени и немедленно остановиться по первой просьбе.';
+     const refined = refineCoextensiveEvidence([
+diff --git a/src/lib/knowledge/audited-extraction.ts b/src/lib/knowledge/audited-extraction.ts
+index 4462927..764cb8a 100644
+--- a/src/lib/knowledge/audited-extraction.ts
++++ b/src/lib/knowledge/audited-extraction.ts
+@@ -32,6 +32,8 @@ import {
+ import {
+   auditBlockCoverage,
+   coverageAuditNeedsReview,
++  coverageFindingIsQualityOnly,
++  deriveCoverageAuditAggregates,
+   type AuditBlockCoverageOptions,
+   type BlockCoverageAuditResult,
+   type CoverageFinding,
+@@ -77,6 +79,23 @@ export interface AuditedExtractionDeps {
+ export type CoverageAuditStage = 'INITIAL_AUDIT' | 'FINAL_AUDIT';
+ export const FOCUSED_REPAIR_MAX_ROUNDS = 3;
+ 
++/** The auditor's own closed vocabulary for talking about triggerCondition
++ *  (extraction-coverage-auditor.ts's SYSTEM_PROMPT): the field name itself
++ *  plus the five closed-catalog fact names. Used below to recognize a
++ *  finding that specifically objects to a unit's triggerCondition, as
++ *  opposed to any other field -- see `findingObjectsToExistingTrigger`. Not
++ *  open-ended keyword/NLP guessing: every real trigger objection observed
++ *  in scratchpad/aurora-v12 and aurora-v13 (blocks b5, b12) names one of
++ *  these verbatim, because the prompt requires the auditor to. */
++const TRIGGER_OBJECTION_MARKERS = [
++  'triggerCondition',
++  'privacyContext',
++  'consentStatus',
++  'reachability',
++  'helperPresent',
++  'resourceAvailability',
++] as const;
++
+ export interface AuditedExtractionCheckpoint {
+   loadAudit(stage: CoverageAuditStage, options: AuditBlockCoverageOptions): BlockCoverageAuditResult | undefined;
+   saveAudit(stage: CoverageAuditStage, options: AuditBlockCoverageOptions, result: BlockCoverageAuditResult): void;
+@@ -192,19 +211,36 @@ function toAuditStatement(unit: ExtractedKnowledgeUnit) {
+ 
+ /** Turns only evidence-grounded ambiguity about an objectively malformed
+  * exception into an actionable structural gap. The provider verdict remains
+- * journaled verbatim; this is deterministic orchestration policy. */
++ * journaled verbatim; this is deterministic orchestration policy.
++ *
++ * ALSO the one place that (re)classifies every finding as blocking vs
++ * quality-only (`isQualityFinding`, `coverageFindingIsQualityOnly`) and
++ * re-derives `hasGap`/`unresolved`/`qualityFindings`
++ * (`deriveCoverageAuditAggregates`) from `block`'s CURRENT units — not
++ * trusted from whatever `result.findings[].isQualityFinding` already said.
++ * That recompute is what makes the split work uniformly for BOTH call sites
++ * in `extractKnowledgeUnitsWithCompletenessAudit` below (`rawAudit` and
++ * `rawFinalAudit`), which is both a fresh `auditor()` response (already
++ * classified once, redundantly but harmlessly, by
++ * `interpretCoverageAuditResponse`) AND a checkpoint-replayed audit
++ * (`AuditedExtractionCheckpoint.loadAudit`/`loadTaintAudit`) — the
++ * persisted checkpoint shape (`raw-extraction-checkpoint.ts`'s
++ * `semanticAuditResultSchema`) never carries `isQualityFinding` at all, so a
++ * replayed result would otherwise stay silently unclassified (= always
++ * blocking, the safe but not the intended direction) until this function
++ * runs. */
+ export function normalizeMalformedExceptionAmbiguities(
+   result: BlockCoverageAuditResult,
+   block: SourceBlock,
+   units: readonly ExtractedKnowledgeUnit[]
+ ): BlockCoverageAuditResult {
+   if (result.blockAnchor !== block.anchor) return result;
+-  const malformed = units.filter((unit) =>
++  const blockUnits = units.filter((unit) => unit.sourceSpan.anchor === block.anchor);
++  const malformed = blockUnits.filter((unit) =>
+     unit.kind === 'EXCEPTION_RULE' &&
+-    unit.sourceSpan.anchor === block.anchor &&
+     (unit.parentExtractionRef === null || unit.triggerCondition === null)
+   );
+-  const findings = result.findings.map((finding) => {
++  const escalated = result.findings.map((finding) => {
+     if (
+       finding.verdict !== 'AMBIGUOUS' ||
+       finding.quote.length === 0 ||
+@@ -215,14 +251,25 @@ export function normalizeMalformedExceptionAmbiguities(
+     ) return finding;
+     return { ...finding, verdict: 'UNREPRESENTED_CLAUSE' as const };
+   });
+-  return {
+-    ...result,
+-    findings,
+-    hasGap: findings.some((finding) =>
+-      finding.verdict === 'POSSIBLE_OMISSION' || finding.verdict === 'UNREPRESENTED_CLAUSE'
+-    ),
+-    unresolved: findings.some((finding) => finding.verdict === 'AMBIGUOUS'),
+-  };
++  // Malformed-exception-aware projection, not `toAuditStatement`'s full
++  // shape: `coverageFindingIsQualityOnly` must exclude the SAME malformed
++  // units the escalation above just acted on, or a clause whose only
++  // "representing" unit is that same broken exception could be waved
++  // through as quality by evidence overlap alone -- exactly undoing the
++  // escalation's intent for every verdict the escalation itself does not
++  // reach (POSSIBLE_OMISSION/UNREPRESENTED_CLAUSE start here already, never
++  // routed through the AMBIGUOUS-only escalation above).
++  const blockStatements = blockUnits.map((unit) => ({
++    quote: unit.sourceSpan.quote,
++    kind: unit.kind,
++    parentExtractionRef: unit.parentExtractionRef,
++    triggerCondition: unit.triggerCondition,
++  }));
++  const findings = escalated.map((finding) => ({
++    ...finding,
++    isQualityFinding: coverageFindingIsQualityOnly(finding, block.text, blockStatements),
++  }));
++  return { ...result, findings, ...deriveCoverageAuditAggregates(findings) };
+ }
+ 
+ /** Canonicalize a common provider synonym without touching the paid raw
+@@ -339,18 +386,22 @@ function isActionableCoverageFinding(finding: CoverageFinding): boolean {
+   );
+ }
+ 
+-/** True iff at least one finding is AMBIGUOUS. Derived directly from
+- * `findings`, deliberately never from the optional `unresolved` flag on
+- * `BlockCoverageAuditResult`: hand-built fixtures for the `auditor`
+- * dependency (this file's own tests, and any other caller's) predate
+- * `unresolved` and may leave it `undefined` even when an AMBIGUOUS finding
+- * is present -- the same reasoning `coverageAuditNeedsReview` documents for
+- * itself in extraction-coverage-auditor.ts applies here. Deliberately does
+- * NOT read or set `hasGap`/`unresolved` themselves: those two fields keep
+- * exactly their existing meaning for every other caller (extraction-artifact
+- * persistence, raw-extraction-checkpoint replay, etc.). */
++/** True iff at least one BLOCKING finding is AMBIGUOUS -- a quality-only
++ * AMBIGUOUS (`isQualityFinding`, set by `normalizeMalformedExceptionAmbiguities`
++ * before this is ever called on a block's findings) does not count: it is
++ * not a confirmed gap, and per the coverage-bar split it must not keep a
++ * clean block out of publication or consume a repair round either. Derived
++ * directly from `findings`, deliberately never from the optional
++ * `unresolved` flag on `BlockCoverageAuditResult`: hand-built fixtures for
++ * the `auditor` dependency (this file's own tests, and any other caller's)
++ * predate `unresolved` and may leave it `undefined` even when an AMBIGUOUS
++ * finding is present -- the same reasoning `coverageAuditNeedsReview`
++ * documents for itself in extraction-coverage-auditor.ts applies here.
++ * Deliberately does NOT read or set `hasGap`/`unresolved` themselves: those
++ * two fields keep exactly their existing meaning for every other caller
++ * (extraction-artifact persistence, raw-extraction-checkpoint replay, etc.). */
+ function hasUnresolvedAmbiguity(findings: readonly CoverageFinding[]): boolean {
+-  return findings.some((finding) => finding.verdict === 'AMBIGUOUS');
++  return findings.some((finding) => !finding.isQualityFinding && finding.verdict === 'AMBIGUOUS');
+ }
+ 
+ export async function extractKnowledgeUnitsWithCompletenessAudit(
+@@ -516,12 +567,12 @@ export async function extractKnowledgeUnitsWithCompletenessAudit(
+           other.triggerCondition !== null &&
+           !currentUnitsForBlock.some((unit) => unit.extractionRef === other.extractionRef)
+         );
+-        const preserveTrigger =
+-          candidate.triggerCondition === null &&
+-          existing.triggerCondition !== null &&
+-          !triggerHandedToNewChild;
+-        const preserveNumeric = candidate.numericConstraint === null && existing.numericConstraint !== null;
+-        const actionableFindingOverlapsExisting = pendingAudit.findings.some((finding) =>
++        // Findings the repair round was actually shown that target THIS
++        // existing unit's evidence -- computed once and shared by two
++        // independent escape valves below (the trigger-objection veto here,
++        // and mayClearMalformedExceptionParent further down) so neither can
++        // silently diverge from what the repairer was actually asked to fix.
++        const findingsOverlappingExisting = pendingAudit.findings.filter((finding) =>
+           (finding.verdict === 'POSSIBLE_OMISSION' || finding.verdict === 'UNREPRESENTED_CLAUSE') &&
+           finding.quoteVerified && finding.quote.length > 0 &&
+           [existing.sourceSpan, ...Object.values(existing.evidenceByField)].some((evidence) =>
+@@ -529,6 +580,40 @@ export async function extractKnowledgeUnitsWithCompletenessAudit(
+             quoteSpansOverlap(block.text, finding.quote, evidence.quote)
+           )
+         );
++        const actionableFindingOverlapsExisting = findingsOverlappingExisting.length > 0;
++        // translation-kgh follow-up (goal-shift continuation, 2026-08-11):
++        // triggerHandedToNewChild alone covers "the trigger moved to a
++        // sibling child unit" but not "the repairer deliberately deleted a
++        // trigger that should never have existed." Observed live, block b5
++        // (scratchpad/aurora-v12) and block b12 (scratchpad/aurora-v13): the
++        // auditor flagged the existing unit's triggerCondition as fabricated
++        // (no textual basis for resourceAvailability=UNAVAILABLE on an
++        // unconditional rule), repair correctly returned
++        // triggerCondition:null with no new child to hand it to, and
++        // preserveTrigger re-injected the fabricated value -- so the next
++        // audit saw the identical defect again, verbatim, and rounds
++        // exhausted. A `null` candidate answering a finding that names the
++        // trigger itself is a deliberate correction, not an omission, and
++        // must win.
++        //
++        // Two conditions, not one: `actionableFindingOverlapsExisting` alone
++        // (used below for mayClearMalformedExceptionParent) already fires
++        // for a finding about kind/parent/numeric/anything else on this SAME
++        // unit -- reusing it bare here would let an unrelated finding that
++        // happens to share the same evidence span spoof a trigger wipe.
++        // Requiring the explanation to name the field or one of the five
++        // closed-catalog facts (`TRIGGER_OBJECTION_MARKERS`) ties the veto to
++        // the auditor's own fixed vocabulary, not to open-ended keyword/NLP
++        // guessing.
++        const findingObjectsToExistingTrigger = findingsOverlappingExisting.some((finding) =>
++          TRIGGER_OBJECTION_MARKERS.some((marker) => finding.explanation.includes(marker))
++        );
++        const preserveTrigger =
++          candidate.triggerCondition === null &&
++          existing.triggerCondition !== null &&
++          !triggerHandedToNewChild &&
++          !findingObjectsToExistingTrigger;
++        const preserveNumeric = candidate.numericConstraint === null && existing.numericConstraint !== null;
+         const mayClearMalformedExceptionParent =
+           existing.kind === 'EXCEPTION_RULE' &&
+           (existing.parentExtractionRef === null || existing.triggerCondition === null) &&
+diff --git a/src/lib/knowledge/extraction-coverage-auditor.ts b/src/lib/knowledge/extraction-coverage-auditor.ts
+index 6677da5..deea2d5 100644
+--- a/src/lib/knowledge/extraction-coverage-auditor.ts
++++ b/src/lib/knowledge/extraction-coverage-auditor.ts
+@@ -18,6 +18,7 @@ import { structured } from '@/lib/ai/structured-output';
+ import { z } from 'zod';
+ import type { CanonicalBlockKind } from './docx-canonical-blocks';
+ import type { ExtractedKnowledgeUnit } from './applicability/extraction';
++import { quoteSpansOverlap } from './quote-locator';
+ 
+ export const COVERAGE_VERDICTS = ['COVERED', 'POSSIBLE_OMISSION', 'UNREPRESENTED_CLAUSE', 'AMBIGUOUS'] as const;
+ export type CoverageVerdict = (typeof COVERAGE_VERDICTS)[number];
+@@ -48,6 +49,22 @@ export interface CoverageFinding extends RawCoverageFinding {
+    *  same way a grounded quote is. Same discipline as `resolveEvidenceOffsets`
+    *  elsewhere in this codebase: never trust a quote without checking it. */
+   readonly quoteVerified: boolean;
++  /** True iff this finding's quoted clause IS represented by some extracted
++   *  unit's grounded evidence — the auditor's objection is about HOW that
++   *  unit models the clause (kind, parentExtractionRef, triggerCondition
++   *  catalog membership/shape, numericConstraint.unit naming), not WHETHER
++   *  the clause has any unit at all. See `coverageFindingIsQualityOnly` for
++   *  the exact rule and `qualityFindings` on `BlockCoverageAuditResult` for
++   *  where this ends up. Always false for COVERED (nothing is disputed) and
++   *  for any finding whose quote does not verify against the block text —
++   *  an ungrounded quote proves nothing, so it is never trusted enough to
++   *  downgrade a finding from blocking to quality-only. Optional for the
++   *  same reason as `unresolved` below: hand-built fixtures for the
++   *  `auditor` dependency (audited-extraction.ts, its tests) predate this
++   *  field, and its absence must read as "blocking" (today's behavior), not
++   *  "quality" — `!finding.isQualityFinding` is the only safe read, exactly
++   *  parallel to how `coverageAuditNeedsReview` reads `unresolved`. */
++  readonly isQualityFinding?: boolean;
+ }
+ 
+ export interface BlockCoverageAuditResult {
+@@ -75,6 +92,23 @@ export interface BlockCoverageAuditResult {
+    *  publication must ask `coverageAuditNeedsReview()`, which derives the
+    *  policy from `findings` and therefore cannot read `undefined` as clean. */
+   readonly unresolved?: boolean;
++  /** Non-blocking subset of `findings`: verdict is not COVERED, but the
++   *  quoted clause IS represented by some extracted unit's grounded
++   *  evidence (`isQualityFinding` on each). The auditor's objection here is
++   *  about classification — kind, parentExtractionRef/parent relationships,
++   *  triggerCondition catalog membership or shape, numericConstraint.unit
++   *  naming — never about missing content. Recorded for the run summary/
++   *  operator (verdict, quote, and `explanation` preserved verbatim from the
++   *  auditor's own response — nothing silently dropped), but deliberately
++   *  EXCLUDED from `hasGap`/`unresolved`/`coverageAuditNeedsReview`: content
++   *  is not lost, so a quality-only block must not block publication or
++   *  consume a focused-repair round. Always a subset of `findings`, never a
++   *  separate source of truth — see `deriveCoverageAuditAggregates`, the
++   *  one place that derives all three of `hasGap`/`unresolved`/
++   *  `qualityFindings` from `findings` so they cannot drift apart. Optional
++   *  for the same reason as `unresolved` above: hand-built fixtures for the
++   *  `auditor` dependency predate this field. */
++  readonly qualityFindings?: readonly CoverageFinding[];
+   /** Attempts made by the underlying `structured()` call — source for the
+    *  cost ledger (Task 37). Optional: hand-built test fixtures for the
+    *  `auditor` dependency (audited-extraction.ts) never made a real call. */
+@@ -148,43 +182,197 @@ export function buildCoverageAuditPromptMessages(
+   ];
+ }
+ 
++/** A unit whose evidence cannot ground a quality-only downgrade: an
++ *  EXCEPTION_RULE missing its parent and/or its trigger can never actually
++ *  fire as an exception, so its "representation" of a clause is nominal,
++ *  not operationally real. Same population `audited-extraction.ts`'s
++ *  `normalizeMalformedExceptionAmbiguities` already escalates for the
++ *  narrower AMBIGUOUS case — this is the general-classifier counterpart,
++ *  applied for every verdict, so a finding about a malformed exception's
++ *  clause cannot be waved through as "quality" merely because SOME unit's
++ *  quote happens to overlap it. `kind`/`parentExtractionRef`/
++ *  `triggerCondition` absent (`undefined`) reads as "not provably
++ *  malformed" — real extracted units always populate these three fields;
++ *  `undefined` only occurs in hand-built `ExtractedStatement` fixtures that
++ *  never exercise this path (see `extraction-coverage-auditor.test.ts`,
++ *  none of which pass a 4th argument to `interpretCoverageAuditResponse`). */
++function isMalformedExceptionStatement(
++  statement: Pick<ExtractedStatement, 'kind' | 'parentExtractionRef' | 'triggerCondition'>
++): boolean {
++  return (
++    statement.kind === 'EXCEPTION_RULE' &&
++    (statement.parentExtractionRef === null || statement.triggerCondition === null)
++  );
++}
++
++/**
++ * The auditor's own closed vocabulary for describing a STRUCTURAL/
++ * classification dispute, as opposed to "nothing represents this at all":
++ * the five `kind` enum values (`applicability/kinds.ts`), the field name
++ * itself, the other two disputed field names, and the five closed
++ * trigger-catalog facts (this file's own SYSTEM_PROMPT). Required by
++ * `coverageFindingIsQualityOnly` alongside quote-overlap — overlap alone
++ * proves a unit's evidence covers the same text span, not that the
++ * auditor's OBJECTION is to that unit's structured fields rather than to
++ * the clause's presence altogether. A genuine "nothing represents this"
++ * explanation has no existing unit's kind/parent/trigger/numeric to
++ * discuss and so cannot structurally name any of these — confirmed against
++ * every real genuine-gap explanation in scratchpad/aurora-v13 ("не
++ * извлечено ни одного unit'а", "не отражён ни в одном unit" — zero
++ * markers) — while every real classification dispute observed (blocks b5,
++ * b8, b12, b13 across aurora-v12/v13/v14) names at least one verbatim,
++ * because the auditor is instructed to be structurally precise (see this
++ * file's SYSTEM_PROMPT). A fixed, short, code-identifier vocabulary, not
++ * open-ended keyword/NLP guessing.
++ */
++const STRUCTURAL_DISPUTE_MARKERS = [
++  'EXCEPTION_RULE',
++  'PROCEDURE_STEP',
++  'TERM_DEFINITION',
++  'DELIVERY_RULE',
++  'PRICE_RULE',
++  'kind',
++  'parentExtractionRef',
++  'triggerCondition',
++  'numericConstraint',
++  'privacyContext',
++  'consentStatus',
++  'reachability',
++  'helperPresent',
++  'resourceAvailability',
++] as const;
++
++/**
++ * The crux of the blocking/quality split. A finding is quality-only —
++ * disputes classification but does not contest that the clause exists in
++ * some unit's evidence — iff ALL of:
++ *
++ * 1. verdict is not COVERED (nothing to downgrade — COVERED already means
++ *    "no dispute");
++ * 2. `quoteVerified` — the finding's own quote is a literal substring of
++ *    the block text. An ungrounded quote proves nothing about anything, so
++ *    it can never justify treating the clause as represented (same
++ *    discipline `normalizeMalformedExceptionAmbiguities` already applies
++ *    before trusting a quote for its own, narrower purpose);
++ * 3. `explanation` names at least one entry of `STRUCTURAL_DISPUTE_MARKERS`
++ *    — the auditor's objection is provably about a structured field, not
++ *    generic "this is missing" prose;
++ * 4. that quote's span overlaps (`quoteSpansOverlap`) at least one
++ *    `extractedStatements` entry's own quote, EXCLUDING any entry that is
++ *    itself a malformed exception (`isMalformedExceptionStatement`) — i.e.
++ *    some unit's grounded evidence actually covers this text, and that
++ *    unit is not itself so structurally broken that its "coverage" is
++ *    nominal.
++ *
++ * Deliberately verdict-blind beyond the COVERED check: real traces
++ * (scratchpad/aurora-v13 block b12, scratchpad/aurora-v14 block b8) show
++ * the auditor labeling a clause UNREPRESENTED_CLAUSE — its strongest "this
++ * is missing" verdict — for content that already has an exact-quote unit,
++ * objecting only to that unit's `triggerCondition`/`numericConstraint.unit`
++ * value. Trusting the verdict label alone would keep blocking exactly the
++ * population this feature exists to stop blocking; trusting evidence
++ * overlap PLUS an on-topic explanation is the reliable signal (see
++ * `interpretCoverageAuditResponse`'s module doc / the caller's task brief
++ * for the fuller justification).
++ */
++export function coverageFindingIsQualityOnly(
++  finding: Pick<RawCoverageFinding, 'verdict' | 'quote' | 'explanation'> & { readonly quoteVerified: boolean },
++  blockText: string,
++  extractedStatements: readonly Pick<ExtractedStatement, 'quote' | 'kind' | 'parentExtractionRef' | 'triggerCondition'>[]
++): boolean {
++  if (finding.verdict === 'COVERED' || !finding.quoteVerified || finding.quote.length === 0) return false;
++  if (!STRUCTURAL_DISPUTE_MARKERS.some((marker) => finding.explanation.includes(marker))) return false;
++  return extractedStatements.some(
++    (statement) =>
++      !isMalformedExceptionStatement(statement) &&
++      quoteSpansOverlap(blockText, finding.quote, statement.quote)
++  );
++}
++
++/**
++ * The ONE place `hasGap`/`unresolved`/`qualityFindings` are derived from
++ * `findings` — used by both `interpretCoverageAuditResponse` (the live call
++ * path) and `audited-extraction.ts`'s post-audit normalization (which also
++ * covers checkpoint-replayed results, whose `findings` never carried
++ * `isQualityFinding` at all until that step recomputes it) — so the two
++ * call sites cannot silently derive different answers from the same
++ * findings.
++ *
++ * Blocking population = findings NOT flagged `isQualityFinding` (absent
++ * reads as blocking, same optionality reasoning as the fields themselves).
++ * `hasGap`/`unresolved` are computed over exactly that population, so a
++ * quality-only AMBIGUOUS/POSSIBLE_OMISSION/UNREPRESENTED_CLAUSE finding
++ * contributes to neither — it cannot trigger a repair round or abort a run.
++ * The empty-findings-list-is-unresolved rule is unchanged and still reads
++ * the RAW list: a silent, empty response is a protocol anomaly, not a
++ * matter of classification.
++ */
++export function deriveCoverageAuditAggregates(
++  findings: readonly CoverageFinding[]
++): Pick<BlockCoverageAuditResult, 'hasGap' | 'unresolved' | 'qualityFindings'> {
++  const blocking = findings.filter((f) => !f.isQualityFinding);
++  return {
++    hasGap: blocking.some((f) => f.verdict === 'POSSIBLE_OMISSION' || f.verdict === 'UNREPRESENTED_CLAUSE'),
++    unresolved: findings.length === 0 || blocking.some((f) => f.verdict === 'AMBIGUOUS'),
++    qualityFindings: findings.filter((f) => f.isQualityFinding),
++  };
++}
++
+ /**
+  * The ONE definition of "this block came back clean" — a block is clean iff
+- * the auditor produced at least one finding and EVERY finding is COVERED.
+- * Anything else (a confirmed gap, an unresolved AMBIGUOUS, or no findings at
+- * all) means the audit did not clear the block and a caller may not publish
+- * it as covered without acting.
++ * the auditor produced at least one finding and every BLOCKING finding is
++ * COVERED (a quality-only finding does not count against this — see
++ * `deriveCoverageAuditAggregates`). Anything else (a confirmed blocking
++ * gap, an unresolved blocking AMBIGUOUS, or no findings at all) means the
++ * audit did not clear the block and a caller may not publish it as covered
++ * without acting.
+  *
+  * Derived from `findings` rather than read from a flag on purpose: it is
+  * therefore correct for any result object, including the hand-built auditor
+  * fixtures in audited-extraction.test.ts and results replayed from a stored
+  * `coverage-audit.json` artifact — neither of which carries `unresolved`.
+- * By construction `coverageAuditNeedsReview === hasGap || unresolved`.
++ * By construction `coverageAuditNeedsReview === hasGap || unresolved`,
++ * unchanged: substituting the blocking-only formula below is algebraically
++ * identical to the old `!(findings.length > 0 && findings.every(COVERED))`
++ * whenever no finding is flagged `isQualityFinding` (the case for every
++ * pre-existing caller and fixture) — this only widens what counts as
++ * "effectively COVERED" to include quality-only findings, it does not
++ * change the verdict-by-verdict rule for the blocking population.
+  */
+ export function coverageAuditNeedsReview(result: Pick<BlockCoverageAuditResult, 'findings'>): boolean {
+-  return !(result.findings.length > 0 && result.findings.every((f) => f.verdict === 'COVERED'));
++  if (result.findings.length === 0) return true;
++  return result.findings.some((f) => !f.isQualityFinding && f.verdict !== 'COVERED');
+ }
+ 
+-/** Pure — no network. Verifies each finding's quote against the real block
+- *  text and aggregates `hasGap`/`unresolved`. */
++/**
++ * Pure — no network. Verifies each finding's quote against the real block
++ * text, classifies each as blocking or quality-only
++ * (`coverageFindingIsQualityOnly`) given `extractedStatements` — the SAME
++ * units the auditor was shown when it produced these findings — and
++ * aggregates `hasGap`/`unresolved`/`qualityFindings` (`deriveCoverageAuditAggregates`).
++ *
++ * `extractedStatements` defaults to `[]`: every pre-existing caller (this
++ * module's own tests, `extraction-artifact.ts`'s contract-digest probe)
++ * calls this with 3 arguments and must keep working byte-for-byte —  with
++ * no statements to check against, `coverageFindingIsQualityOnly` can never
++ * find an overlap, so every finding stays blocking, exactly today's
++ * behavior. Only `auditBlockCoverage` below passes real statements.
++ */
+ export function interpretCoverageAuditResponse(
+   blockAnchor: string,
+   blockText: string,
+-  rawFindings: readonly RawCoverageFinding[]
++  rawFindings: readonly RawCoverageFinding[],
++  extractedStatements: readonly ExtractedStatement[] = []
+ ): BlockCoverageAuditResult {
+-  const findings: CoverageFinding[] = rawFindings.map((f) => ({
+-    ...f,
+-    quoteVerified: f.quote.length > 0 && blockText.includes(f.quote),
+-  }));
+-  const hasGap = findings.some((f) => f.verdict === 'POSSIBLE_OMISSION' || f.verdict === 'UNREPRESENTED_CLAUSE');
+-  // An empty findings list counts as unresolved, not as covered: the prompt
+-  // requires an explicit COVERED finding for a fully-covered block, so
+-  // silence is an anomaly (a model that gave up looks identical to a model
+-  // that checked and found nothing). The schema below rejects it before it
+-  // can ever reach here from the network path; this branch covers the paths
+-  // that bypass the schema — replayed artifacts and hand-built findings.
+-  const unresolved = findings.length === 0 || findings.some((f) => f.verdict === 'AMBIGUOUS');
+-  return { blockAnchor, findings, hasGap, unresolved };
++  const findings: CoverageFinding[] = rawFindings.map((f) => {
++    const quoteVerified = f.quote.length > 0 && blockText.includes(f.quote);
++    return {
++      ...f,
++      quoteVerified,
++      isQualityFinding: coverageFindingIsQualityOnly({ ...f, quoteVerified }, blockText, extractedStatements),
++    };
++  });
++  return { blockAnchor, findings, ...deriveCoverageAuditAggregates(findings) };
+ }
+ 
+ export const coverageAuditResponseSchema = z.strictObject({
+@@ -232,7 +420,12 @@ export async function auditBlockCoverage(
+     runConfig: options.runConfig,
+   });
+   return {
+-    ...interpretCoverageAuditResponse(options.blockAnchor, options.blockText, result.data.findings),
++    ...interpretCoverageAuditResponse(
++      options.blockAnchor,
++      options.blockText,
++      result.data.findings,
++      options.extractedStatements
++    ),
+     attempts: result.attempts,
+     requestMessages: result.requestMessages,
+     rawResponseText: result.rawText,
