@@ -55,7 +55,7 @@ interface AnswerResult {
     question: string;
     options: string[];
   };
-  answerSource?: 'knowledge_base' | 'general_ai' | 'deterministic_guardrail';
+  answerSource?: import('@/lib/ai/answer-source').AnswerSource;
   requiresHumanReview?: boolean;
   debug?: {
     chunks: Array<{
@@ -92,6 +92,7 @@ const sourceLabels: Record<NonNullable<AnswerResult['answerSource']>, string> = 
   knowledge_base: 'База знаний',
   general_ai: 'Общие знания ИИ',
   deterministic_guardrail: 'Проверенное правило',
+  none: 'Нет источника — отказ',
 };
 
 function messageId() {

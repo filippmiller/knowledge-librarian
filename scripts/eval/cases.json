@@ -45,7 +45,7 @@
   },
   {
     "q": "как отправить готовый заказ почтой россии",
-    "expect": { "source": "knowledge_base", "mustInclude": ["почт"] }
+    "expect": { "source": "none", "mustInclude": ["нет данных"] }
   },
   {
     "q": "сколько сейчас стоит биткоин",
@@ -69,7 +69,7 @@
   },
   {
     "q": "Апостиль для Китая",
-    "expect": { "source": "knowledge_base", "clarify": false, "mustNotInclude": ["Какой документ нужно апостилировать"] }
+    "expect": { "clarify": false, "mustNotInclude": ["Какой документ нужно апостилировать", "не требуется"] }
   },
   {
     "q": "как апостилировать СОР выданное в Москве",

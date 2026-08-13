@@ -28,8 +28,37 @@ function runConfig(overrides: Partial<ExtractionRunConfig> = {}): ExtractionRunC
   };
 }
 
+/**
+ * `callAnthropic` теперь читает SSE (translation-gy3), а не плоский JSON —
+ * этот хелпер эмитит настоящую последовательность фреймов
+ * (message_start → content_block_delta → message_delta → message_stop),
+ * ОДНИМ content_block_delta на весь текст. Сигнатура не изменилась.
+ */
 function anthropicOk(text: string): Response {
-  return new Response(JSON.stringify({ content: [{ type: 'text', text }] }), { status: 200 });
+  const frames: Record<string, unknown>[] = [
+    {
+      type: 'message_start',
+      message: {
+        id: 'msg_test',
+        type: 'message',
+        role: 'assistant',
+        model: 'test-model',
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 10, output_tokens: 0 },
+      },
+    },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
+    {
+      type: 'message_delta',
+      delta: { stop_reason: 'end_turn', stop_sequence: null },
+      usage: { output_tokens: 5 },
+    },
+    { type: 'message_stop' },
+  ];
+  const body = frames.map((frame) => `data: ${JSON.stringify(frame)}\n`).join('');
+  return new Response(body, { status: 200 });
 }
 
 let fetchMock: ReturnType<typeof vi.fn>;
@@ -92,6 +121,67 @@ describe('buildExtractionPromptMessages — чистая функция, без 
     expect(system.content).toContain('{"all":');
   });
 
+
+  it('recognized precondition структурируется на PROCEDURE_STEP; EXCEPTION_RULE требует distinct base parent', () => {
+    const system = buildExtractionPromptMessages([BLOCK_A]).find((message) => message.role === 'system')!.content;
+    expect(system).toContain('правила ЛЮБОГО kind, включая PROCEDURE_STEP');
+    expect(system).toContain('triggerCondition ОБЯЗАТЕЛЕН');
+    expect(system).toContain('EXCEPTION_RULE используй только когда оговорка изменяет отдельное базовое правило');
+    expect(system).toContain('parentExtractionRef обязан ссылаться на extractionRef этого base-unit');
+    expect(system).toContain('privacyContext');
+    expect(system).toContain('consentStatus');
+    expect(system).toContain('reachability');
+    expect(system).toContain('helperPresent');
+  });
+
+  it('не учит модель превращать самостоятельную условную инструкцию в EXCEPTION_RULE без родителя', () => {
+    const messages = buildExtractionPromptMessages([BLOCK_A]);
+    const system = messages.find((m) => m.role === 'system')!;
+    expect(system.content).toContain('самостоятельная инструкция');
+    expect(system.content).toContain('является PROCEDURE_STEP, а не EXCEPTION_RULE');
+    expect(system.content).toContain('не отменяет отдельный родительский шаг');
+  });
+
+  it('не учит модель связывать co-required клаузы ложными parent-ссылками', () => {
+    const messages = buildExtractionPromptMessages([BLOCK_A]);
+    const system = messages.find((m) => m.role === 'system')!;
+    expect(system.content).toContain('СО-ОБЯЗАТЕЛЬНЫМИ соседями');
+    expect(system.content).toContain('а не родителями друг друга');
+  });
+
+  // Taxonomy counter-examples that must be identical in every extraction
+  // prompt (метод/место b5, подтверждающая фраза b8, безусловный запрет b14,
+  // cycles/times b8, numeric-split identity b7) are asserted centrally in
+  // prompt-taxonomy-rules.test.ts against the shared constants. Duplicating
+  // those assertions here is what let the three prompts drift apart in the
+  // first place, so this file deliberately does not restate them.
+
+  // Real cost bug (2026-08-09): 43 of 43 SCHEMA_MISMATCH extraction failures
+  // across every benchmark run this session were the SAME error — the model
+  // puts trigger-fact names (privacyContext, consentStatus, reachability,
+  // helperPresent) directly on the unit object as top-level keys, instead of
+  // nested inside triggerCondition.all[].fact. Root cause: triggerFactCatalog()
+  // and facetCatalog() render in the IDENTICAL visual format
+  // ("- key: description\n  Допустимые значения: ...") right next to each
+  // other in this prompt, and facets genuinely ARE flat top-level keys —
+  // nothing distinguishes the two catalogs' very different correct usage.
+  // This burned ~80+ wasted paid retries in one day. Fix: an explicit
+  // WRONG-vs-RIGHT example pair right after the trigger-fact catalog,
+  // naming a real trigger fact so the warning can't be mistaken for
+  // referring to facets instead.
+  it('промпт явно предупреждает: имена trigger facts НЕ являются top-level полями unit — только значения "fact" внутри triggerCondition', () => {
+    const messages = buildExtractionPromptMessages([BLOCK_A]);
+    const system = messages.find((m) => m.role === 'system')!;
+    expect(system.content).toContain('НЕ отдельные top-level поля unit');
+    // Конкретный пример неправильной формы, с реальным именем факта — общее
+    // предупреждение без примера уже не помогало (тот же класс ошибки,
+    // что humanReviewed=false formatting: описание без конкретного примера
+    // не считается). Пример должен явно называть privacyContext, а не
+    // абстрактное "имя факта", иначе не факт, что модель свяжет
+    // предупреждение именно с trigger-fact каталогом, а не facets.
+    expect(system.content).toContain('"privacyContext": "PUBLIC"');
+  });
+
   it('evidenceByField описан как ОБЯЗАТЕЛЬНЫЙ для непустых полей, а не опциональный', () => {
     const messages = buildExtractionPromptMessages([BLOCK_A]);
     const system = messages.find((m) => m.role === 'system')!;
@@ -105,11 +195,11 @@ describe('buildExtractionPromptMessages — чистая функция, без 
 });
 
 describe('extractKnowledgeUnits — интеграция со structured()', () => {
-  it('валидный ответ провайдера возвращает массив units, parentRuleRef разрешается на реальный анкер', () => {
+  it('валидный ответ провайдера возвращает массив units, parentExtractionRef разрешается на extractionRef другого unit\'а этого же ответа', () => {
     return anthropicRoundTrip();
   });
 
-  it('parentRuleRef на несуществующий анкер (эфемерная метка вроде "R-17") получает DANGLING_PARENT_REF, не теряется молча', async () => {
+  it('parentExtractionRef, не резолвящийся ни в один extractionRef этого ответа (эфемерная метка вроде "R-17"), получает DANGLING_PARENT_REF; поле обнуляется, сырое значение видно в description (P0-фикс translation-rbj)', async () => {
     fetchMock.mockResolvedValue(
       anthropicOk(
         JSON.stringify({
@@ -120,7 +210,8 @@ describe('extractKnowledgeUnits — интеграция со structured()', () 
               facets: {},
               triggerCondition: null,
               numericConstraint: { factKey: 'максимум суток подряд', value: 3, unit: 'сутки' },
-              parentRuleRef: 'R-17',
+              extractionRef: 'u1',
+              parentExtractionRef: 'R-17',
               sourceSpan: { anchor: 'block-B', quote: 'не более 3 дней подряд' },
               evidenceByField: {
                 statement: { anchor: 'block-B', quote: 'не более 3 дней подряд' },
@@ -135,9 +226,9 @@ describe('extractKnowledgeUnits — интеграция со structured()', () 
 
     const result = await extractKnowledgeUnits({ blocks: [BLOCK_A, BLOCK_B], runConfig: runConfig() });
 
-    expect(result.units[0].parentRuleRef).toBe('R-17');
+    expect(result.units[0].parentExtractionRef).toBeNull();
     expect(result.units[0].uncertainties).toEqual([
-      expect.objectContaining({ kind: 'DANGLING_PARENT_REF' }),
+      expect.objectContaining({ kind: 'DANGLING_PARENT_REF', description: expect.stringContaining('R-17') }),
     ]);
   });
 });
@@ -153,7 +244,8 @@ async function anthropicRoundTrip() {
             facets: {},
             triggerCondition: null,
             numericConstraint: null,
-            parentRuleRef: null,
+            extractionRef: 'u1',
+            parentExtractionRef: null,
             sourceSpan: { anchor: 'block-A', quote: 'в уединённом месте' },
             evidenceByField: { statement: { anchor: 'block-A', quote: 'в уединённом месте' } },
             uncertainties: [],
@@ -164,7 +256,8 @@ async function anthropicRoundTrip() {
             facets: {},
             triggerCondition: null,
             numericConstraint: { factKey: 'максимум суток подряд', value: 3, unit: 'сутки' },
-            parentRuleRef: 'block-A',
+            extractionRef: 'u2',
+            parentExtractionRef: 'u1',
             sourceSpan: { anchor: 'block-B', quote: 'не более 3 дней подряд' },
             evidenceByField: {
               statement: { anchor: 'block-B', quote: 'не более 3 дней подряд' },
@@ -183,8 +276,8 @@ async function anthropicRoundTrip() {
   });
 
   expect(result.units).toHaveLength(2);
-  expect(result.units[1].parentRuleRef).toBe('block-A');
-  // Регрессия translation-2n9: если бы parentRuleRef не разрешался, здесь
-  // появилась бы DANGLING_PARENT_REF uncertainty — её нет, ссылка валидна.
+  expect(result.units[1].parentExtractionRef).toBe('u1');
+  // Регрессия translation-2n9: если бы parentExtractionRef не разрешался,
+  // здесь появилась бы DANGLING_PARENT_REF uncertainty — её нет, ссылка валидна.
   expect(result.units[1].uncertainties).toEqual([]);
 }

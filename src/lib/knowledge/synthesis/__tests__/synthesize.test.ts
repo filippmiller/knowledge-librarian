@@ -53,6 +53,56 @@ describe('synthesizeFromSelectedUnits — что видит генератор',
     expect(prompt.question).toBe('Сколько можно чесать?');
   });
 
+  it('omits an unsupported user number but preserves selected-evidence numerics', async () => {
+    const generate = generator();
+
+    await synthesizeFromSelectedUnits(
+      pack(),
+      'Достаточно ли трёх секунд, если правило допускает 15 секунд?',
+      generate
+    );
+
+    const prompt = (generate as unknown as { mock: { calls: [SynthesisPrompt][] } }).mock.calls[0][0];
+    expect(prompt.question).not.toContain('трёх секунд');
+    expect(prompt.question).toContain('указанная продолжительность');
+    expect(prompt.question).toContain('15 секунд');
+  });
+
+  it('передаёт relevanceRationale выбранного unit-а генератору (Fix 3)', async () => {
+    const generate = generator();
+
+    await synthesizeFromSelectedUnits(
+      pack({
+        items: [
+          {
+            unitId: 'u1',
+            kind: 'PROCEDURE_STEP',
+            statement: 'Не дольше 15 секунд подряд.',
+            citation: { anchor: 'a1', quote: 'не дольше 15 секунд' },
+            numericConstraint: { factKey: 'max_seconds', value: 15, unit: 'seconds' },
+            relevanceRationale: 'Описывает прямые действия после завершения процедуры.',
+          },
+        ],
+      }),
+      'Сколько можно чесать?',
+      generate
+    );
+
+    const prompt = (generate as unknown as { mock: { calls: [SynthesisPrompt][] } }).mock.calls[0][0];
+    expect(prompt.evidence[0].relevanceRationale).toBe(
+      'Описывает прямые действия после завершения процедуры.'
+    );
+  });
+
+  it('relevanceRationale отсутствует у генератора, если его не было в pack (Fix 3)', async () => {
+    const generate = generator();
+
+    await synthesizeFromSelectedUnits(pack(), 'Сколько можно чесать?', generate);
+
+    const prompt = (generate as unknown as { mock: { calls: [SynthesisPrompt][] } }).mock.calls[0][0];
+    expect(prompt.evidence[0].relevanceRationale).toBeUndefined();
+  });
+
   it('передаёт source anchors — цитаты строятся из них, не из номера кандидата', async () => {
     const generate = generator();
 
@@ -60,6 +110,14 @@ describe('synthesizeFromSelectedUnits — что видит генератор',
 
     const prompt = (generate as unknown as { mock: { calls: [SynthesisPrompt][] } }).mock.calls[0][0];
     expect(prompt.evidence[0].citation.anchor).toBe('a1');
+  });
+
+  it('instructs the generator to keep internal references out of answer text', async () => {
+    const generate = generator();
+    await synthesizeFromSelectedUnits(pack(), 'в?', generate);
+    const prompt = (generate as unknown as { mock: { calls: [SynthesisPrompt][] } }).mock.calls[0][0];
+    expect(prompt.answerTextPolicy).toContain('unitId');
+    expect(prompt.answerTextPolicy).toContain('только в structured поле citedUnitIds');
   });
 
   it('передаёт числовые ограничения — генератору не из чего выдумать другое число', async () => {
@@ -73,6 +131,27 @@ describe('synthesizeFromSelectedUnits — что видит генератор',
       value: 15,
       unit: 'seconds',
     });
+  });
+
+  it('passes overridden parent only through the explicitly non-operative context channel', async () => {
+    const generate = generator();
+    await synthesizeFromSelectedUnits(pack({
+      supportingContext: [{
+        role: 'OVERRIDDEN_PARENT_CONTEXT',
+        unitId: 'parent',
+        kind: 'PROCEDURE_STEP',
+        statement: 'Не более 3 секунд, затем уйти; не повторять.',
+        citation: { anchor: 'a-parent', quote: 'не более 3 секунд' },
+        numericConstraint: { factKey: 'max_seconds', value: 3, unit: 'seconds' },
+        overriddenByUnitId: 'u1',
+      }],
+    }), 'Что делать?', generate);
+
+    const prompt = (generate as unknown as { mock: { calls: [SynthesisPrompt][] } }).mock.calls[0][0];
+    expect(prompt.evidence.map((item) => item.unitId)).toEqual(['u1']);
+    expect(prompt.supportingContext).toEqual([
+      expect.objectContaining({ role: 'OVERRIDDEN_PARENT_CONTEXT', unitId: 'parent', overriddenByUnitId: 'u1' }),
+    ]);
   });
 });
 

@@ -1,0 +1,264 @@
+{
+  "gradedAt": "2026-08-10T23:04:36.132Z",
+  "runDirs": [
+    "run-1-2026-08-10T22-29-49-384Z"
+  ],
+  "perRunSummary": [
+    {
+      "runId": "run-1-2026-08-10T22-29-49-384Z",
+      "positivePassed": 4,
+      "positiveTotal": 10,
+      "negativePassed": 6,
+      "negativeTotal": 6
+    }
+  ],
+  "passRateByCase": [
+    {
+      "caseId": "Q01",
+      "passCount": 0,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q02",
+      "passCount": 0,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q03",
+      "passCount": 0,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q04",
+      "passCount": 1,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q05",
+      "passCount": 1,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q06",
+      "passCount": 1,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q07",
+      "passCount": 0,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q08",
+      "passCount": 0,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q09",
+      "passCount": 1,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q10",
+      "passCount": 0,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q01-M1",
+      "passCount": 1,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q04-N1",
+      "passCount": 1,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q05-N1",
+      "passCount": 1,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q05-M1",
+      "passCount": 1,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q09-N1",
+      "passCount": 1,
+      "totalRuns": 1
+    },
+    {
+      "caseId": "Q10-N1",
+      "passCount": 1,
+      "totalRuns": 1
+    }
+  ],
+  "casesFailingInAnyRun": [
+    "Q01",
+    "Q02",
+    "Q03",
+    "Q07",
+    "Q08",
+    "Q10"
+  ],
+  "allVerdicts": [
+    {
+      "runId": "run-1-2026-08-10T22-29-49-384Z",
+      "caseId": "Q01",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "RESOLUTION_ERROR",
+      "diagnosticFlags": [
+        "EVIDENCE_GROUP_UNCOVERED (rule 1): до начала перейти в закрытое место, невидимое окружающим"
+      ]
+    },
+    {
+      "runId": "run-1-2026-08-10T22-29-49-384Z",
+      "caseId": "Q02",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "UNVERIFIED_ANSWER",
+      "primaryFailureStage": "APPLICABILITY_ERROR",
+      "diagnosticFlags": [
+        "verified answer blocked because it depends on probabilistic candidate exclusion"
+      ]
+    },
+    {
+      "runId": "run-1-2026-08-10T22-29-49-384Z",
+      "caseId": "Q03",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "UNVERIFIED_ANSWER",
+      "primaryFailureStage": "APPLICABILITY_ERROR",
+      "diagnosticFlags": [
+        "verified answer blocked because it depends on probabilistic candidate exclusion"
+      ]
+    },
+    {
+      "runId": "run-1-2026-08-10T22-29-49-384Z",
+      "caseId": "Q04",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-1-2026-08-10T22-29-49-384Z",
+      "caseId": "Q05",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-1-2026-08-10T22-29-49-384Z",
+      "caseId": "Q06",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-1-2026-08-10T22-29-49-384Z",
+      "caseId": "Q07",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "ERROR",
+      "primaryFailureStage": "ENGINE_ERROR",
+      "diagnosticFlags": [
+        "terminated"
+      ]
+    },
+    {
+      "runId": "run-1-2026-08-10T22-29-49-384Z",
+      "caseId": "Q08",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "ERROR",
+      "primaryFailureStage": "ENGINE_ERROR",
+      "diagnosticFlags": [
+        "terminated"
+      ]
+    },
+    {
+      "runId": "run-1-2026-08-10T22-29-49-384Z",
+      "caseId": "Q09",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-1-2026-08-10T22-29-49-384Z",
+      "caseId": "Q10",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "RESOLUTION_ERROR",
+      "diagnosticFlags": [
+        "EVIDENCE_GROUP_UNCOVERED (rule 10): текущее ясное согласие на помощь; чистые одноразовые перчатки помощника; ограничения по силе воздействия и времени; немедленная остановка по первой просьбе"
+      ]
+    },
+    {
+      "runId": "run-1-2026-08-10T22-29-49-384Z",
+      "caseId": "Q01-M1",
+      "pass": true,
+      "expectedDisposition": "HOLD",
+      "actualDisposition": "HOLD",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-1-2026-08-10T22-29-49-384Z",
+      "caseId": "Q04-N1",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-1-2026-08-10T22-29-49-384Z",
+      "caseId": "Q05-N1",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-1-2026-08-10T22-29-49-384Z",
+      "caseId": "Q05-M1",
+      "pass": true,
+      "expectedDisposition": "HOLD",
+      "actualDisposition": "HOLD",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-1-2026-08-10T22-29-49-384Z",
+      "caseId": "Q09-N1",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    },
+    {
+      "runId": "run-1-2026-08-10T22-29-49-384Z",
+      "caseId": "Q10-N1",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": []
+    }
+  ],
+  "note": "Deterministic grading only — no LLM semantic judge this session (see final report for that gap)."
+}

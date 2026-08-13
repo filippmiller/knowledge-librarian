@@ -2,7 +2,7 @@ import type { EligibilityDecision } from './eligibility';
 import type { FacetKey } from './facets';
 import type { KnowledgeUnitKind } from './kinds';
 import type { QueryFrame } from './query-frame';
-import type { ResolutionReasonCode } from './reasons';
+import type { ResolutionReasonCode, TriggerReasonCode } from './reasons';
 import { ASKABLE_SCOPE_SITUATIONS, type ScopeDecision } from './scope';
 import type { TriggerDecision } from './trigger';
 import type { TriggerFactKey } from './trigger-facts';
@@ -29,6 +29,37 @@ export interface EvaluatedCandidate {
   readonly scope: ScopeDecision;
   /** Заполнено только у `EXCEPTION_RULE`; у остальных `kind` — `null`. */
   readonly trigger: TriggerDecision | null;
+  /** Source-backed wording for the effective (possibly inherited) trigger. */
+  readonly triggerPresentationConditions?: readonly string[];
+  /** Runtime graph/condition corruption; unlike an ordinary unknown fact this
+   * must never become presentable conditional evidence. */
+  readonly triggerInvalid?: boolean;
+  /** Set by Decision Relevance. Undefined preserves legacy/test behavior as relevant. */
+  readonly semanticRelevance?: 'RELEVANT' | 'IRRELEVANT';
+  /** Source-backed proof that this trigger is a necessary (not merely
+   * sufficient) condition, so its falsity can justify a denial. */
+  readonly negativeInferenceAllowed?: boolean;
+  /**
+   * Identity of the structural source block this unit was extracted from
+   * (`PersistedKnowledgeUnit.sourceBlockAnchor`, `identity-assignment.ts`).
+   * Optional here — NOT because a real persisted unit can lack one (it can't:
+   * `persistedKnowledgeUnitSchema` requires a non-blank string) — but because
+   * `EvaluatedCandidate` is also hand-built by tests/callers that predate
+   * this field. Two candidates count as "siblings" for the sibling veto in
+   * `resolveKnowledgeSet` ONLY when both carry the SAME defined anchor;
+   * `undefined` never matches another `undefined`, so an unset anchor means
+   * "no block linkage available", not "same block as every other unset
+   * candidate".
+   *
+   * Anchor over `parentRuleRef` for this check because a live evaluation run
+   * measured `parentRuleRef` as unreliable across extraction runs (an
+   * umbrella parent invented to link co-mandatory siblings is exactly what
+   * disciplined extraction stopped fabricating — translation-rw3, audit
+   * 2026-08-08-extraction-stability-fragmentation-report.md §4), while
+   * `sourceBlockAnchor` — derived from source position, not from a
+   * potentially-missing extraction link — stays stable.
+   */
+  readonly sourceBlockAnchor?: string;
   /** На какое правило это исключение навешано (§2.1, обязательно для исключений). */
   readonly parentRuleRef: string | null;
   /** Явная замена: единственный способ разрешить конфликт чисел без человека. */
@@ -81,6 +112,9 @@ export interface ResolutionDecision {
    */
   readonly disposition: 'ANSWER' | 'CLARIFY' | 'HOLD';
   readonly selected: readonly string[];
+  /** Non-operative evidence usable only to explain a denial. It never
+   * participates in override, supersedes, or numeric conflict resolution. */
+  readonly negativeEvidence?: readonly string[];
   /**
    * Кандидаты, судьба которых не решена. Ключевое: они НЕ выброшены. `UNKNOWN`
    * не является основанием молча удалить кандидата, и пустой набор кандидатов
@@ -92,7 +126,13 @@ export interface ResolutionDecision {
   readonly numericConflicts: readonly NumericConflict[];
   readonly requiresHumanReview: boolean;
   readonly clarificationNeeds: ClarificationNeeds;
-  readonly reasons: readonly ResolutionReasonCode[];
+  readonly reasons: readonly (ResolutionReasonCode | TriggerReasonCode)[];
+  /** How selected evidence may be rendered by synthesis. */
+  readonly selectedApplicability?: readonly {
+    readonly unitId: string;
+    readonly mode: 'NORMAL' | 'CONDITIONAL' | 'NEGATIVE';
+    readonly presentationConditions: readonly string[];
+  }[];
 }
 
 function unique<T>(values: readonly T[]): T[] {
@@ -179,13 +219,14 @@ export function resolveKnowledgeSet(
 ): ResolutionDecision {
   const excluded: ExcludedCandidate[] = [];
   const undetermined: HeldCandidate[] = [];
-  const reasons: ResolutionReasonCode[] = [];
+  const reasons: (ResolutionReasonCode | TriggerReasonCode)[] = [];
   let requiresHumanReview = false;
 
   const selectedIds: string[] = [];
+  const negativeEvidenceIds: string[] = [];
   const undeterminedIds: string[] = [];
 
-  const addReason = (reason: ResolutionReasonCode) => {
+  const addReason = (reason: ResolutionReasonCode | TriggerReasonCode) => {
     if (!reasons.includes(reason)) reasons.push(reason);
   };
   const exclude = (unitId: string, reason: ResolutionReasonCode, byUnitId?: string) => {
@@ -219,10 +260,20 @@ export function resolveKnowledgeSet(
       continue;
     }
 
-    // §4.1 п.2, явный негативный случай: условие достоверно не выполнено —
-    // исключение не активно, и его СУЩЕСТВОВАНИЕ не блокирует общее правило.
-    if (isException && candidate.trigger?.verdict === 'INACTIVE') {
-      exclude(candidate.unitId, 'exception_trigger_inactive');
+    if (candidate.trigger?.verdict === 'INACTIVE') {
+      for (const reason of candidate.trigger.reasons) addReason(reason);
+      // Exceptions retain their original fail-closed override semantics.
+      // A relevant conditional procedure, however, is useful negative
+      // evidence: it proves that its necessary condition is absent and lets
+      // synthesis deny the action. An irrelevant candidate remains excluded
+      // but still contributes structured diagnostic reasons.
+      if (isException || candidate.semanticRelevance === 'IRRELEVANT') {
+        exclude(candidate.unitId, 'exception_trigger_inactive');
+      } else if (candidate.negativeInferenceAllowed === true) {
+        negativeEvidenceIds.push(candidate.unitId);
+      } else {
+        exclude(candidate.unitId, 'exception_trigger_inactive');
+      }
       continue;
     }
 
@@ -231,16 +282,122 @@ export function resolveKnowledgeSet(
       continue;
     }
 
-    if (isException && candidate.trigger?.verdict === 'UNKNOWN') {
-      hold(candidate.unitId, 'exception_trigger_unknown');
+    if (candidate.trigger?.verdict === 'UNKNOWN') {
+      for (const reason of candidate.trigger.reasons) addReason(reason);
+      if (isException || candidate.triggerInvalid === true) {
+        hold(candidate.unitId, 'exception_trigger_unknown');
+        if (candidate.triggerInvalid === true) requiresHumanReview = true;
+      }
+      else selectedIds.push(candidate.unitId);
       continue;
     }
 
     selectedIds.push(candidate.unitId);
-    if (isException) addReason('exception_trigger_active');
+    if (candidate.trigger?.verdict === 'ACTIVE') {
+      for (const reason of candidate.trigger.reasons) addReason(reason);
+      addReason('exception_trigger_active');
+    }
   }
 
   const byId = new Map(candidates.map((candidate) => [candidate.unitId, candidate]));
+
+  // ── Шаг 1.5. Вето соседа по блоку (`sourceBlockAnchor`) ────────────────────
+  //
+  // Ни один шаг выше не смотрит на соседей по source-блоку — только на цепочку
+  // `parentRuleRef` (шаг 3) или на собственный `triggerCondition` юнита (шаг 1
+  // выше). Пока экстракция ошибочно выдумывала общего родителя для совместно
+  // обязательных фрагментов, это было случайной страховкой. Реальный сбой
+  // (goal-shift benchmark, регрессия 6/6 → 3/6 негативных случаев после
+  // дисциплинированной реэкстракции; см. `translation-rw3` и
+  // `.claude/audits/2026-08-08-extraction-stability-fragmentation-report.md`
+  // §4 — там же измерено, что `parentRuleRef` НЕНАДЁЖЕН между прогонами, а
+  // `sourceBlockAnchor` стабилен): вопрос «муж может почесать спящей жене,
+  // раз она раньше не возражала?» — consent-гейт `a40ffc867393ca19`
+  // достоверно решён НЕГАТИВНО (`consentStatus_violated`, ушёл в
+  // `negativeEvidenceIds` на шаге 1 выше), а его сосед по тому же блоку
+  // `e1218dd9d534e665` («наденьте чистые перчатки, соблюдайте лимиты силы и
+  // времени, остановитесь по первой просьбе») не несёт СОБСТВЕННОГО условия
+  // (`trigger === null`) и молча падал в `selectedIds` — операционная
+  // инструкция «как делать» подавалась как основание для ситуации, которую
+  // движок только что признал недопустимой.
+  //
+  // Кто ГОЛОСУЕТ «вето» — только кандидат, реально попавший в
+  // `negativeEvidenceIds` по итогам шага 1. Это самое узкое достоверное
+  // прочтение «соседа, достоверно определённого как отрицательный»:
+  // `negativeEvidenceIds` уже само по себе означает «trigger.verdict ===
+  // INACTIVE, И источник доказывает, что это условие НЕОБХОДИМОЕ»
+  // (`negativeInferenceAllowed`, см. `hasSourceBackedNecessaryCondition` в
+  // `knowledge-unit-adapter.ts`) — то есть именно то место, где решатель уже
+  // согласился использовать отрицание для обоснования отказа. В частности НЕ
+  // голосуют:
+  //   • сосед, выбывший по `scope_conflict`/`candidate_ineligible`/UNKNOWN —
+  //     причина вообще не связана с отрицанием триггера («excluded for an
+  //     unrelated reason»);
+  //   • сосед-`EXCEPTION_RULE` с INACTIVE-триггером (excluded
+  //     `exception_trigger_inactive`) — «это исключение не сработало» не
+  //     доказывает ничего про весь блок, общее правило просто действует как
+  //     обычно;
+  //   • сосед с `semanticRelevance === 'IRRELEVANT'` (excluded
+  //     `exception_trigger_inactive`) — причина заведомо не относится к
+  //     текущему запросу;
+  //   • сосед с INACTIVE-триггером, но БЕЗ `negativeInferenceAllowed`
+  //     (excluded `exception_trigger_inactive`; см. тест "false generic
+  //     sufficient condition ... cannot prove a denial") — сам движок уже
+  //     решил, что на этом отрицании нельзя строить отказ, и вето по нему
+  //     доверяло бы сигналу больше, чем доверяет ему сам resolveKnowledgeSet.
+  // Сосед, который лишь УДЕРЖАН (`scope_unknown_held`/`exception_trigger_unknown`)
+  // или которого просто нет среди кандидатов, тоже не голосует — это
+  // «отсутствует/неопределено», а не «достоверно отрицательно».
+  //
+  // Множество-причина (`provenNegativeSiblingIds`) — СНИМОК состояния ДО этого
+  // цикла, а не то, что читается по ходу: кандидат, ставший negativeEvidence
+  // ТОЛЬКО из-за этого самого вето, сам никогда не проходит критерий
+  // «достоверно отрицательный» (у него `trigger === null` — он in principle не
+  // может попасть в `negativeEvidenceIds` шага 1) и потому не может быть
+  // причиной чужого вето. Снимок делает этот факт структурным гарантом, а не
+  // зависимостью от порядка обхода `[...selectedIds]` ниже — результат
+  // одинаков при любом порядке `candidates` на входе.
+  //
+  // Кандидат уходит в `negativeEvidenceIds`, а НЕ в `excluded` и НЕ в
+  // `undetermined`. `excluded` — про кандидатов, выбывших по достоверному
+  // основанию ИХ САМИХ (§3 conflict, негодность и т.п.); этот кандидат не
+  // ложен и не негоден сам по себе — `ResolutionDecision.negativeEvidence`
+  // прямо документирован как «Non-operative evidence usable only to explain a
+  // denial», ровно то, чем этот кандидат становится. `undetermined` — про
+  // судьбу, которая ДЕЙСТВИТЕЛЬНО неизвестна и может решиться вопросом
+  // пользователю; здесь неизвестности нет — сосед уже дал достоверный ответ,
+  // спрашивать нечего, и `isDecisive`/clarification-логика шага 5 не должна
+  // на этот кандидат реагировать (он и не должен быть виден в `viableIds`).
+  //
+  // `EXCEPTION_RULE` исключён из вето целиком: у него собственная, отдельно
+  // проверяемая семантика активации (§4.1 п.2, шаг 3 ниже) — вето по соседям
+  // дублировало бы её или ей противоречило.
+  const siblingsByAnchor = new Map<string, string[]>();
+  for (const candidate of candidates) {
+    if (candidate.sourceBlockAnchor === undefined) continue;
+    const list = siblingsByAnchor.get(candidate.sourceBlockAnchor);
+    if (list) list.push(candidate.unitId);
+    else siblingsByAnchor.set(candidate.sourceBlockAnchor, [candidate.unitId]);
+  }
+  const provenNegativeSiblingIds = new Set(negativeEvidenceIds);
+  for (const unitId of [...selectedIds]) {
+    const candidate = byId.get(unitId);
+    if (candidate === undefined) continue;
+    if (candidate.trigger !== null) continue;
+    if (candidate.kind === 'EXCEPTION_RULE') continue;
+    if (candidate.sourceBlockAnchor === undefined) continue;
+
+    const siblingIds = siblingsByAnchor.get(candidate.sourceBlockAnchor) ?? [];
+    const hasProvenNegativeSibling = siblingIds.some(
+      (siblingId) => siblingId !== unitId && provenNegativeSiblingIds.has(siblingId)
+    );
+    if (!hasProvenNegativeSibling) continue;
+
+    const position = selectedIds.indexOf(unitId);
+    if (position >= 0) selectedIds.splice(position, 1);
+    negativeEvidenceIds.push(unitId);
+    addReason('vetoed_by_negative_sibling');
+  }
 
   // ── Шаг 2. Явная замена (`supersedes`) ────────────────────────────────────
   //
@@ -294,12 +451,9 @@ export function resolveKnowledgeSet(
     const candidate = byId.get(unitId);
     if (candidate?.kind !== 'EXCEPTION_RULE') continue;
 
-    // Исключение БЕЗ родителя — не «исключение, которому некого переопределять»,
-    // а испорченная запись: §2 делает `parentRuleRef` обязательным для
-    // EXCEPTION_RULE. Раньше такой unit просто пропускал шаг переопределения и
-    // оставался в выборке — то есть отвечал КАК САМОСТОЯТЕЛЬНОЕ ПРАВИЛО, хотя
-    // по смыслу он лишь оговорка к чему-то, чего в ответе нет. Тип кандидата
-    // допускает null (миграции, ручной ввод), поэтому проверка нужна в рантайме.
+    // Исключение БЕЗ родителя — испорченная запись. Trusted-artifact v4
+    // запрещает такую форму на границе доверия, но runtime остаётся
+    // fail-closed для миграций, ручного ввода и устаревших артефактов.
     if (candidate.parentRuleRef === null) {
       requiresHumanReview = true;
       addReason('exception_without_parent');
@@ -370,6 +524,21 @@ export function resolveKnowledgeSet(
   const isDecisive = (candidate: EvaluatedCandidate): boolean => {
     if (selectedIds.length === 0) return true;
     if (candidate.parentRuleRef !== null && viableIds.has(candidate.parentRuleRef)) return true;
+
+    // Исключение с неизвестным условием И БЕЗ parentRuleRef вообще —
+    // отдельный, более рискованный случай, чем "ссылка есть, но родителя нет
+    // в текущей выдаче" (та ветка ниже уже покрыта и остаётся не-решающей:
+    // там известно, с чем спорить нечего). Здесь неизвестно НИЧЕГО о том,
+    // какое правило это исключение переопределяет — а значит нельзя
+    // исключить, что оно как раз то, что уже уверенно выбрано. Реальная
+    // находка (goal-shift benchmark, 2026-08-09, Q01-M1/Q05-M1): экстракция
+    // не всегда линкует EXCEPTION_RULE к его родителю (parentRuleRef
+    // приходит null чаще, чем предполагалось) — молчаливо считать такое
+    // исключение "нерешающим" значило бы отвечать уверенно именно там, где
+    // уверенности нет.
+    if (candidate.trigger?.verdict === 'UNKNOWN') {
+      return true;
+    }
 
     // Неизвестный кандидат, который ЗАМЕНЯЕТ выбранного, — решающий. Шаг 2
     // сознательно даёт заменять только выбранным, поэтому удержанный U тут
@@ -469,7 +638,7 @@ export function resolveKnowledgeSet(
     }
   }
 
-  if (selectedIds.length === 0) addReason('no_selected_candidates');
+  if (selectedIds.length === 0 && negativeEvidenceIds.length === 0) addReason('no_selected_candidates');
 
   const needsClarification =
     clarificationNeeds.facets.length > 0 ||
@@ -481,13 +650,43 @@ export function resolveKnowledgeSet(
   // противоречат друг другу и решать должен человек.
   const disposition: ResolutionDecision['disposition'] = needsClarification
     ? 'CLARIFY'
-    : requiresHumanReview || selectedIds.length === 0
+    : requiresHumanReview || (selectedIds.length === 0 && negativeEvidenceIds.length === 0)
       ? 'HOLD'
       : 'ANSWER';
+
+  // Членство в `negativeEvidenceIds` проверяется ПЕРВЫМ и решает `mode`
+  // самостоятельно. Нужно для шага 1.5: кандидат, попавший туда через вето
+  // соседа, не имеет СОБСТВЕННОГО `trigger.verdict === 'INACTIVE'` (у него
+  // `trigger === null`), поэтому старая формула (условие по
+  // `candidate.trigger?.verdict`) присвоила бы ему `NORMAL` внутри массива
+  // негативных доказательств — то есть `applicabilityMode`, по которому
+  // `buildEvidencePack` решает, можно ли называть числа кандидата фактами
+  // (`numericFacts`, фильтр `applicabilityMode !== 'NEGATIVE'`), молчаливо
+  // соврал бы. Для исходного (шага 1) пути в `negativeEvidenceIds` порядок
+  // проверок ничего не меняет: кандидат с `trigger.verdict === 'INACTIVE'` и
+  // `kind !== 'EXCEPTION_RULE'` либо уже находится в `negativeEvidenceIds`,
+  // либо выбыл в `excluded` — самостоятельно в `selectedIds` он остаться не
+  // может (шаг 1 выше), так что этот кандидат никогда не встречает первую
+  // ветку по ошибке.
+  const negativeEvidenceIdSet = new Set(negativeEvidenceIds);
+  const selectedApplicability = [...selectedIds, ...negativeEvidenceIds].map((unitId) => {
+    const candidate = byId.get(unitId)!;
+    const mode = negativeEvidenceIdSet.has(unitId)
+      ? 'NEGATIVE' as const
+      : candidate.kind !== 'EXCEPTION_RULE' && candidate.trigger?.verdict === 'UNKNOWN'
+        ? 'CONDITIONAL' as const
+        : 'NORMAL' as const;
+    return {
+      unitId,
+      mode,
+      presentationConditions: candidate.triggerPresentationConditions ?? [],
+    };
+  });
 
   return {
     disposition,
     selected: selectedIds,
+    negativeEvidence: negativeEvidenceIds,
     undetermined,
     excluded,
     overridden,
@@ -495,5 +694,6 @@ export function resolveKnowledgeSet(
     requiresHumanReview,
     clarificationNeeds,
     reasons,
+    selectedApplicability,
   };
 }

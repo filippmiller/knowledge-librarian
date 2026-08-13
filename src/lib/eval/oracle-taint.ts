@@ -37,11 +37,112 @@ export interface OracleTaintOptions {
   readonly shingleSize?: number;
 }
 
+/**
+ * Каким механизмом ЭТОТ конкретный секрет защищён (pre-retrieval hardening,
+ * Step 9). Раньше был только ОДИН пул шинглов от ВСЕХ секретов сразу —
+ * секрет короче `shingleSize` слов давал пустое множество шинглов и
+ * НИЧЕГО не добавлял в пул, значит `assertClean` не ловил его утечку вообще,
+ * а `taintedShingleCount > 0` (за счёт других секретов) выглядело так, будто
+ * защита работает для всех.
+ *
+ * - `SHINGLE` — секрет ≥ shingleSize слов, хотя бы один его шингл уникален
+ *   для oracle (не встречается в sourceText) — защищён общим механизмом.
+ * - `EXACT_SUBSTRING` — шинглы не сработали (секрет короче shingleSize ИЛИ
+ *   каждое его 8-словное окно уже есть в источнике), но ПОЛНЫЙ нормализованный
+ *   текст секрета сам по себе НЕ встречается в источнике — защищён точным
+ *   поиском подстроки целиком (safe shorter-secret mechanism).
+ * - `UNGUARDED` — точное написание секрета дословно есть в источнике. Не
+ *   отличить его утечку от легитимного цитирования источника никаким
+ *   текстовым механизмом — честно репортится, не подделывается.
+ */
+export type SecretGuardKind = 'SHINGLE' | 'EXACT_SUBSTRING' | 'UNGUARDED';
+
+export interface SecretCoverageEntry {
+  readonly caseId: string;
+  readonly field: 'expectedAnswer' | 'matchReason';
+  /** `null` — поле самого кейса; индекс — поле `negativeCases[negativeIndex]`. */
+  readonly negativeIndex: number | null;
+  readonly guard: SecretGuardKind;
+}
+
+/** Отличима от прочих фатальных ошибок программно (instanceof), не по тексту
+ *  сообщения — так раннер может дать прогону bounded auto-retry на свежей
+ *  LLM-выборке (тот же класс решения, что и retry на NETWORK_ERROR/
+ *  SCHEMA_MISMATCH: этот КОНКРЕТНЫЙ прогон недействителен, не «повторять,
+ *  пока не понравится оценка»), не путая утечку с настоящим багом. */
+export class OracleTaintError extends Error {}
+
 export interface OracleTaintDetector {
   /** Бросает исключение, если payload содержит текст, выводимый только из oracle. */
   assertClean(payload: unknown, label: string): void;
   /** Размер словаря «только-oracle» шинглов. Ноль означал бы неработающую проверку. */
   readonly taintedShingleCount: number;
+  /** Как защищён КАЖДЫЙ отдельный секрет — не только совокупный пул. */
+  readonly secretCoverage: readonly SecretCoverageEntry[];
+  /** Секреты без рабочей защиты (см. `SecretGuardKind.UNGUARDED`). */
+  readonly unguardedSecretCount: number;
+}
+
+/**
+ * Versioned information-flow policy. It is deliberately part of the question
+ * journal fingerprint: changing which boundaries are guarded must invalidate
+ * terminal cached results produced under the old policy.
+ *
+ * Generated answers are not a taint boundary. Matching the oracle there is
+ * the goal of the benchmark, and a source-grounded paraphrase cannot be
+ * distinguished from oracle access by lexical comparison. Oracle data is
+ * instead stopped before it can enter the engine or a trusted artifact.
+ */
+export const ORACLE_TAINT_POLICY_VERSION = 'oracle-taint-input-artifact-boundaries-v2';
+
+export type OracleTaintBoundary = 'ENGINE_INPUT' | 'ARTIFACT' | 'GENERATED_OUTPUT';
+
+export function assertOracleTaintPolicy(
+  detector: OracleTaintDetector,
+  boundary: OracleTaintBoundary,
+  payload: unknown,
+  label: string
+): void {
+  if (boundary === 'GENERATED_OUTPUT') return;
+  detector.assertClean(payload, label);
+}
+
+/** Executes the real boundary policy on a deterministic oracle-only phrase.
+ * The result is embedded in resumable-journal fingerprints, so changing
+ * boundary behavior invalidates cached terminal answers even if a developer
+ * forgets to bump the descriptive version string. */
+export function oracleTaintPolicyBehaviorProbe(): Readonly<{
+  engineInputRejects: boolean;
+  artifactRejects: boolean;
+  generatedOutputRejects: boolean;
+}> {
+  const oracle: OracleCase[] = [{
+    id: '__taint_policy_probe__',
+    question: 'public probe question',
+    expectedRuleIds: [1],
+    expectedAnswer: 'alphaonly betaonly gammaonly deltaonly epsilononly zetaonly etaonly thetaonly',
+    matchReason: 'iotaonly kappaonly lambdaonly muonly nuonly xionly omicrononly pionly',
+    negativeCases: [],
+  }];
+  const detector = buildOracleTaintDetector({
+    oracle,
+    sourceText: 'unrelated public source words that contain no protected probe phrase',
+  });
+  const payload = { text: oracle[0].expectedAnswer };
+  const rejects = (boundary: OracleTaintBoundary): boolean => {
+    try {
+      assertOracleTaintPolicy(detector, boundary, payload, `policy probe ${boundary}`);
+      return false;
+    } catch (error) {
+      if (error instanceof OracleTaintError) return true;
+      throw error;
+    }
+  };
+  return {
+    engineInputRejects: rejects('ENGINE_INPUT'),
+    artifactRejects: rejects('ARTIFACT'),
+    generatedOutputRejects: rejects('GENERATED_OUTPUT'),
+  };
 }
 
 /** Регистр, пунктуация и кратные пробелы не должны служить обходом проверки. */
@@ -62,14 +163,24 @@ function shingles(words: readonly string[], size: number): Set<string> {
   return result;
 }
 
-/** Секреты oracle. `question` намеренно исключён — это вход движка, а не ответ. */
-function collectSecrets(oracle: readonly OracleCase[]): string[] {
-  const secrets: string[] = [];
+interface AttributedSecret {
+  readonly caseId: string;
+  readonly field: 'expectedAnswer' | 'matchReason';
+  readonly negativeIndex: number | null;
+  readonly text: string;
+}
+
+/** Секреты oracle, с атрибуцией для per-secret coverage. `question`
+ *  намеренно исключён — это вход движка, а не ответ. */
+function collectSecrets(oracle: readonly OracleCase[]): AttributedSecret[] {
+  const secrets: AttributedSecret[] = [];
   for (const testCase of oracle) {
-    secrets.push(testCase.expectedAnswer, testCase.matchReason);
-    for (const negative of testCase.negativeCases) {
-      secrets.push(negative.expectedAnswer, negative.matchReason);
-    }
+    secrets.push({ caseId: testCase.id, field: 'expectedAnswer', negativeIndex: null, text: testCase.expectedAnswer });
+    secrets.push({ caseId: testCase.id, field: 'matchReason', negativeIndex: null, text: testCase.matchReason });
+    testCase.negativeCases.forEach((negative, i) => {
+      secrets.push({ caseId: testCase.id, field: 'expectedAnswer', negativeIndex: i, text: negative.expectedAnswer });
+      secrets.push({ caseId: testCase.id, field: 'matchReason', negativeIndex: i, text: negative.matchReason });
+    });
   }
   return secrets;
 }
@@ -95,30 +206,84 @@ export function buildOracleTaintDetector({
   shingleSize = DEFAULT_SHINGLE_SIZE,
 }: OracleTaintOptions): OracleTaintDetector {
   const sourceShingles = shingles(normalize(sourceText), shingleSize);
+  const normalizedSourceText = normalize(sourceText).join(' ');
 
   const tainted = new Set<string>();
+  /** Полные нормализованные фразы секретов, защищённых точным поиском
+   *  подстроки — отдельно от `tainted` (тот хранит ФИКСИРОВАННЫЕ 8-словные
+   *  окна, а не произвольную длину). */
+  const taintedPhrases = new Set<string>();
+  const secretCoverage: SecretCoverageEntry[] = [];
+
   for (const secret of collectSecrets(oracle)) {
-    for (const shingle of shingles(normalize(secret), shingleSize)) {
-      if (!sourceShingles.has(shingle)) tainted.add(shingle);
+    const secretWords = normalize(secret.text);
+    const secretShingles = shingles(secretWords, shingleSize);
+    let contributedShingle = false;
+    for (const shingle of secretShingles) {
+      if (!sourceShingles.has(shingle)) {
+        tainted.add(shingle);
+        contributedShingle = true;
+      }
     }
+
+    let guard: SecretGuardKind;
+    if (contributedShingle) {
+      guard = 'SHINGLE';
+    } else {
+      const normalizedSecret = secretWords.join(' ');
+      if (normalizedSecret.length > 0 && !normalizedSourceText.includes(normalizedSecret)) {
+        taintedPhrases.add(normalizedSecret);
+        guard = 'EXACT_SUBSTRING';
+      } else {
+        // Дословное написание секрета либо пусто, либо буквально есть в
+        // источнике — ни shingle, ни exact-substring механизм не отличит его
+        // утечку от легитимного цитирования источника. Честно репортится,
+        // не подделывается (Step 9: "expose/report unguarded secrets").
+        guard = 'UNGUARDED';
+      }
+    }
+
+    secretCoverage.push({
+      caseId: secret.caseId,
+      field: secret.field,
+      negativeIndex: secret.negativeIndex,
+      guard,
+    });
   }
+
+  const unguardedSecretCount = secretCoverage.filter((e) => e.guard === 'UNGUARDED').length;
 
   return {
     taintedShingleCount: tainted.size,
+    secretCoverage,
+    unguardedSecretCount,
 
     assertClean(payload: unknown, label: string): void {
-      if (tainted.size === 0) return;
+      if (tainted.size === 0 && taintedPhrases.size === 0) return;
 
       const strings: string[] = [];
       collectStrings(payload, strings);
 
       for (const value of strings) {
-        for (const shingle of shingles(normalize(value), shingleSize)) {
-          if (tainted.has(shingle)) {
-            throw new Error(
-              `Утечка oracle в «${label}»: обнаружена формулировка, выводимая только из ключа — «${shingle}». ` +
-                'Прогон недействителен (план §0.3).'
-            );
+        if (tainted.size > 0) {
+          for (const shingle of shingles(normalize(value), shingleSize)) {
+            if (tainted.has(shingle)) {
+              throw new OracleTaintError(
+                `Утечка oracle в «${label}»: обнаружена формулировка, выводимая только из ключа — «${shingle}». ` +
+                  'Прогон недействителен (план §0.3).'
+              );
+            }
+          }
+        }
+        if (taintedPhrases.size > 0) {
+          const normalizedValue = normalize(value).join(' ');
+          for (const phrase of taintedPhrases) {
+            if (phrase.length > 0 && normalizedValue.includes(phrase)) {
+              throw new OracleTaintError(
+                `Утечка oracle в «${label}»: обнаружена короткая формулировка, выводимая только из ключа — «${phrase}». ` +
+                  'Прогон недействителен (план §0.3).'
+              );
+            }
           }
         }
       }

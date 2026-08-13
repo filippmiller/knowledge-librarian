@@ -3,8 +3,13 @@ name: CI
 on:
   push:
     branches: [ master ]
-  pull_request:
-    branches: [ master ]
+  # Без branches-фильтра: PR-стеки (feat/X -> feat/Y -> master, а не только
+  # feat/X -> master напрямую) тоже получают CI. Раньше стековые PR (base —
+  # другая feature-ветка, не master) НИКОГДА не совпадали с этим триггером —
+  # translation-yz9/PR #76 не получил ни одного прогона Actions за всю
+  # сессию именно поэтому (независимое ревью PR #76, Step 8), не из-за
+  # падений или отключённых проверок.
+  pull_request: {}
 
 env:
   # Dummy but well-formed connection string. `prisma generate`/`validate` and

@@ -39,6 +39,12 @@ export interface CompletionRunConfig {
   fallbackPolicy: FallbackPolicy;
   requestTimeoutMs?: number;
   totalDeadlineMs?: number;
+  /** Optional synchronous circuit breaker invoked immediately before every
+   *  raw provider request, including transport retries and fallback. Throwing
+   *  prevents that request from starting. Runtime-only; never persisted. */
+  beforeProviderAttempt?: (attempt: { provider: Provider; model: string }) => void;
+  /** Structured-output observer for exact post-call usage accounting. */
+  onCompletionAttempts?: (attempts: readonly CompletionAttempt[]) => void;
 }
 
 export interface ChatCompletionOptions extends Partial<CompletionRunConfig> {
@@ -77,6 +83,32 @@ export interface ChatCompletionOptions extends Partial<CompletionRunConfig> {
   signal?: AbortSignal;
 }
 
+/** Токены реального вызова провайдера — источник для cost meter (Task 37).
+ *  Отсутствует у ERROR/ABORTED попыток без ответа: нечего посчитать. */
+export interface CompletionUsage {
+  /**
+   * `input_tokens` провайдера как есть. У Anthropic с включённым кэшированием
+   * это НЕкэшированный остаток промпта, а не весь промпт: полный размер входа
+   * равен `inputTokens + cacheCreationInputTokens + cacheReadInputTokens`.
+   * Смысл поля не менялся — менялось то, сколько промпта в него попадает.
+   */
+  inputTokens: number;
+  outputTokens: number;
+  /**
+   * Anthropic `cache_creation_input_tokens` — записано в кэш этим вызовом
+   * (тарифицируется дороже обычного входа). Отсутствует, когда провайдер
+   * счётчика не прислал (OpenAI-путь, ответ без кэша) — не подменяется нулём:
+   * «кэш-запись 0» и «провайдер про кэш ничего не сказал» — разные факты.
+   */
+  cacheCreationInputTokens?: number;
+  /**
+   * Anthropic `cache_read_input_tokens` — прочитано из кэша (тарифицируется
+   * заметно дешевле обычного входа). Ненулевое значение здесь — единственное
+   * прямое доказательство, что breakpoint реально сработал.
+   */
+  cacheReadInputTokens?: number;
+}
+
 export interface CompletionAttempt {
   provider: Provider;
   model: string;
@@ -86,6 +118,7 @@ export interface CompletionAttempt {
   outcome: 'SUCCESS' | 'ERROR' | 'ABORTED';
   statusCode?: number;
   errorCode?: string;
+  usage?: CompletionUsage;
 }
 
 export interface ChatCompletionResult {
@@ -109,6 +142,35 @@ export interface ChatCompletionResult {
   fallbackUsed: boolean;
   /** Каждая попытка по порядку, включая ABORTED и неудачные retry. */
   attempts: CompletionAttempt[];
+  /**
+   * ЛОГИЧЕСКИЕ сообщения, переданные ЭТОМУ вызову — `options.messages` как
+   * они есть, одни и те же для всех попыток (retry/fallback меняют
+   * провайдера или модель, но не промпт). Источник для call-trace log
+   * бенчмарк-раннера (2026-08-10): без этого поля у пользователя не было
+   * способа сопоставить конкретный "плохой" ответ с тем, что именно у
+   * модели спросили — только агрегатная стоимость.
+   *
+   * НЕ обязательно байт-в-байт то, что реально ушло по проводам (Codex
+   * review, 2026-08-10, finding 6): `buildAnthropicPayload` разделяет
+   * system-сообщения в отдельное поле `system`, объединяет их, и может
+   * добавить JSON-mode инструкцию, которой в `options.messages` не было;
+   * OpenAI-путь может добавить аналогичную инструкцию через
+   * `withOpenAiJsonInstruction`. Всё содержимое при этом сохраняется — просто
+   * переструктурировано — так что для отладки (сопоставить "что спросили" с
+   * "что ответили") этого поля достаточно почти всегда; для случая, где
+   * важна ИМЕННО итоговая проводная форма (например: JSON-mode инструкция
+   * сама стала причиной SCHEMA_MISMATCH), см. `buildAnthropicPayload`/
+   * `withOpenAiJsonInstruction` — воспроизвести трансформацию можно оттуда.
+   *
+   * Опционально, но НЕ по той же причине, что `rawText?`/`usage?` выше: на
+   * боевом пути оно заполняется ВСЕГДА (`options.messages` есть у любого
+   * вызова структурно, отсутствовать ему неоткуда). Опционально оно ради уже
+   * существующих тестовых моков в других файлах (`structured-output.test.ts`,
+   * `knowledge-extractor-stream.test.ts`), которые собирают `ChatCompletionResult`
+   * вручную и не обязаны знать про это поле — требовать его сделало бы их
+   * недействительными без всякой пользы для того, что они реально проверяют.
+   */
+  requestMessages?: readonly ChatMessage[];
 }
 
 /**
@@ -126,17 +188,31 @@ export class ChatCompletionError extends Error {
   readonly attempts: CompletionAttempt[];
   readonly errorCode?: string;
   readonly statusCode?: number;
+  /** Same call-trace source as `ChatCompletionResult.requestMessages` — a
+   *  total transport failure still had a real prompt behind it, and that
+   *  prompt is exactly what a debugging trace needs even when no response
+   *  ever came back. Optional in the constructor options bag (not a
+   *  positional parameter) so the two pre-existing test call sites that
+   *  construct this error by hand (`extraction-run.test.ts`,
+   *  `knowledge-extractor-stream.test.ts`) stay valid unchanged. */
+  readonly requestMessages?: readonly ChatMessage[];
 
   constructor(
     message: string,
     attempts: CompletionAttempt[],
-    options?: { cause?: unknown; errorCode?: string; statusCode?: number }
+    options?: {
+      cause?: unknown;
+      errorCode?: string;
+      statusCode?: number;
+      requestMessages?: readonly ChatMessage[];
+    }
   ) {
     super(message);
     this.name = 'ChatCompletionError';
     this.attempts = attempts;
     this.errorCode = options?.errorCode;
     this.statusCode = options?.statusCode;
+    this.requestMessages = options?.requestMessages;
     if (options && 'cause' in options) {
       (this as { cause?: unknown }).cause = options.cause;
     }
@@ -356,8 +432,34 @@ export function resolveRunConfig(
     fallbackPolicy: resolveFallbackPolicy(options),
     requestTimeoutMs: options.requestTimeoutMs,
     totalDeadlineMs: options.totalDeadlineMs,
+    ...(options.beforeProviderAttempt && {
+      beforeProviderAttempt: options.beforeProviderAttempt,
+    }),
+    ...(options.onCompletionAttempts && {
+      onCompletionAttempts: options.onCompletionAttempts,
+    }),
   };
 }
+
+/**
+ * Единая формулировка «отвечай только JSON» для ОБОИХ провайдеров — раньше
+ * один и тот же литерал жил двумя копиями (здесь и в
+ * `withOpenAiJsonInstruction` ниже), и это ровно тот дубль, из-за которого
+ * они рано или поздно разошлись бы при следующей правке одной копии без
+ * другой.
+ *
+ * Хвост про преамбулу/код-забор добавлен намеренно (2026-08-11, после
+ * живого прогона coverage-audit): «не оборачивай в markdown» запрещает
+ * ЗАБОР ВОКРУГ ответа, но не прозу ДО или ПОСЛЕ него — а на моделях с
+ * выключенным `thinking` (см. `postAnthropicMessages`) рассуждение вслух
+ * прямо в ответе стало нормой, не редкостью. Инструкция снижает частоту
+ * такой прозы, но не заменяет устойчивый парсинг: `normalizeJsonResponse()`
+ * всё равно обязан пережить преамбулу, если модель её всё же добавит
+ * (см. три стратегии там). Формулировка ниже сохраняет прежние три
+ * предложения дословно и добавляет к ним недостающее «только сам объект».
+ */
+const JSON_ONLY_RESPONSE_INSTRUCTION =
+  'Respond with valid JSON only. Use double quotes for all keys and string values. Do not wrap in markdown or add commentary. Output the JSON object or array itself and nothing else — no preamble, no explanation before or after it, and no code fence.';
 
 function buildAnthropicPayload(options: ChatCompletionOptions) {
   const systemParts = options.messages
@@ -369,9 +471,7 @@ function buildAnthropicPayload(options: ChatCompletionOptions) {
     .map((m) => ({ role: m.role, content: m.content }));
 
   const responseFormatInstruction =
-    options.responseFormat === 'json_object'
-      ? 'Respond with valid JSON only. Use double quotes for all keys and string values. Do not wrap in markdown or add commentary.'
-      : null;
+    options.responseFormat === 'json_object' ? JSON_ONLY_RESPONSE_INSTRUCTION : null;
 
   const system = [...systemParts, responseFormatInstruction]
     .filter(Boolean)
@@ -383,45 +483,314 @@ function buildAnthropicPayload(options: ChatCompletionOptions) {
   };
 }
 
+/* ------------------------------------------------------------------------ *
+ * Prompt caching (W1-B, 2026-08-10) — только Anthropic.
+ *
+ * Большие system-промпты этого репозитория (экстракция знаний, coverage-audit,
+ * QueryFrame) постоянны в пределах прогона и переотправлялись на КАЖДЫЙ вызов
+ * по полной входной цене. Anthropic кэширует префикс запроса по breakpoint'у
+ * `cache_control`; порядок рендера — `tools` → `system` → `messages`, tools
+ * здесь нет, поэтому system и есть весь стабильный префикс, а меняющийся от
+ * вызова к вызову user-текст лежит ПОСЛЕ breakpoint'а и его не инвалидирует.
+ *
+ * Синтаксис, минимумы и семантика счётчиков — из скилла `claude-api`
+ * (сверено 2026-08-10), не из памяти модели.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Документированный минимум кэшируемого префикса в ТОКЕНАХ, по моделям.
+ * Префикс короче минимума не кэшируется молча (ошибки не будет, но и записи в
+ * кэш тоже — `cache_creation_input_tokens: 0`), то есть breakpoint на нём —
+ * впустую потраченная разметка, которая ещё и выглядит в коде как работающая
+ * оптимизация.
+ *
+ * Минимум НЕ монотонен по поколениям: 512 у Opus 5, но 4096 у Opus 4.6 и
+ * Haiku 4.5. Поэтому «новее — значит меньше порог» здесь неверно, и угадывать
+ * порог по имени модели нельзя.
+ */
+const CACHE_MIN_TOKENS_BY_MODEL: Readonly<Record<string, number>> = {
+  'claude-opus-5': 512,
+  'claude-fable-5': 512,
+  'claude-mythos-5': 512,
+  'claude-opus-4-8': 1024,
+  'claude-sonnet-5': 1024,
+  'claude-sonnet-4-6': 1024,
+  'claude-sonnet-4-5': 1024,
+  'claude-sonnet-4-0': 1024,
+  'claude-opus-4-1': 1024,
+  'claude-opus-4-0': 1024,
+  'claude-opus-4-7': 2048,
+  'claude-mythos-preview': 2048,
+  'claude-opus-4-6': 4096,
+  'claude-opus-4-5': 4096,
+  'claude-haiku-4-5': 4096,
+};
+
+/**
+ * Порог для модели, которой нет в таблице — самый строгий из документированных.
+ * Fail-closed сознательно: неизвестная модель может иметь порог 4096, и
+ * breakpoint ниже него — тихо неработающая оптимизация. Лучше не кэшировать
+ * там, где мы не уверены, чем показывать в коде кэш, которого нет.
+ */
+const UNKNOWN_MODEL_CACHE_MIN_TOKENS = 4096;
+
+function cacheMinTokensFor(model: string): number {
+  const exact = CACHE_MIN_TOKENS_BY_MODEL[model];
+  if (exact !== undefined) return exact;
+  // Датированные снапшоты (`claude-haiku-4-5-20251001`) — тот же порог, что у
+  // алиаса. Берём САМОЕ ДЛИННОЕ совпадение по префиксу, иначе `claude-opus-4-1`
+  // могло бы совпасть с более коротким чужим ключом.
+  let best: number | undefined;
+  let bestLength = 0;
+  for (const [key, min] of Object.entries(CACHE_MIN_TOKENS_BY_MODEL)) {
+    if (model.startsWith(key) && key.length > bestLength) {
+      best = min;
+      bestLength = key.length;
+    }
+  }
+  return best ?? UNKNOWN_MODEL_CACHE_MIN_TOKENS;
+}
+
+/**
+ * Оценка размера промпта в токенах БЕЗ обращения к сети (`count_tokens` — это
+ * оплачиваемый round-trip, а решение нужно принять до отправки).
+ *
+ * Промпты здесь преимущественно русские, а кириллица токенизируется плотнее
+ * латиницы, поэтому единый коэффициент «4 символа = токен» занижал бы оценку
+ * почти вдвое. Отсюда раздельный счёт. Оценка приблизительна by design и
+ * используется ТОЛЬКО как порог «точно хватает / не уверены»: ошибка в меньшую
+ * сторону стоит упущенной экономии, в большую — неработающего breakpoint'а,
+ * и ни то, ни другое не ломает вызов.
+ */
+function estimateTokens(text: string): number {
+  let asciiChars = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) <= 127) asciiChars++;
+  }
+  const nonAsciiChars = text.length - asciiChars;
+  return Math.floor(asciiChars / 4 + nonAsciiChars / 2);
+}
+
+interface AnthropicCachedTextBlock {
+  type: 'text';
+  text: string;
+  cache_control: { type: 'ephemeral' };
+}
+
+/** `system` в проводной форме: строка (без кэша) или блоки (с breakpoint'ом). */
+type AnthropicSystemField = string | AnthropicCachedTextBlock[];
+
+/**
+ * TTL по умолчанию (5 минут) не указывается явно. Запись в кэш стоит ~1.25×
+ * обычного входа при 5-минутном TTL и ~2× при часовом; окупаемость — со
+ * ВТОРОГО чтения в первом случае и только с третьего во втором. Вызовы одного
+ * прогона идут подряд, поэтому 5 минут покрывают их, а часовой TTL просто
+ * удвоил бы цену записи ради окна, которое здесь никому не нужно.
+ */
+function buildAnthropicSystemField(
+  system: string | undefined,
+  model: string
+): AnthropicSystemField | undefined {
+  if (!system) return undefined;
+  if (estimateTokens(system) < cacheMinTokensFor(model)) return system;
+  return [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
+}
+
 /**
  * Robustly normalize and parse JSON from AI responses, even if truncated or wrapped in markdown.
+ *
+ * `thinking: {type:'disabled'}` (см. `postAnthropicMessages` выше) означает,
+ * что на Sonnet 5/Opus 5 модель, не имея внутреннего reasoning, рассуждает
+ * вслух ПРЯМО В ОТВЕТЕ — проза перед JSON теперь обычный случай, а не
+ * редкость. Живой прогон (2026-08-11, coverage-audit) поймал старую версию
+ * этой функции на прозе вида «...в самом JSON видно, что triggerCondition
+ * установлен на `{"all":[...]}`, а...» — цитата ПРИМЕРА внутри рассуждения —
+ * за которой только потом шёл настоящий ответ в ```json-заборе с ключом
+ * `findings`. Старый код резал строку с ПЕРВОЙ `{`/`[` где угодно в тексте,
+ * то есть с примера, а не с ответа. Результат парсился без единой ошибки —
+ * просто был не тем JSON: `findings` отсутствовал, схема падала с
+ * «expected array, received undefined». Модель ответила правильно, парсер
+ * прочитал не то — и не пожаловался.
+ *
+ * Три стратегии по порядку, первая давшая результат — побеждает:
+ *
+ *  1. `tryFencedBlocks` — заборы ``` где угодно в тексте, с ПОСЛЕДНЕГО к
+ *     первому. Рассуждение-потом-ответ означает, что ответ — последний
+ *     забор; более ранние — иллюстрации по ходу рассуждения. Не разобрался
+ *     последний (например сам оборван) — пробуем предыдущий: он всё ещё
+ *     то, что модель САМА пометила как код, а не первая попавшаяся `{` в
+ *     свободном тексте.
+ *  2. `tryBestCompleteSpan` — без заборов вовсе: полные сбалансированные
+ *     значения `{...}`/`[...]` где угодно в тексте, тот же принцип
+ *     «последнее — победитель», просто без markdown-обёртки.
+ *  3. `tryLegacyGreedyRepair` — прежнее поведение как последний рубеж:
+ *     первая `{`/`[` где угодно, жадное закрытие того, что осталось
+ *     открытым, до конца текста. Единственная стратегия, умеющая
+ *     «дочинить» значение, оборванное на середине — и единственная, которая
+ *     должна за это отвечать: шаги 1–2 сознательно СТРОЖЕ (принимают только
+ *     то, что уже само по себе — полное сбалансированное значение), поэтому
+ *     на настоящем обрыве они не найдут кандидата и управление всё равно
+ *     дойдёт досюда.
+ *
+ * Проверка обрыва (`wasRepaired()` в structured-output.ts) не зависит от
+ * того, какая из трёх стратегий сработала: она сравнивает СЫРОЙ ответ
+ * целиком с этим результатом и считает баланс скобок в сыром тексте — не в
+ * том, что вернула эта функция. Не ослабляется этим фиксом, см. разбор в
+ * структурных тестах.
  */
 export function normalizeJsonResponse(raw: string): string {
-  let trimmed = raw.trim();
+  const trimmed = raw.trim();
   if (!trimmed) return '{}';
+  return tryExtractJsonValue(trimmed) ?? '{}';
+}
 
-  // Strip code fences.  Use a position-based approach that is immune to ** inside JSON bodies.
-  if (trimmed.startsWith('`')) {
-    // Remove the opening fence line (e.g. ```json or ```)
-    const firstNewline = trimmed.indexOf('\n');
-    if (firstNewline !== -1) {
-      trimmed = trimmed.slice(firstNewline + 1).trim();
-    } else {
-      trimmed = trimmed.replace(/^`+(?:json)?\s*/i, '').trim();
+/** Перебирает все три стратегии из комментария `normalizeJsonResponse`
+ *  выше. `null` означает «в тексте нет вообще ни одной `{`/`[`». */
+function tryExtractJsonValue(text: string): string | null {
+  return tryFencedBlocks(text) ?? tryBestCompleteSpan(text) ?? tryLegacyGreedyRepair(text);
+}
+
+/** Тройной бэктик, необязательный языковой тег (`json`, и что угодно ещё —
+ *  тег не проверяется, потому что реальным фильтром всё равно служит
+ *  попытка `JSON.parse` ниже, а не имя тега), необязательный перевод строки,
+ *  содержимое до следующего тройного бэктика. `g`, чтобы `matchAll` нашёл
+ *  все заборы, а не только первый; `matchAll` клонирует regex под капотом,
+ *  так что общий модульный `lastIndex` между вызовами не расползается. */
+const FENCE_RE = /```[ \t]*[A-Za-z0-9_+-]*[ \t]*\r?\n?([\s\S]*?)```/g;
+
+/**
+ * Заборы ``` где угодно в тексте, с ПОСЛЕДНЕГО к первому — обоснование
+ * порядка см. `normalizeJsonResponse`. Незакрытый забор (нет второй ```)
+ * НЕ попадает в список: `FENCE_RE` требует закрывающих бэктиков, и это
+ * осознанно — недописанный при обрыве стрима забор обязан остаться
+ * недостижимым отсюда и уйти в `tryLegacyGreedyRepair()`, чтобы
+ * `wasRepaired()` увидел несбалансированные скобки сырого текста и поднял
+ * TRUNCATED_JSON, а не получил тихо «отремонтированный» результат из более
+ * раннего, полностью постороннего забора.
+ */
+function tryFencedBlocks(text: string): string | null {
+  const blocks = Array.from(text.matchAll(FENCE_RE), (match) => match[1]);
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const hit = tryBestCompleteSpan(blocks[i]);
+    if (hit !== null) return hit;
+  }
+  return null;
+}
+
+/**
+ * Полные сбалансированные значения `{...}`/`[...]` в `text`, с ПОСЛЕДНЕГО к
+ * первому опробованные на `JSON.parse` — тот же принцип «ответ идёт
+ * последним», но без забора. Каждый диапазон отдельно проходит через
+ * `escapeControlCharsInStrings`/`coerceJsonSyntax` (те же хелперы, что и
+ * раньше), так что мелкие синтаксические огрехи внутри одного значения
+ * по-прежнему чинятся — не чинится только «слипание» двух РАЗНЫХ значений,
+ * ради чего эта функция и появилась.
+ */
+function tryBestCompleteSpan(text: string): string | null {
+  const spans = findCompleteJsonSpans(text);
+  for (let i = spans.length - 1; i >= 0; i--) {
+    const { start, end } = spans[i];
+    const candidate = coerceJsonSyntax(escapeControlCharsInStrings(text.slice(start, end)));
+    if (parsesAsJsonObjectOrArray(candidate)) return candidate;
+  }
+  return null;
+}
+
+function parsesAsJsonObjectOrArray(candidate: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(candidate);
+    return parsed !== null && typeof parsed === 'object';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Топ-уровневые сбалансированные диапазоны `{...}`/`[...]` в порядке
+ * появления в `text`. В отличие от `balanceJson()` ниже (жадной версии той
+ * же идеи), эта функция ОСТАНАВЛИВАЕТСЯ, как только глубина впервые
+ * возвращается к нулю — то есть два независимых JSON-значения подряд
+ * (пример внутри рассуждения, потом настоящий ответ) дают ДВА раздельных
+ * диапазона, а не один слипшийся кусок текста от первой `{` до последней
+ * `}`/`]` во всём тексте. Это слипание и было первопричиной бага: прежний
+ * `normalizeJsonResponse` резал с первой `{` и звал `balanceJson()`, а та
+ * жадно тянула диапазон до последней закрывающей скобки в целом тексте, не
+ * замечая, что между двумя значениями лежит несвязанная проза — на реальном
+ * прогоне (см. комментарий выше) это в итоге не парсилось вовсе и падало в
+ * `{}`.
+ *
+ * Кавычки учитываются, чтобы `{`/`}` внутри строковых значений (например,
+ * JSON-пример прямо в цитате рассуждения, как в живом прогоне) не сбивали
+ * подсчёт глубины.
+ *
+ * `{`/`[`, для которых глубина ни разу не вернулась к нулю до конца текста
+ * (обрыв на середине значения), намеренно НЕ попадают в результат — такой
+ * диапазон не закрыт, и включать его сюда значило бы называть открытый
+ * кусок текста «полным значением». Обрыв — забота `tryLegacyGreedyRepair()`
+ * и, главное, `wasRepaired()` в structured-output.ts, которая сравнивает
+ * баланс скобок СЫРОГО текста — независимо от того, что вернула эта функция.
+ */
+function findCompleteJsonSpans(text: string): Array<{ start: number; end: number }> {
+  const spans: Array<{ start: number; end: number }> = [];
+  const stack: ('{' | '[')[] = [];
+  let inString = false;
+  let escaped = false;
+  let spanStart = -1;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
     }
-    // Remove a closing fence (``` at start of a line, or at end of string)
-    const closingFence = trimmed.lastIndexOf('\n```');
-    if (closingFence !== -1) {
-      trimmed = trimmed.slice(0, closingFence).trim();
-    } else if (trimmed.endsWith('`')) {
-      trimmed = trimmed.replace(/`+\s*$/, '').trim();
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === '{' || char === '[') {
+      if (stack.length === 0) spanStart = i;
+      stack.push(char);
+      continue;
+    }
+
+    if (char === '}' || char === ']') {
+      const top = stack[stack.length - 1];
+      if ((char === '}' && top === '{') || (char === ']' && top === '[')) {
+        stack.pop();
+        if (stack.length === 0 && spanStart !== -1) {
+          spans.push({ start: spanStart, end: i + 1 });
+          spanStart = -1;
+        }
+      }
+      continue;
     }
   }
 
-  // Find the first JSON-like start
-  const startIndex = trimmed.search(/[{[]/);
-  if (startIndex === -1) return '{}';
-  trimmed = trimmed.slice(startIndex);
+  return spans;
+}
 
-  // Escape literal newlines/carriage-returns inside JSON string values.
-  // The AI sometimes puts real \n in long body fields, which makes JSON.parse fail.
-  trimmed = escapeControlCharsInStrings(trimmed);
-
-  // Attempt to fix truncated JSON by closing open brackets/braces
-  const balanced = balanceJson(trimmed);
-
-  const sanitized = coerceJsonSyntax(balanced);
-  return sanitized;
+/**
+ * Последний рубеж — поведение ДО этого фикса, буквально: первая `{`/`[` где
+ * угодно в тексте, а дальше `balanceJson()` жадно закрывает всё, что
+ * осталось открытым, до конца текста. Единственная из трёх стратегий,
+ * умеющая достраивать значение, оборванное на середине — и обязана
+ * оставаться последней: `tryFencedBlocks`/`tryBestCompleteSpan` строже
+ * (принимают только то, что уже само по себе — полное сбалансированное
+ * значение) и пробуются первыми, так что на настоящем обрыве они честно не
+ * находят кандидата, и управление доходит именно сюда — ровно туда, где
+ * `wasRepaired()` (structured-output.ts) ожидает увидеть «починенный» текст,
+ * чтобы сравнить его с несбалансированным сырым и поднять TRUNCATED_JSON.
+ */
+function tryLegacyGreedyRepair(text: string): string | null {
+  const startIndex = text.search(/[{[]/);
+  if (startIndex === -1) return null;
+  const escaped = escapeControlCharsInStrings(text.slice(startIndex));
+  return coerceJsonSyntax(balanceJson(escaped));
 }
 
 /** Escape literal newlines/CRs that appear inside JSON string values. */
@@ -546,6 +915,17 @@ function coerceJsonSyntax(candidate: string): string {
 }
 
 const RETRYABLE_STATUS_CODES = [429, 529, 503, 502];
+/** Policy for caller-owned bounded retries after provider-layer retries have
+ *  completed. Permanent 4xx failures (bad request, auth, insufficient
+ *  credit, etc.) must not be multiplied by an outer extraction/audit loop. */
+export function isRetryableChatCompletionError(error: ChatCompletionError): boolean {
+  const status = error.statusCode;
+  if (status === undefined) return true;
+  if (status >= 400 && status < 500) {
+    return status === 408 || status === 409 || status === 429;
+  }
+  return status >= 500;
+}
 /** Нормализованные коды ошибок (не числа), означающие транзиентный сбой. */
 const RETRYABLE_ERROR_CODES = new Set([
   'overloaded_error',
@@ -554,6 +934,13 @@ const RETRYABLE_ERROR_CODES = new Set([
   'econnrefused',
   'etimedout',
   'epipe',
+  // `callAnthropic`'s completeness gate (translation-gy3 hardening): thrown
+  // when an Anthropic SSE stream ends without enough frames to prove the
+  // response is whole. A truncated stream is transient by nature (same class
+  // of failure as ECONNRESET) — retrying is correct. This code can ONLY be
+  // produced by our own completeness check below, never by the provider, so
+  // adding it here cannot reclassify any real Anthropic/OpenAI error.
+  'incomplete_stream',
 ]);
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
@@ -737,7 +1124,7 @@ function createAttemptGate(
 async function postAnthropicMessages(
   apiKey: string,
   model: string,
-  system: string | undefined,
+  system: AnthropicSystemField | undefined,
   messages: ReturnType<typeof buildAnthropicPayload>['messages'],
   maxTokens: number,
   temperature: number | undefined,
@@ -755,10 +1142,137 @@ async function postAnthropicMessages(
       system,
       messages,
       max_tokens: maxTokens,
+      stream: true,
       ...(temperature !== undefined && { temperature }),
+      // `thinking` раньше нигде в этом файле не выставлялся — поля просто не
+      // существовало, когда код писался под семантику "omission = нет
+      // extended thinking". На Claude Sonnet 5 (и Claude Opus 5) omission
+      // ПЕРЕСТАЛ быть нейтральным: без явного поля модель включает adaptive
+      // thinking САМА, по умолчанию — ровно противоположность того, для чего
+      // написан весь этот файл (structured JSON extraction/audit/
+      // classification, а не reasoning). Живое доказательство: стадия
+      // dependency-graph-proposal с maxTokens: 16000 дважды подряд вернула
+      // outputTokens: 16000 — РОВНО потолок — с rawText: '' (пустой текст) и
+      // text: '{}'; наружу вместо честного "вывод обрезан" ушёл
+      // SCHEMA_MISMATCH на path: 'edges'. Модель потратила весь токен-бюджет
+      // на thinking и не выдала ответа. Тот же паттерн уронил более ранний
+      // coverage-audit вызов на outputTokens: 4096. НЕ убирать это поле как
+      // избыточное — оно кажется избыточным ТОЛЬКО потому, что раньше
+      // omission давал нужное поведение; на текущих моделях это больше не так.
+      thinking: { type: 'disabled' },
     }),
     ...(signal && { signal }),
   });
+}
+
+/**
+ * Anthropic SSE — единственный парсер в кодовой базе (`No Shadow Systems`).
+ * И `callAnthropic`, и Anthropic-ветка `streamProviderTokens` читают через
+ * него; второй копии buffer/decode/split-on-`\n`/`data: `-parse цикла быть
+ * не должно.
+ *
+ * Отдаёт КАЖДЫЙ фрейм со строковым полем `type` — включая
+ * `message_start`/`message_delta`/`ping`/`message_stop`, а не только
+ * `content_block_delta`: что делать с конкретным типом, решает потребитель.
+ */
+async function* parseAnthropicSseFrames(
+  response: Response
+): AsyncGenerator<{ type: string; data: Record<string, unknown> }> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new ProviderRequestError('Failed to get response body reader');
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  // finally: ранний выход потребителя (throw/break в теле `for await`)
+  // обязан закрыть HTTP-соединение, иначе отменённый стрим продолжает качать
+  // токены (и деньги).
+  try {
+    let done = false;
+    while (!done) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+
+      buffer += decoder.decode(chunk.value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const content = line.slice(6).trim();
+        if (content === '[DONE]') {
+          done = true;
+          break;
+        }
+        try {
+          const data = JSON.parse(content) as Record<string, unknown>;
+          if (typeof data.type === 'string') {
+            yield { type: data.type, data };
+          }
+        } catch {
+          // Ignore parse errors for non-json lines
+        }
+      }
+    }
+
+    // EOS flush (translation-gy3 hardening, 2026-08-11): SSE has no
+    // Content-Length, so a socket closing mid-response is indistinguishable
+    // from a clean end from inside this loop. The loop above only ever
+    // parses a line once it sees the trailing `\n` — the LAST line of a real
+    // response (typically `message_stop`, or whatever the connection was
+    // mid-way through flushing when it closed) can arrive with no trailing
+    // `\n` at all, and used to be dropped on the floor together with the
+    // decoder's own pending state. `decoder.decode()` with no arguments
+    // flushes any trailing multi-byte sequence `{ stream: true }` held back
+    // above; only after that is `buffer` the true final text, safe to treat
+    // as one last (possibly unterminated) line.
+    buffer += decoder.decode();
+    if (buffer.startsWith('data: ')) {
+      const content = buffer.slice(6).trim();
+      if (content && content !== '[DONE]') {
+        try {
+          const data = JSON.parse(content) as Record<string, unknown>;
+          if (typeof data.type === 'string') {
+            yield { type: data.type, data };
+          }
+        } catch {
+          // Same as the mid-stream case above: not valid JSON, ignore.
+        }
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+}
+
+/**
+ * Мид-стрим `type: 'error'` раньше молча проглатывался (старый парсер
+ * фильтровал только `content_block_delta`) — ретрай/фоллбэк-классификация
+ * никогда его не видела. Единственная точка, где такой фрейм становится
+ * исключением; оба потребителя `parseAnthropicSseFrames` обязаны звать её.
+ *
+ * Точная проводная форма ошибочного фрейма Anthropic не подтверждена
+ * отдельно от синхронного тела ответа — код НАМЕРЕННО защитный: любой фрейм
+ * с `type: 'error'` не должен пройти молча, каким бы ни было `data.error`.
+ */
+function throwIfAnthropicErrorFrame(frame: { type: string; data: Record<string, unknown> }): void {
+  if (frame.type !== 'error') return;
+  const errorField = frame.data.error;
+  const errorObj =
+    typeof errorField === 'object' && errorField !== null
+      ? (errorField as Record<string, unknown>)
+      : undefined;
+  const message =
+    typeof errorObj?.message === 'string' ? errorObj.message : 'Unknown Anthropic streaming error';
+  const errorCode = typeof errorObj?.type === 'string' ? errorObj.type : undefined;
+  throw new ProviderRequestError(`Anthropic API error: ${message}`, { errorCode });
+}
+
+interface ProviderCallResult {
+  text: string;
+  /** `null` when the provider's response didn't carry a usage block —
+   *  don't fabricate zeros, a cost meter reading 0 looks like a free call. */
+  usage: CompletionUsage | null;
 }
 
 async function callAnthropic(
@@ -766,7 +1280,7 @@ async function callAnthropic(
   model: string,
   defaults: ResolvedDefaults,
   signal: AbortSignal | undefined
-): Promise<string> {
+): Promise<ProviderCallResult> {
   const apiKey = defaults.anthropicApiKey;
   if (!apiKey) {
     throw new ProviderRequestError('ANTHROPIC_API_KEY is not set', {
@@ -775,10 +1289,11 @@ async function callAnthropic(
   }
 
   const { system, messages } = buildAnthropicPayload(options);
+  const systemField = buildAnthropicSystemField(system, model);
   const maxTokens = defaults.anthropicMaxTokens;
   const temperature = defaults.temperature;
 
-  let response = await postAnthropicMessages(apiKey, model, system, messages, maxTokens, temperature, signal);
+  let response = await postAnthropicMessages(apiKey, model, systemField, messages, maxTokens, temperature, signal);
 
   // Reasoning/thinking-tier models (e.g. claude-sonnet-5, claude-opus-5) reject
   // an explicit temperature outright — extended thinking fixes it internally.
@@ -787,7 +1302,7 @@ async function callAnthropic(
   if (!response.ok && response.status === 400) {
     const errorBody = await response.clone().text();
     if (/temperature.{0,40}deprecated/i.test(errorBody)) {
-      response = await postAnthropicMessages(apiKey, model, system, messages, maxTokens, undefined, signal);
+      response = await postAnthropicMessages(apiKey, model, systemField, messages, maxTokens, undefined, signal);
     }
   }
 
@@ -799,22 +1314,124 @@ async function callAnthropic(
     );
   }
 
-  const data = (await response.json()) as {
-    content?: { type: string; text?: string }[];
-    error?: { message?: string; type?: string };
-  };
+  let content = '';
+  let inputTokens: number | undefined;
+  let outputTokens: number | undefined;
+  let cacheCreationInputTokens: number | undefined;
+  let cacheReadInputTokens: number | undefined;
+  let frameCount = 0;
+  let sawMessageStart = false;
 
-  if (data.error?.message) {
-    throw new ProviderRequestError(`Anthropic API error: ${data.error.message}`, {
-      errorCode: data.error.type,
-    });
+  for await (const frame of parseAnthropicSseFrames(response)) {
+    throwIfAnthropicErrorFrame(frame);
+    frameCount++;
+
+    if (frame.type === 'message_start') {
+      sawMessageStart = true;
+      // input_tokens/кэш-счётчики приходят здесь. message.usage тоже несёт
+      // output_tokens, но это ПРОВИЗОРНОЕ значение (стрим только начался —
+      // почти всегда 0) и оно сознательно НЕ читается в `outputTokens`.
+      // До этого фикса (translation-gy3 hardening) провизорное значение
+      // писалось в `outputTokens` и проходило проверку `typeof outputTokens
+      // === 'number'`, даже если message_delta так и не пришёл: стрим,
+      // оборванный на середине, возвращался как SUCCESS с outputTokens: 0 —
+      // реальный оплаченный вывод учитывался как бесплатный, а вызывающий
+      // получал частичный текст под видом полного ответа. Единственный
+      // источник `outputTokens` теперь — ветка message_delta ниже.
+      const message = frame.data.message;
+      const usage =
+        typeof message === 'object' && message !== null
+          ? (message as Record<string, unknown>).usage
+          : undefined;
+      if (typeof usage === 'object' && usage !== null) {
+        const u = usage as Record<string, unknown>;
+        if (typeof u.input_tokens === 'number') inputTokens = u.input_tokens;
+        if (typeof u.cache_creation_input_tokens === 'number') {
+          cacheCreationInputTokens = u.cache_creation_input_tokens;
+        }
+        if (typeof u.cache_read_input_tokens === 'number') {
+          cacheReadInputTokens = u.cache_read_input_tokens;
+        }
+      }
+      continue;
+    }
+
+    if (frame.type === 'content_block_delta') {
+      const delta = frame.data.delta;
+      if (typeof delta === 'object' && delta !== null) {
+        const d = delta as Record<string, unknown>;
+        if (d.type === 'text_delta' && typeof d.text === 'string') {
+          content += d.text;
+        }
+      }
+      continue;
+    }
+
+    if (frame.type === 'message_delta') {
+      // Единственный источник ФИНАЛЬНОГО output_tokens во всём разборе.
+      const usage = frame.data.usage;
+      if (typeof usage === 'object' && usage !== null) {
+        const u = usage as Record<string, unknown>;
+        if (typeof u.output_tokens === 'number') outputTokens = u.output_tokens;
+      }
+      continue;
+    }
   }
 
-  const content = Array.isArray(data.content)
-    ? data.content.map((part) => part.text || '').join('')
-    : '';
+  /*
+   * Completeness gate (translation-gy3 hardening, 2026-08-11).
+   *
+   * SSE has no Content-Length: a socket closing mid-response is
+   * indistinguishable from a clean end from inside the loop above. Without
+   * this gate, the function simply falls through with whatever it collected
+   * before the cut, and the fields below would decide SUCCESS-with-null-usage
+   * (or worse, SUCCESS-with-partial-text) purely by accident of which frames
+   * happened to arrive first. `usage === null` already kills any BUDGETED run
+   * downstream — `CostLedger.record()` throws `UnverifiableCostError` — but
+   * confusingly, far from here, without ever saying a truncated stream was
+   * the actual cause. Failing HERE, loudly and specifically, turns that
+   * silent/confusing failure into a diagnosable, retryable one — matching
+   * what the OLD non-streaming `response.json()` path did for a truly empty
+   * body (threw, instead of fabricating a result).
+   *
+   * "Complete" requires a real `message_start` usage block (input_tokens
+   * present) AND a `message_delta` that supplied the final output_tokens.
+   * `message_stop` is deliberately NOT required: the EOS flush above proves a
+   * stream can legitimately end the instant `message_delta` lands, with no
+   * trailing newline and no `message_stop` ever making it onto the wire
+   * before the connection closed — that is still a complete, correctly-priced
+   * answer, and `message_stop` itself carries no data this function uses.
+   * Requiring it would mean rejecting exactly the case the EOS flush exists
+   * to accept.
+   */
+  if (!sawMessageStart || typeof inputTokens !== 'number') {
+    const reason = !sawMessageStart
+      ? frameCount === 0
+        ? 'no SSE frames were received (empty or unreadable response body)'
+        : 'no message_start frame was received'
+      : 'message_start carried no input_tokens usage';
+    throw new ProviderRequestError(`Anthropic stream ended incomplete: ${reason}`, {
+      errorCode: 'incomplete_stream',
+    });
+  }
+  if (typeof outputTokens !== 'number') {
+    throw new ProviderRequestError(
+      'Anthropic stream ended incomplete: no message_delta with a final output_tokens was received (connection likely dropped before the model finished responding)',
+      { errorCode: 'incomplete_stream' }
+    );
+  }
 
-  return content.trim();
+  // Кэш-счётчики добавляются ТОЛЬКО когда провайдер их прислал: ключ со
+  // значением undefined виден в `toEqual` и сделал бы красными уже
+  // существующие моки usage в других файлах, ничего не сообщив взамен.
+  const usage: CompletionUsage = {
+    inputTokens,
+    outputTokens,
+    ...(typeof cacheCreationInputTokens === 'number' && { cacheCreationInputTokens }),
+    ...(typeof cacheReadInputTokens === 'number' && { cacheReadInputTokens }),
+  };
+
+  return { text: content.trim(), usage };
 }
 
 /**
@@ -836,18 +1453,33 @@ function withOpenAiJsonInstruction(options: ChatCompletionOptions): ChatMessage[
     ...options.messages,
     {
       role: 'system',
-      content:
-        'Respond with valid JSON only. Use double quotes for all keys and string values. Do not wrap in markdown or add commentary.',
+      content: JSON_ONLY_RESPONSE_INSTRUCTION,
     },
   ];
 }
 
+/**
+ * Кэширование промпта здесь сознательно НЕ реализовано: у OpenAI другая
+ * семантика — кэш префикса включается на их стороне автоматически, без
+ * какого-либо аналога `cache_control` в запросе, со своим порогом и своими
+ * условиями попадания. Добавить сюда «то же самое» нечего: любая разметка,
+ * придуманная по аналогии с Anthropic, была бы неизвестным полем в их API.
+ * Соответственно и кэш-счётчиков в `CompletionUsage` этот путь не заполняет —
+ * `prompt_tokens` у OpenAI остаётся полным входом, а не остатком.
+ */
 async function callOpenAI(
   options: ChatCompletionOptions,
   model: string,
   defaults: ResolvedDefaults,
   signal: AbortSignal | undefined
-): Promise<string> {
+): Promise<ProviderCallResult> {
+  const requestOptions = {
+    ...(signal && { signal }),
+    // When the raw-attempt circuit breaker is active, chat-provider owns
+    // retries. Hidden SDK retries would bypass the breaker. Unbudgeted
+    // production paths omit this and preserve the shared client default.
+    ...(options.beforeProviderAttempt && { maxRetries: 0 }),
+  };
   const response = await openai.chat.completions.create(
     {
       model,
@@ -858,10 +1490,17 @@ async function callOpenAI(
         response_format: { type: options.responseFormat },
       }),
     },
-    signal ? { signal } : undefined
+    Object.keys(requestOptions).length > 0 ? requestOptions : undefined
   );
 
-  return response.choices[0]?.message?.content?.trim() || '';
+  const text = response.choices[0]?.message?.content?.trim() || '';
+  const usage =
+    typeof response.usage?.prompt_tokens === 'number' &&
+    typeof response.usage?.completion_tokens === 'number'
+      ? { inputTokens: response.usage.prompt_tokens, outputTokens: response.usage.completion_tokens }
+      : null;
+
+  return { text, usage };
 }
 
 type AttemptResult =
@@ -881,10 +1520,11 @@ async function runCompletionAttempt(
   const gate = createAttemptGate(options.signal, timeoutMs);
 
   try {
-    const raw =
+    const providerResult =
       provider === 'anthropic'
         ? await callAnthropic(options, model, defaults, gate.signal)
         : await callOpenAI(options, model, defaults, gate.signal);
+    const raw = providerResult.text;
 
     const text =
       options.responseFormat === 'json_object' ? normalizeJsonResponse(raw) : raw;
@@ -899,6 +1539,7 @@ async function runCompletionAttempt(
         startedAt,
         latencyMs: Date.now() - startedMs,
         outcome: 'SUCCESS',
+        ...(providerResult.usage && { usage: providerResult.usage }),
       },
     };
   } catch (error) {
@@ -985,6 +1626,7 @@ export async function createChatCompletionDetailed(
     model: string,
     isPrimary: boolean
   ): Promise<AttemptResult> => {
+    options.beforeProviderAttempt?.({ provider, model });
     const { ms, code } = attemptTimeout();
     const result = await runCompletionAttempt(
       provider,
@@ -1015,6 +1657,7 @@ export async function createChatCompletionDetailed(
         servedByModel: primaryModel,
         fallbackUsed: false,
         attempts,
+        requestMessages: options.messages,
       };
     }
 
@@ -1063,6 +1706,7 @@ export async function createChatCompletionDetailed(
         servedByModel: fallbackTarget.model,
         fallbackUsed: true,
         attempts,
+        requestMessages: options.messages,
       };
     }
     console.error(
@@ -1082,6 +1726,7 @@ export async function createChatCompletionDetailed(
     cause: rootError,
     errorCode: extractErrorCode(rootError),
     statusCode: extractStatusCode(rootError),
+    requestMessages: options.messages,
   });
 }
 
@@ -1113,15 +1758,22 @@ async function* streamProviderTokens(
     }
 
     const { system, messages } = buildAnthropicPayload(options);
+    const systemField = buildAnthropicSystemField(system, model);
     const maxTokens = defaults.anthropicMaxTokens;
     const buildBody = (withTemperature: boolean) =>
       JSON.stringify({
         model,
-        system,
+        system: systemField,
         messages,
         max_tokens: maxTokens,
         stream: true,
         ...(withTemperature && { temperature }),
+        // См. postAnthropicMessages() за полным разбором: omission `thinking`
+        // не нейтрален на Sonnet 5/Opus 5 (adaptive thinking по умолчанию,
+        // живой прогон уронил dependency-graph-proposal на outputTokens:
+        // 16000/16000 с пустым текстом) — явный disabled обязателен и здесь,
+        // в token-streaming пути, не только в буферизованном.
+        thinking: { type: 'disabled' },
       });
     const post = (withTemperature: boolean) =>
       fetch('https://api.anthropic.com/v1/messages', {
@@ -1154,43 +1806,15 @@ async function* streamProviderTokens(
       );
     }
 
-    const reader = response.body?.getReader();
-    if (!reader) throw new ProviderRequestError('Failed to get response body reader');
-
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    // finally: ранний выход потребителя обязан закрыть HTTP-соединение, иначе
-    // отменённый стрим продолжает качать токены (и деньги).
-    try {
-      let done = false;
-      while (!done) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
-
-        buffer += decoder.decode(chunk.value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const content = line.slice(6).trim();
-          if (content === '[DONE]') {
-            done = true;
-            break;
-          }
-          try {
-            const data = JSON.parse(content);
-            if (data.type === 'content_block_delta' && data.delta?.text) {
-              yield data.delta.text;
-            }
-          } catch {
-            // Ignore parse errors for non-json lines
-          }
-        }
+    for await (const frame of parseAnthropicSseFrames(response)) {
+      throwIfAnthropicErrorFrame(frame);
+      if (frame.type !== 'content_block_delta') continue;
+      const delta = frame.data.delta;
+      if (typeof delta !== 'object' || delta === null) continue;
+      const d = delta as Record<string, unknown>;
+      if (d.type === 'text_delta' && typeof d.text === 'string') {
+        yield d.text;
       }
-    } finally {
-      await reader.cancel().catch(() => {});
     }
     return;
   }
@@ -1369,6 +1993,7 @@ export function createChatCompletionStreamDetailed(
         servedByModel: model,
         fallbackUsed: false,
         attempts,
+        requestMessages: options.messages,
       });
       return;
     }
@@ -1395,7 +2020,7 @@ export function createChatCompletionStreamDetailed(
         ? abortReason
         : rawMessageOf(error),
       attempts,
-      { cause: error, errorCode, statusCode }
+      { cause: error, errorCode, statusCode, requestMessages: options.messages }
     );
     queueFailure = failure;
     queueClosed = true;

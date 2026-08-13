@@ -21,13 +21,56 @@ function validUnit(overrides: Record<string, unknown> = {}): Record<string, unkn
     facets: { scenario: 'apostille.zags.spb' },
     triggerCondition: null,
     numericConstraint: null,
-    parentRuleRef: null,
+    extractionRef: 'u1',
+    parentExtractionRef: null,
     sourceSpan: VALID_SOURCE_SPAN,
     evidenceByField: { statement: VALID_SOURCE_SPAN, facets: VALID_SOURCE_SPAN },
     uncertainties: [],
     ...overrides,
   };
 }
+
+describe('uncertainties — ключ ПРОПУЩЕН целиком (не []), тот же класс LLM-выдачи, что уже нормализован для triggerCondition/numericConstraint', () => {
+  // Живой прогон против openai/gpt-4o (goal-shift benchmark, 2026-08-09):
+  // модель СИСТЕМАТИЧЕСКИ (6 из 6 попыток) не включала ключ uncertainties в
+  // JSON вовсе, хотя промпт требует его всегда (даже пустым массивом).
+  // triggerCondition/numericConstraint уже получили `.nullish().transform(v
+  // => v ?? null)` за ровно то же поведение — uncertainties отставал.
+  it('unit без ключа uncertainties -> валиден, uncertainties становится []', () => {
+    const { uncertainties: _omitted, ...withoutUncertainties } = validUnit();
+    const parsed = extractedKnowledgeUnitSchema.safeParse(withoutUncertainties);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.uncertainties).toEqual([]);
+  });
+
+  it('unit с uncertainties: null -> тоже валиден, становится []', () => {
+    const parsed = extractedKnowledgeUnitSchema.safeParse(validUnit({ uncertainties: null }));
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.uncertainties).toEqual([]);
+  });
+
+  it('unit с реальными uncertainties — не подменяются пустым массивом', () => {
+    const real = [{ kind: 'OTHER' as const, description: 'находка', quote: 'x' }];
+    const parsed = extractedKnowledgeUnitSchema.safeParse(validUnit({ uncertainties: real }));
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.uncertainties).toEqual(real);
+  });
+});
+
+describe('facets — значение null (не {}), тот же класс LLM-выдачи (goal-shift benchmark, 2026-08-09, openai/gpt-4o: facets: null на первой попытке)', () => {
+  it('unit с facets: null -> валиден, facets становится {}', () => {
+    const parsed = extractedKnowledgeUnitSchema.safeParse(validUnit({ facets: null }));
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.facets).toEqual({});
+  });
+
+  it('unit с реальными facets — не подменяются пустым объектом', () => {
+    const real = { scenario: 'apostille.zags.spb' };
+    const parsed = extractedKnowledgeUnitSchema.safeParse(validUnit({ facets: real }));
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.facets).toEqual(real);
+  });
+});
 
 describe('sourceSpanSchema', () => {
   it('принимает непустые anchor и quote', () => {
@@ -224,6 +267,58 @@ describe('extractedKnowledgeUnitSchema — triggerCondition/numericConstraint п
     const result = extractedKnowledgeUnitSchema.safeParse(
       validUnit({ triggerCondition: { description: 'в общественном месте' } })
     );
+    expect(result.success).toBe(false);
+  });
+
+  it('РЕАЛЬНЫЙ живой прогон (claude-haiku-4-5, scratchpad/run1-log.txt, воспроизведено 2 из 3 попыток): triggerCondition/numericConstraint ПРОПУЩЕНЫ ключом целиком (не null), а не выдуманы — нормализуются в null, а не отвергаются', () => {
+    const { triggerCondition: _t, ...withoutTrigger } = validUnit();
+    const triggerResult = extractedKnowledgeUnitSchema.safeParse(withoutTrigger);
+    expect(triggerResult.success).toBe(true);
+    if (triggerResult.success) expect(triggerResult.data.triggerCondition).toBeNull();
+
+    const { numericConstraint: _n, ...withoutNumeric } = validUnit();
+    const numericResult = extractedKnowledgeUnitSchema.safeParse(withoutNumeric);
+    expect(numericResult.success).toBe(true);
+    if (numericResult.success) expect(numericResult.data.numericConstraint).toBeNull();
+  });
+});
+
+describe('extractedKnowledgeUnitSchema — extractionRef/parentExtractionRef (preflight C, translation-djc)', () => {
+  it('extractionRef обязателен — без него отвергается', () => {
+    const { extractionRef: _drop, ...withoutRef } = validUnit();
+    expect(extractedKnowledgeUnitSchema.safeParse(withoutRef).success).toBe(false);
+  });
+
+  it.each(['', '  '])('пустой по смыслу extractionRef (%j) отвергается', (blank) => {
+    expect(extractedKnowledgeUnitSchema.safeParse(validUnit({ extractionRef: blank })).success).toBe(
+      false
+    );
+  });
+
+  it('parentExtractionRef: null — валидно (unit самостоятелен)', () => {
+    expect(
+      extractedKnowledgeUnitSchema.safeParse(validUnit({ parentExtractionRef: null })).success
+    ).toBe(true);
+  });
+
+  it('parentExtractionRef непустой строкой — валидно', () => {
+    expect(
+      extractedKnowledgeUnitSchema.safeParse(validUnit({ parentExtractionRef: 'u0' })).success
+    ).toBe(true);
+  });
+
+  it.each(['', '  '])('пустая по смыслу parentExtractionRef (%j) отвергается', (blank) => {
+    expect(
+      extractedKnowledgeUnitSchema.safeParse(validUnit({ parentExtractionRef: blank })).success
+    ).toBe(false);
+  });
+
+  it('старое поле parentRuleRef на новой схеме отвергается — strictObject, не тихо игнорируется', () => {
+    const { extractionRef: _drop, parentExtractionRef: _drop2, ...withoutNewFields } = validUnit();
+    const result = extractedKnowledgeUnitSchema.safeParse({
+      ...withoutNewFields,
+      parentRuleRef: null,
+    });
     expect(result.success).toBe(false);
   });
 });

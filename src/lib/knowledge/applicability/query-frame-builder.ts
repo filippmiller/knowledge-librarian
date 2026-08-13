@@ -122,6 +122,19 @@ function resolveTriggerFactRawValue(fact: TriggerFactKey, rawValue: string): unk
   return parsed.success ? parsed.data : undefined;
 }
 
+const HISTORICAL_CONSENT_PATTERN =
+  /(?:раньше|ранее|прежде|до\s+этого|в\s+прошл(?:ый|ом)\s+раз|когда-то|не\s+возражал[аи]?)/iu;
+
+const CURRENT_CONSENT_IMPOSSIBLE_PATTERN =
+  /(?:спящ\p{L}*|спит|без\s+сознания|бессознательн\p{L}*|не\s+может\s+(?:сейчас\s+)?(?:дать|подтвердить|выразить)\s+согласие|не\s+способ\p{L}*\s+(?:сейчас\s+)?(?:дать|подтвердить|выразить)\s+согласие)/iu;
+
+function deriveCurrentConsentAbsence(message: ConversationMessage): FacetEvidence | null {
+  const match = CURRENT_CONSENT_IMPOSSIBLE_PATTERN.exec(message.text);
+  return match === null
+    ? null
+    : { source: 'CURRENT_MESSAGE', messageId: message.id, quote: match[0] };
+}
+
 interface ResolvedFacetMention {
   readonly value: string;
   readonly polarity: 'INCLUDE' | 'EXCLUDE';
@@ -150,6 +163,22 @@ function resolveFacetMentions(
   return resolved;
 }
 
+/**
+ * Пер-значное согласование текущего сообщения с историей (pre-retrieval
+ * hardening, Step 6). Раньше `winning = current.length > 0 ? current :
+ * history` отбрасывал историю ЦЕЛИКОМ, как только текущее сообщение
+ * упоминало facet ХОТЬ ЧТО-ТО — "и апостиль тоже" (текущее упоминает только
+ * apostille, не повторяя "перевод") тихо терял "перевод" из истории и вдобавок
+ * ошибочно попадал в ambiguities как "конфликт".
+ *
+ * Правильная гранулярность — не сообщение целиком, а КОНКРЕТНОЕ значение:
+ * если текущее сообщение высказалось об этом значении (в любую полярность —
+ * INCLUDE или EXCLUDE), его мнение побеждает для ЭТОГО значения (замена). Если
+ * текущее о значении вообще не говорило, значение наследуется из истории как
+ * есть (добавление). Это НЕ "всегда объединять историю": значение, которое
+ * текущее сообщение явно перепол­яризовало (например EXCLUDE поверх истории
+ * INCLUDE — "не апостиль, а легализация"), переопределяется, а не сливается.
+ */
 function buildFacetState(
   facet: FacetKey,
   mentions: readonly RawFacetMention[],
@@ -159,61 +188,57 @@ function buildFacetState(
   const resolved = resolveFacetMentions(facet, mentions);
   const current = resolved.filter((m) => m.evidence.messageId === currentMessageId);
   const history = resolved.filter((m) => m.evidence.messageId !== currentMessageId);
+  if (current.length === 0 && history.length === 0) return { state: 'UNKNOWN' };
 
-  const winning = current.length > 0 ? current : history;
-  const source: 'CURRENT_MESSAGE' | 'HISTORY' = current.length > 0 ? 'CURRENT_MESSAGE' : 'HISTORY';
-
-  if (winning.length === 0) return { state: 'UNKNOWN' };
-
-  if (current.length > 0 && history.length > 0) {
-    const currentValues = setOf(current);
-    const historyValues = setOf(history);
-    // История ⊆ текущее — не конфликт: текущее сообщение ДОБАВИЛО значение,
-    // не отреклось от того, что было известно ("и апостиль тоже нужен" поверх
-    // "нужен перевод"). Конфликт — когда текущее пропускает или меняет то,
-    // что утверждала история, ровно как в примере плана "не апостиль, а
-    // легализация" (история говорила про апостиль, текущее — про другое).
-    if (!isSubsetOf(historyValues, currentValues)) {
+  // Самопротиворечие ВНУТРИ текущего сообщения (одно значение — сразу INCLUDE
+  // и EXCLUDE в одной реплике) обязано быть отброшено ДО того, как решит,
+  // какое значение "текущее" вообще утверждает — иначе оно могло бы случайно
+  // победить над историей с произвольной из двух полярностей.
+  const currentPolaritiesByValue = new Map<string, Set<'INCLUDE' | 'EXCLUDE'>>();
+  for (const m of current) {
+    const set = currentPolaritiesByValue.get(m.value) ?? new Set<'INCLUDE' | 'EXCLUDE'>();
+    set.add(m.polarity);
+    currentPolaritiesByValue.set(m.value, set);
+  }
+  for (const [value, polarities] of [...currentPolaritiesByValue]) {
+    if (polarities.size > 1) {
       ambiguities.push(
-        `${facet}: текущее сообщение (${[...currentValues].join(', ') || '—'}) противоречит истории (${[...historyValues].join(', ') || '—'})`
+        `${facet}: значение ${value} в текущем сообщении упомянуто и как INCLUDE, и как EXCLUDE одновременно — отброшено`
       );
+      currentPolaritiesByValue.delete(value);
     }
   }
 
-  let include = dedupe(winning.filter((m) => m.polarity === 'INCLUDE').map((m) => m.value));
-  let exclude = dedupe(winning.filter((m) => m.polarity === 'EXCLUDE').map((m) => m.value));
-
-  // Один и тот же resolved-значение как INCLUDE и EXCLUDE одновременно —
-  // самопротиворечие (LLM спутала полярность, или два синонима резолвились в
-  // один id с разной полярностью), а не легальное состояние: `queryFacetStateSchema`
-  // (query-frame.ts) явно запрещает пересечение include/exclude. Строгий отказ
-  // от обоих значений безопаснее, чем произвольный выбор одной из полярностей.
-  const overlap = include.filter((v) => exclude.includes(v));
-  if (overlap.length > 0) {
-    ambiguities.push(
-      `${facet}: значение ${overlap.join(', ')} одновременно INCLUDE и EXCLUDE в одном источнике — отброшено`
-    );
-    include = include.filter((v) => !overlap.includes(v));
-    exclude = exclude.filter((v) => !overlap.includes(v));
+  // Пер-значный merge: текущее выигрывает для значений, о которых оно
+  // высказалось (замена); значения, которых текущее не касалось, наследуются
+  // из истории как есть (добавление).
+  const finalPolarityByValue = new Map<string, 'INCLUDE' | 'EXCLUDE'>();
+  for (const m of history) {
+    if (!currentPolaritiesByValue.has(m.value)) finalPolarityByValue.set(m.value, m.polarity);
+  }
+  for (const [value, polarities] of currentPolaritiesByValue) {
+    finalPolarityByValue.set(value, [...polarities][0]);
   }
 
-  if (include.length === 0 && exclude.length === 0) return { state: 'UNKNOWN' };
+  if (finalPolarityByValue.size === 0) return { state: 'UNKNOWN' };
+
+  const include = [...finalPolarityByValue].filter(([, p]) => p === 'INCLUDE').map(([v]) => v);
+  const exclude = [...finalPolarityByValue].filter(([, p]) => p === 'EXCLUDE').map(([v]) => v);
+
+  const evidenceSourceFor = (value: string): 'CURRENT_MESSAGE' | 'HISTORY' =>
+    currentPolaritiesByValue.has(value) ? 'CURRENT_MESSAGE' : 'HISTORY';
+  const winningMentions = [...current, ...history].filter(
+    (m) => finalPolarityByValue.get(m.value) === m.polarity
+  );
 
   return {
     state: 'KNOWN',
     include,
     exclude,
-    evidence: dedupeEvidence(winning.map((m) => ({ ...m.evidence, source }))),
+    evidence: dedupeEvidence(
+      winningMentions.map((m) => ({ ...m.evidence, source: evidenceSourceFor(m.value) }))
+    ),
   };
-}
-
-function setOf(mentions: readonly ResolvedFacetMention[]): Set<string> {
-  return new Set(mentions.map((m) => `${m.polarity}:${m.value}`));
-}
-
-function isSubsetOf(subset: Set<string>, superset: Set<string>): boolean {
-  for (const v of subset) if (!superset.has(v)) return false;
-  return true;
 }
 
 function dedupe(values: readonly string[]): string[] {
@@ -241,7 +266,16 @@ function buildTriggerFactState(
   const resolved = mentions
     .filter((m) => m.fact === fact)
     .map((m) => ({ value: resolveTriggerFactRawValue(fact, m.rawValue), mention: m }))
-    .filter((r): r is { value: unknown; mention: RawTriggerFactMention } => r.value !== undefined);
+    .filter((r): r is { value: unknown; mention: RawTriggerFactMention } => r.value !== undefined)
+    // Consent is per-current-case and cannot be inherited merely because a
+    // model labeled a historical mention (or a current quote explicitly
+    // talking about the past) EXPLICIT.
+    .filter(
+      (r) =>
+        fact !== 'consentStatus' ||
+        r.value !== 'EXPLICIT' ||
+        (r.mention.messageId === currentMessageId && !HISTORICAL_CONSENT_PATTERN.test(r.mention.quote))
+    );
 
   const current = resolved.filter((r) => r.mention.messageId === currentMessageId);
   const history = resolved.filter((r) => r.mention.messageId !== currentMessageId);
@@ -314,18 +348,50 @@ export function buildQueryFrame(
   if (messages.length === 0) {
     throw new Error('buildQueryFrame: messages не может быть пуст — нет текущего сообщения');
   }
+
+  // Trust boundary (pre-retrieval hardening, Step 5): `id` обязан
+  // однозначно идентифицировать сообщение. Пустой `id` не отличим ни от
+  // одного реального сообщения; задвоенный `id` делает currentMessageId
+  // (последнее сообщение) неразличимым от одноимённого сообщения истории —
+  // упоминание из "истории" молча приписалось бы текущему, и наоборот.
+  const seenMessageIds = new Set<string>();
+  for (const m of messages) {
+    if (m.id.trim().length === 0) {
+      throw new Error(
+        `buildQueryFrame: ConversationMessage.id не может быть пустым (текст: "${m.text.slice(0, 40)}")`
+      );
+    }
+    if (seenMessageIds.has(m.id)) {
+      throw new Error(
+        `buildQueryFrame: ConversationMessage.id "${m.id}" встречается в разговоре дважды — сообщения неразличимы`
+      );
+    }
+    seenMessageIds.add(m.id);
+  }
+
   const currentMessageId = messages[messages.length - 1].id;
   const ambiguities: string[] = [];
+  const messageById = new Map(messages.map((m) => [m.id, m]));
 
   // Упоминание, сославшееся на messageId вне реального разговора — не
   // "исторический факт" и не "текущее сообщение", а непроверяемая цитата.
   // `!== currentMessageId` без этой проверки тихо зачислял бы такое
   // упоминание в HISTORY — ссылка на источник врала бы, даже если само
   // значение реальное (см. ревью Grok на этот PR).
+  //
+  // `quote` дополнительно обязана быть дословной подстрокой текста ИМЕННО
+  // этого сообщения (pre-retrieval hardening, Step 5) — раньше проверялась
+  // только непустота (`nonBlankString` в query-frame.ts), значит
+  // сфабрикованная цитата с настоящим messageId проходила насквозь: реальный
+  // источник, но придуманное содержание. `&&` короткого замыкания оставляет
+  // `messageById.get(...)!` безопасным — до него уже отфильтрован любой
+  // messageId, которого нет в карте.
   const knownMessageIds = new Set(messages.map((m) => m.id));
-  const facetMentions = extraction.facetMentions.filter((m) => knownMessageIds.has(m.messageId));
-  const triggerFactMentions = extraction.triggerFactMentions.filter((m) =>
-    knownMessageIds.has(m.messageId)
+  const facetMentions = extraction.facetMentions.filter(
+    (m) => knownMessageIds.has(m.messageId) && messageById.get(m.messageId)!.text.includes(m.quote)
+  );
+  const triggerFactMentions = extraction.triggerFactMentions.filter(
+    (m) => knownMessageIds.has(m.messageId) && messageById.get(m.messageId)!.text.includes(m.quote)
   );
 
   const facets = { ...UNKNOWN_QUERY_FACETS } as Record<FacetKey, QueryFacetState<unknown>>;
@@ -344,6 +410,20 @@ export function buildQueryFrame(
       currentMessageId,
       ambiguities
     );
+  }
+
+
+  // Deterministic safety signal independent of LLM wording: a sleeping,
+  // unconscious, or currently incapable person cannot provide current
+  // explicit consent. This current-message fact overrides any extracted or
+  // historical consent mention; absence of such evidence remains UNKNOWN.
+  const currentConsentAbsence = deriveCurrentConsentAbsence(messages[messages.length - 1]);
+  if (currentConsentAbsence !== null) {
+    triggerFacts.consentStatus = {
+      state: 'KNOWN',
+      value: 'ABSENT',
+      evidence: [currentConsentAbsence],
+    };
   }
 
   return {

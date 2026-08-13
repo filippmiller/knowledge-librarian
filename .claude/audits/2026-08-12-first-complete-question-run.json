@@ -1,0 +1,503 @@
+{
+  "gradedAt": "2026-08-12T10:30:47.478Z",
+  "runDirs": [
+    "run-1-2026-08-12T10-17-35-768Z",
+    "run-2-2026-08-12T10-27-51-849Z"
+  ],
+  "dependencyGraphSkipped": true,
+  "perRunSummary": [
+    {
+      "runId": "run-1-2026-08-12T10-17-35-768Z",
+      "positivePassed": 6,
+      "positiveTotal": 10,
+      "negativePassed": 0,
+      "negativeTotal": 6,
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-2-2026-08-12T10-27-51-849Z",
+      "positivePassed": 6,
+      "positiveTotal": 10,
+      "negativePassed": 0,
+      "negativeTotal": 6,
+      "dependencyGraphSkipped": true
+    }
+  ],
+  "passRateByCase": [
+    {
+      "caseId": "Q01",
+      "passCount": 0,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q02",
+      "passCount": 0,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q03",
+      "passCount": 0,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q04",
+      "passCount": 2,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q05",
+      "passCount": 2,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q06",
+      "passCount": 2,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q07",
+      "passCount": 2,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q08",
+      "passCount": 2,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q09",
+      "passCount": 2,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q10",
+      "passCount": 0,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q01-M1",
+      "passCount": 0,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q04-N1",
+      "passCount": 0,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q05-N1",
+      "passCount": 0,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q05-M1",
+      "passCount": 0,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q09-N1",
+      "passCount": 0,
+      "totalRuns": 2
+    },
+    {
+      "caseId": "Q10-N1",
+      "passCount": 0,
+      "totalRuns": 2
+    }
+  ],
+  "casesFailingInAnyRun": [
+    "Q01",
+    "Q01-M1",
+    "Q02",
+    "Q03",
+    "Q04-N1",
+    "Q05-M1",
+    "Q05-N1",
+    "Q09-N1",
+    "Q10",
+    "Q10-N1"
+  ],
+  "allVerdicts": [
+    {
+      "runId": "run-1-2026-08-12T10-17-35-768Z",
+      "caseId": "Q01",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "UNVERIFIED_ANSWER",
+      "primaryFailureStage": "RESOLUTION_ERROR",
+      "diagnosticFlags": [
+        "EVIDENCE_GROUP_UNCOVERED (rule 1): до начала перейти в закрытое место, невидимое окружающим"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-12T10-17-35-768Z",
+      "caseId": "Q02",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "HOLD",
+      "primaryFailureStage": "RESOLUTION_ERROR",
+      "diagnosticFlags": [
+        "unexpected CLARIFY resolution for positive case",
+        "resolution: resourceAvailability_unknown",
+        "resolution: exception_trigger_unknown",
+        "resolution: clarification_required_missing_trigger_fact"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-12T10-17-35-768Z",
+      "caseId": "Q03",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "HOLD",
+      "primaryFailureStage": "RESOLUTION_ERROR",
+      "diagnosticFlags": [
+        "unexpected HOLD resolution for positive case",
+        "resolution: numeric_conflict_unresolved"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-12T10-17-35-768Z",
+      "caseId": "Q04",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": [],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-12T10-17-35-768Z",
+      "caseId": "Q05",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": [],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-12T10-17-35-768Z",
+      "caseId": "Q06",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": [],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-12T10-17-35-768Z",
+      "caseId": "Q07",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": [],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-12T10-17-35-768Z",
+      "caseId": "Q08",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": [],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-12T10-17-35-768Z",
+      "caseId": "Q09",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": [],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-12T10-17-35-768Z",
+      "caseId": "Q10",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "UNVERIFIED_ANSWER",
+      "primaryFailureStage": "RESOLUTION_ERROR",
+      "diagnosticFlags": [
+        "EVIDENCE_GROUP_UNCOVERED (rule 10): текущее ясное согласие на помощь; чистые одноразовые перчатки помощника; ограничения по силе воздействия и времени; немедленная остановка по первой просьбе"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-12T10-17-35-768Z",
+      "caseId": "Q01-M1",
+      "pass": false,
+      "expectedDisposition": "HOLD",
+      "actualDisposition": "UNVERIFIED_ANSWER",
+      "primaryFailureStage": "EXPECTED_CLARIFICATION_MISSED",
+      "diagnosticFlags": [
+        "expected HOLD/clarify, engine produced UNVERIFIED_ANSWER — the dangerous false-positive case",
+        "engine did not name missing trigger fact(s): privacyContext",
+        "missing expected reason code(s): clarification_required_missing_trigger_fact"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-12T10-17-35-768Z",
+      "caseId": "Q04-N1",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "UNVERIFIED_ANSWER",
+      "primaryFailureStage": "APPLICABILITY_ERROR",
+      "diagnosticFlags": [
+        "verified answer withheld because it depends on probabilistic candidate exclusion"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-12T10-17-35-768Z",
+      "caseId": "Q05-N1",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "UNVERIFIED_ANSWER",
+      "primaryFailureStage": "RETRIEVAL_MISS",
+      "diagnosticFlags": [
+        "required candidate rule(s) 3 never entered candidate pool — \"не нашёл\" неотличимо от \"не применил\"",
+        "required selected rule(s) 3 not selected",
+        "verified answer withheld because it depends on probabilistic candidate exclusion"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-12T10-17-35-768Z",
+      "caseId": "Q05-M1",
+      "pass": false,
+      "expectedDisposition": "HOLD",
+      "actualDisposition": "UNVERIFIED_ANSWER",
+      "primaryFailureStage": "EXPECTED_CLARIFICATION_MISSED",
+      "diagnosticFlags": [
+        "expected HOLD/clarify, engine produced UNVERIFIED_ANSWER — the dangerous false-positive case",
+        "engine did not name missing trigger fact(s): privacyContext",
+        "missing expected reason code(s): privacyContext_unknown, clarification_required_missing_trigger_fact"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-12T10-17-35-768Z",
+      "caseId": "Q09-N1",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "APPLICABILITY_ERROR",
+      "diagnosticFlags": [
+        "required negative-evidence rule(s) 9 also appeared in operative selected"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-1-2026-08-12T10-17-35-768Z",
+      "caseId": "Q10-N1",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "RESOLUTION_ERROR",
+      "diagnosticFlags": [
+        "missing expected reason code(s): reachability_violated, exception_trigger_inactive"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-2-2026-08-12T10-27-51-849Z",
+      "caseId": "Q01",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "UNVERIFIED_ANSWER",
+      "primaryFailureStage": "RESOLUTION_ERROR",
+      "diagnosticFlags": [
+        "EVIDENCE_GROUP_UNCOVERED (rule 1): до начала перейти в закрытое место, невидимое окружающим"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-2-2026-08-12T10-27-51-849Z",
+      "caseId": "Q02",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "HOLD",
+      "primaryFailureStage": "RESOLUTION_ERROR",
+      "diagnosticFlags": [
+        "unexpected CLARIFY resolution for positive case",
+        "resolution: resourceAvailability_unknown",
+        "resolution: exception_trigger_unknown",
+        "resolution: clarification_required_missing_trigger_fact"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-2-2026-08-12T10-27-51-849Z",
+      "caseId": "Q03",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "HOLD",
+      "primaryFailureStage": "RESOLUTION_ERROR",
+      "diagnosticFlags": [
+        "unexpected HOLD resolution for positive case",
+        "resolution: numeric_conflict_unresolved"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-2-2026-08-12T10-27-51-849Z",
+      "caseId": "Q04",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": [],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-2-2026-08-12T10-27-51-849Z",
+      "caseId": "Q05",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": [],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-2-2026-08-12T10-27-51-849Z",
+      "caseId": "Q06",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": [],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-2-2026-08-12T10-27-51-849Z",
+      "caseId": "Q07",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": [],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-2-2026-08-12T10-27-51-849Z",
+      "caseId": "Q08",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": [],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-2-2026-08-12T10-27-51-849Z",
+      "caseId": "Q09",
+      "pass": true,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "NONE",
+      "diagnosticFlags": [],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-2-2026-08-12T10-27-51-849Z",
+      "caseId": "Q10",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "UNVERIFIED_ANSWER",
+      "primaryFailureStage": "RESOLUTION_ERROR",
+      "diagnosticFlags": [
+        "EVIDENCE_GROUP_UNCOVERED (rule 10): текущее ясное согласие на помощь; чистые одноразовые перчатки помощника; ограничения по силе воздействия и времени; немедленная остановка по первой просьбе"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-2-2026-08-12T10-27-51-849Z",
+      "caseId": "Q01-M1",
+      "pass": false,
+      "expectedDisposition": "HOLD",
+      "actualDisposition": "UNVERIFIED_ANSWER",
+      "primaryFailureStage": "EXPECTED_CLARIFICATION_MISSED",
+      "diagnosticFlags": [
+        "expected HOLD/clarify, engine produced UNVERIFIED_ANSWER — the dangerous false-positive case",
+        "engine did not name missing trigger fact(s): privacyContext",
+        "missing expected reason code(s): clarification_required_missing_trigger_fact"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-2-2026-08-12T10-27-51-849Z",
+      "caseId": "Q04-N1",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "UNVERIFIED_ANSWER",
+      "primaryFailureStage": "APPLICABILITY_ERROR",
+      "diagnosticFlags": [
+        "verified answer withheld because it depends on probabilistic candidate exclusion"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-2-2026-08-12T10-27-51-849Z",
+      "caseId": "Q05-N1",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "UNVERIFIED_ANSWER",
+      "primaryFailureStage": "RETRIEVAL_MISS",
+      "diagnosticFlags": [
+        "required candidate rule(s) 3 never entered candidate pool — \"не нашёл\" неотличимо от \"не применил\"",
+        "required selected rule(s) 3 not selected",
+        "verified answer withheld because it depends on probabilistic candidate exclusion"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-2-2026-08-12T10-27-51-849Z",
+      "caseId": "Q05-M1",
+      "pass": false,
+      "expectedDisposition": "HOLD",
+      "actualDisposition": "UNVERIFIED_ANSWER",
+      "primaryFailureStage": "EXPECTED_CLARIFICATION_MISSED",
+      "diagnosticFlags": [
+        "expected HOLD/clarify, engine produced UNVERIFIED_ANSWER — the dangerous false-positive case",
+        "engine did not name missing trigger fact(s): privacyContext",
+        "missing expected reason code(s): privacyContext_unknown, clarification_required_missing_trigger_fact"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-2-2026-08-12T10-27-51-849Z",
+      "caseId": "Q09-N1",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "APPLICABILITY_ERROR",
+      "diagnosticFlags": [
+        "required negative-evidence rule(s) 9 also appeared in operative selected"
+      ],
+      "dependencyGraphSkipped": true
+    },
+    {
+      "runId": "run-2-2026-08-12T10-27-51-849Z",
+      "caseId": "Q10-N1",
+      "pass": false,
+      "expectedDisposition": "DIRECT_ANSWER",
+      "actualDisposition": "DIRECT_ANSWER",
+      "primaryFailureStage": "RESOLUTION_ERROR",
+      "diagnosticFlags": [
+        "missing expected reason code(s): reachability_violated, exception_trigger_inactive"
+      ],
+      "dependencyGraphSkipped": true
+    }
+  ],
+  "note": "Deterministic grading only — no LLM semantic judge this session (see final report for that gap)."
+}

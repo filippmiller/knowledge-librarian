@@ -33,12 +33,13 @@ describe('parseNegativeCaseOracle', () => {
     const [parsed] = parseNegativeCaseOracle(
       line(
         ',"requiredCandidateRuleIds":[1,3,5],"requiredSelectedRuleIds":[1,3],' +
-          '"forbiddenSelectedRuleIds":[5],"expectedReasonCodes":["exception_trigger_inactive"],' +
+          '"requiredNegativeEvidenceRuleIds":[9],"forbiddenSelectedRuleIds":[5],"expectedReasonCodes":["exception_trigger_inactive"],' +
           '"numericAssertions":[{"value":3,"unit":"seconds"}]'
       )
     );
 
     expect(parsed.requiredCandidateRuleIds).toEqual([1, 3, 5]);
+    expect(parsed.requiredNegativeEvidenceRuleIds).toEqual([9]);
     expect(parsed.forbiddenSelectedRuleIds).toEqual([5]);
     expect(parsed.numericAssertions).toEqual([{ value: 3, unit: 'seconds' }]);
   });
@@ -71,6 +72,12 @@ describe('parseNegativeCaseOracle', () => {
     expect(() =>
       parseNegativeCaseOracle(line(',"requiredSelectedRuleIds":[5],"forbiddenSelectedRuleIds":[5]'))
     ).toThrow(/5/);
+  });
+
+  it('отвергает правило, одновременно требуемое как operative и negative evidence', () => {
+    expect(() =>
+      parseNegativeCaseOracle(line(',"requiredSelectedRuleIds":[9],"requiredNegativeEvidenceRuleIds":[9]'))
+    ).toThrow(/9/);
   });
 
   it('отвергает лишнее поле', () => {
@@ -109,6 +116,12 @@ describe('loadNegativeCaseOracle — реальный sidecar', () => {
 
     expect(q05n1?.requiredCandidateRuleIds).toContain(5);
     expect(q05n1?.forbiddenSelectedRuleIds).toContain(5);
+  });
+
+  it('Q09-N1 requires rule 9 specifically through negative evidence, never operative selection', () => {
+    const q09n1 = loadNegativeCaseOracle().find((n) => n.id === 'Q09-N1');
+    expect(q09n1?.requiredNegativeEvidenceRuleIds).toEqual([9]);
+    expect(q09n1?.requiredSelectedRuleIds).toBeUndefined();
   });
 
   it('Q04-N1 несёт все три числа правила 4 — совместное покрытие', () => {

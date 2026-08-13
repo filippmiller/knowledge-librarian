@@ -13,7 +13,7 @@ import { triggerConditionSchema, type TriggerCondition } from './trigger';
  * структурного поля условия применимости вообще, оно живёт прозой в `body`.
  * Живой баг (`translation-2n9`, синтетический прогон 2026-08-05): "не более 3
  * дней" оторвалось от "раздражение кожи", к которому относилось — фрагментация
- * без структурного `parentRuleRef` теряет родителя молча.
+ * без структурного `parentExtractionRef` теряет родителя молча.
  */
 
 /** Пре-LLM якорь исходного блока + дословная цитата. Якорь назначает вызывающий
@@ -52,6 +52,12 @@ export const EXTRACTION_UNCERTAINTY_KINDS = [
   'UNRECOGNIZED_NUMERIC_CONSTRAINT',
   'AMBIGUOUS_FACET',
   'DANGLING_PARENT_REF',
+  /** `extractionRef` совпал у двух и более unit'ов ОДНОГО ответа модели —
+   *  preflight C (translation-djc). Отдельно от `DANGLING_PARENT_REF`: то поле
+   *  про сломанную ССЫЛКУ на родителя, это — про сломанный СОБСТВЕННЫЙ
+   *  идентификатор unit'а (на него могли сослаться чужие parentExtractionRef,
+   *  и неоднозначно, какой из дублей имелся в виду). */
+  'DUPLICATE_EXTRACTION_REF',
   'OTHER',
 ] as const;
 export type ExtractionUncertaintyKind = (typeof EXTRACTION_UNCERTAINTY_KINDS)[number];
@@ -116,84 +122,162 @@ export interface ExtractedKnowledgeUnit {
    *  `evaluateTrigger` реально пользуется, не отдельная копия формы. */
   readonly triggerCondition: TriggerCondition | null;
   readonly numericConstraint: NumericConstraint | null;
-  /** Якорь source span РОДИТЕЛЬСКОГО unit'а при фрагментации, иначе `null`.
-   *  НЕ эфемерная метка прогона («R-17») — обязана разрешаться в реальный
-   *  anchor из этого же прогона извлечения (проверяется вне схемы, см.
-   *  `validateParentRefs` в `extraction-parent-refs.ts`). */
-  readonly parentRuleRef: string | null;
+  /**
+   * Локальный уникальный ID unit'а В ПРЕДЕЛАХ ОДНОГО ответа модели (preflight
+   * C, translation-djc, независимое ревью). НЕ identity для persistence — тот
+   * же самый unit при повторном прогоне извлечения получит другой
+   * `extractionRef` (LLM выбирает его заново), но обязан получить ТОТ ЖЕ
+   * `unitId` после `assignIdentity`. Единственная причина существования этого
+   * поля — дать `parentExtractionRef` на что сослаться, пока `unitId` ещё не
+   * вычислен (вычисляется из `sourceBlockAnchor` + evidence offsets, которых
+   * до `assignIdentity` попросту нет).
+   */
+  readonly extractionRef: string;
+  /**
+   * Ссылка на `extractionRef` РОДИТЕЛЬСКОГО unit'а этого же ответа модели при
+   * фрагментации, иначе `null`.
+   *
+   * НЕ `sourceSpan.anchor` (было так до preflight C) — anchor называет МЕСТО
+   * в документе, а не unit: когда родитель и несколько числовых fragments
+   * извлечены из ОДНОГО абзаца (реальный случай правила 4 — "15 секунд" / "30
+   * секунд" / "3 цикла"), у всех один и тот же anchor, и anchor-ссылка
+   * физически не может сказать, какой из НЕСКОЛЬКИХ unit'ов на этом anchor —
+   * родитель. `extractionRef` уникален по построению (проверяется вне схемы,
+   * `validateParentRefs` в `extraction-parent-refs.ts`), поэтому ссылка
+   * однозначна независимо от того, сколько unit'ов делят один блок.
+   *
+   * `assignIdentity` (`identity-assignment.ts`) заменяет это поле на
+   * настоящий `unitId` родителя в persisted-слое (`PersistedKnowledgeUnit.
+   * parentRuleRef`) — `extractionRef`/`parentExtractionRef` не переживают
+   * persistence, это чисто внутримодельная связь одного прогона.
+   */
+  readonly parentExtractionRef: string | null;
   readonly sourceSpan: SourceSpan;
   readonly evidenceByField: Readonly<Record<string, SourceSpan>>;
   readonly uncertainties: readonly ExtractionUncertainty[];
 }
 
-export const extractedKnowledgeUnitSchema = z
-  .strictObject({
-    kind: knowledgeUnitKindSchema,
-    statement: nonBlankString('statement не может быть пустым'),
-    title: nonBlankString('title не может быть пустым').optional(),
-    facets: extractedFacetMapSchema,
-    triggerCondition: triggerConditionSchema.nullable(),
-    numericConstraint: numericConstraintSchema.nullable(),
-    parentRuleRef: nonBlankString('parentRuleRef не может быть пустой строкой').nullable(),
-    sourceSpan: sourceSpanSchema,
-    evidenceByField: z.record(z.string(), sourceSpanSchema),
-    uncertainties: z.array(extractionUncertaintySchema).readonly(),
-  })
-  .superRefine((unit, ctx) => {
-    // Та же дисциплина, что `applicabilityProfileSchema` (profile.ts) уже
-    // применяет к закоммиченному профилю — здесь на СЫРОМ извлечении: unit не
-    // может нести фасету, неприменимую к его `kind` (TERM_DEFINITION,
-    // applicableFacets=[], не может иметь scenario). В отличие от профиля,
-    // extraction НЕ требует присутствия ВСЕХ применимых фасет — экстрактор
-    // мог что-то не найти, и это легально; требование "все обязательные
-    // заполнены" проверяется позже, на коммите (F), не здесь.
-    const applicable = new Set(applicableFacetsOf(unit.kind));
-    for (const key of Object.keys(unit.facets)) {
-      if (!applicable.has(key as FacetKey)) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['facets', key],
-          message: `фасета "${key}" неприменима к ${unit.kind} (KNOWLEDGE_KIND_REGISTRY.applicableFacets)`,
-        });
-      }
-    }
+/**
+ * Поля, общие для СЫРОГО извлечения (`ExtractedKnowledgeUnit`, ID-поля —
+ * `extractionRef`/`parentExtractionRef`, per-run) и persisted-слоя
+ * (`PersistedKnowledgeUnit`, `applicability/persisted-unit.ts`, ID-поля —
+ * `sourceBlockAnchor`/`unitId`/`contentHash`/`parentRuleRef`, устойчивые
+ * между прогонами). Вынесено в отдельный `strictObject`, не в
+ * `extractedKnowledgeUnitSchema` целиком, ИМЕННО ЧТОБЫ его можно было
+ * `.extend()` в persisted-unit.ts — у `extractedKnowledgeUnitSchema`
+ * (`ZodEffects` после `.superRefine()`) `.extend()` нет.
+ */
+export const extractedKnowledgeUnitCoreSchema = z.strictObject({
+  kind: knowledgeUnitKindSchema,
+  statement: nonBlankString('statement не может быть пустым'),
+  title: nonBlankString('title не может быть пустым').optional(),
+  // `.nullish().transform(v => v ?? {})` — тот же класс LLM-выдачи, что и
+  // triggerCondition/numericConstraint/uncertainties ниже: живой прогон
+  // (goal-shift benchmark, 2026-08-09, openai/gpt-4o) прислал `facets: null`
+  // вместо пустого объекта на unit'ах без применимых фасет.
+  facets: extractedFacetMapSchema.nullish().transform((value) => value ?? {}),
+  // `.nullish().transform(v => v ?? null)`, не `.nullable()` — живой прогон
+  // (claude-haiku-4-5, continuation-сессия, --stage=extraction) поймал
+  // РЕАЛЬНОЕ (воспроизведено в 2 из 3 попыток) поведение модели: поле
+  // ПРОПУЩЕНО ключом целиком, а не отправлено как `null`, хотя промпт прямо
+  // требует null для неприменимых kind. Это не ослабление контракта —
+  // `TriggerCondition | null`/`NumericConstraint | null` остаются точно теми
+  // же типами для КАЖДОГО потребителя (`_ExtractedUnitTypeMatches` ниже это
+  // проверяет); нормализуется только то, что отсутствующий ключ и `null` —
+  // два синтаксически разных, но семантически одинаковых способа сказать
+  // "здесь ничего нет" в JSON. Тот же паттерн уже используется в этом
+  // проекте для устойчивости к LLM-выдаче (`test-extraction-pack.ts`,
+  // `graderResponseSchema`).
+  triggerCondition: triggerConditionSchema.nullish().transform((value) => value ?? null),
+  numericConstraint: numericConstraintSchema.nullish().transform((value) => value ?? null),
+  sourceSpan: sourceSpanSchema,
+  evidenceByField: z.record(z.string(), sourceSpanSchema),
+  // `.nullish().transform(v => v ?? [])` — та же нормализация, что уже
+  // применена к triggerCondition/numericConstraint выше, по той же причине:
+  // живой прогон (goal-shift benchmark, 2026-08-09, openai/gpt-4o)
+  // систематически (6/6 попыток) не включал ключ uncertainties в JSON вовсе,
+  // хотя промпт требует его всегда, даже пустым массивом.
+  uncertainties: z
+    .array(extractionUncertaintySchema)
+    .readonly()
+    .nullish()
+    .transform((value) => value ?? []),
+});
 
-    // Acceptance criterion PR E: "evidenceByField минимум для
-    // statement/facets/triggerCondition/numericConstraint" — не пожелание, а
-    // требование. `statement` всегда непуст, значит его evidence обязана
-    // существовать всегда; остальные три — только когда соответствующее поле
-    // само заполнено (facets непуст / triggerCondition не null /
-    // numericConstraint не null). Лишние ключи в evidenceByField не
-    // запрещены — минимум, а не точное соответствие.
-    if (!('statement' in unit.evidenceByField)) {
+/**
+ * Business-инварианты, общие для СЫРОГО и persisted unit'а (facets
+ * применимы к `kind`; `evidenceByField` покрывает минимум) — ОДНА функция,
+ * не копия в двух местах (Code Evolution Discipline: "один источник истины
+ * на policy-логику"). Типизирована по `extractedKnowledgeUnitCoreSchema`,
+ * не по конкретной надстройке — годится и для сырого, и для persisted.
+ */
+export function checkExtractionCoreInvariants(
+  unit: z.infer<typeof extractedKnowledgeUnitCoreSchema>,
+  ctx: z.RefinementCtx
+): void {
+  // Та же дисциплина, что `applicabilityProfileSchema` (profile.ts) уже
+  // применяет к закоммиченному профилю — здесь на СЫРОМ извлечении: unit не
+  // может нести фасету, неприменимую к его `kind` (TERM_DEFINITION,
+  // applicableFacets=[], не может иметь scenario). В отличие от профиля,
+  // extraction НЕ требует присутствия ВСЕХ применимых фасет — экстрактор
+  // мог что-то не найти, и это легально; требование "все обязательные
+  // заполнены" проверяется позже, на коммите (F), не здесь.
+  const applicable = new Set(applicableFacetsOf(unit.kind));
+  for (const key of Object.keys(unit.facets)) {
+    if (!applicable.has(key as FacetKey)) {
       ctx.addIssue({
         code: 'custom',
-        path: ['evidenceByField', 'statement'],
-        message: 'evidenceByField обязана подтверждать statement — оно всегда заполнено',
+        path: ['facets', key],
+        message: `фасета "${key}" неприменима к ${unit.kind} (KNOWLEDGE_KIND_REGISTRY.applicableFacets)`,
       });
     }
-    if (Object.keys(unit.facets).length > 0 && !('facets' in unit.evidenceByField)) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['evidenceByField', 'facets'],
-        message: 'facets непуст — evidenceByField обязана содержать подтверждение "facets"',
-      });
-    }
-    if (unit.triggerCondition !== null && !('triggerCondition' in unit.evidenceByField)) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['evidenceByField', 'triggerCondition'],
-        message: 'triggerCondition задан — evidenceByField обязана содержать подтверждение "triggerCondition"',
-      });
-    }
-    if (unit.numericConstraint !== null && !('numericConstraint' in unit.evidenceByField)) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['evidenceByField', 'numericConstraint'],
-        message: 'numericConstraint задан — evidenceByField обязана содержать подтверждение "numericConstraint"',
-      });
-    }
-  });
+  }
+
+  // Acceptance criterion PR E: "evidenceByField минимум для
+  // statement/facets/triggerCondition/numericConstraint" — не пожелание, а
+  // требование. `statement` всегда непуст, значит его evidence обязана
+  // существовать всегда; остальные три — только когда соответствующее поле
+  // само заполнено (facets непуст / triggerCondition не null /
+  // numericConstraint не null). Лишние ключи в evidenceByField не
+  // запрещены — минимум, а не точное соответствие.
+  if (!('statement' in unit.evidenceByField)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['evidenceByField', 'statement'],
+      message: 'evidenceByField обязана подтверждать statement — оно всегда заполнено',
+    });
+  }
+  if (Object.keys(unit.facets).length > 0 && !('facets' in unit.evidenceByField)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['evidenceByField', 'facets'],
+      message: 'facets непуст — evidenceByField обязана содержать подтверждение "facets"',
+    });
+  }
+  if (unit.triggerCondition !== null && !('triggerCondition' in unit.evidenceByField)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['evidenceByField', 'triggerCondition'],
+      message: 'triggerCondition задан — evidenceByField обязана содержать подтверждение "triggerCondition"',
+    });
+  }
+  if (unit.numericConstraint !== null && !('numericConstraint' in unit.evidenceByField)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['evidenceByField', 'numericConstraint'],
+      message: 'numericConstraint задан — evidenceByField обязана содержать подтверждение "numericConstraint"',
+    });
+  }
+}
+
+export const extractedKnowledgeUnitSchema = extractedKnowledgeUnitCoreSchema
+  .extend({
+    extractionRef: nonBlankString('extractionRef не может быть пустым'),
+    parentExtractionRef: nonBlankString(
+      'parentExtractionRef не может быть пустой строкой'
+    ).nullable(),
+  })
+  .superRefine(checkExtractionCoreInvariants);
 
 type _ExtractedUnitSchemaMatches = Assert<
   z.infer<typeof extractedKnowledgeUnitSchema> extends ExtractedKnowledgeUnit ? true : false

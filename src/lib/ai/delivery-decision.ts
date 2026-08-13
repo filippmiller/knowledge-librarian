@@ -19,6 +19,8 @@
  * Значений ровно три, и это не оформление, а контракт: клиенту либо уходит
  * ответ, либо уточняющий вопрос, либо ответ не уходит вовсе.
  */
+import type { AnswerSource } from '@/lib/ai/answer-source';
+
 export type DeliveryDecision = 'clarify' | 'answer' | 'escalate';
 
 /** Проверка значения, пришедшего с сервера или из старой записи. */
@@ -70,7 +72,7 @@ export interface DeliverableAnswer {
   confidence: number;
   confidenceLevel: 'high' | 'medium' | 'low' | 'insufficient';
   requiresHumanReview?: boolean;
-  answerSource?: 'knowledge_base' | 'general_ai' | 'deterministic_guardrail';
+  answerSource?: AnswerSource;
   /** Уточнение сценарного шлюза: промпт + варианты. Здесь важен только факт наличия. */
   scenarioClarification?: unknown;
 }

@@ -47,6 +47,8 @@ import {
   checkClientSafety,
   type Audience,
 } from '@/lib/knowledge/audience';
+import { filterCrossInstitutionEvidence } from '@/lib/knowledge/institution-scope';
+import { resolveMainPathAnswerSource, type AnswerSource } from '@/lib/ai/answer-source';
 
 // Confidence thresholds
 const CONFIDENCE_THRESHOLD_HIGH = 0.7;    // Answer confidently
@@ -132,7 +134,7 @@ export interface EnhancedAnswerResult {
     prompt: string;
     options: Array<{ id: string; label: string; targetScenarioKey: string }>;
   };
-  answerSource?: 'knowledge_base' | 'general_ai' | 'deterministic_guardrail';
+  answerSource?: AnswerSource;
   requiresHumanReview?: boolean;
   consistency?: {
     allSupported: boolean;
@@ -1057,8 +1059,17 @@ export async function answerQuestionEnhanced(
     }
   }
 
-  // Step 4: Select context chunks dynamically
-  const contextChunks = selectContextChunks(chunks, 5, openKnowledgeLookup);
+  // Step 4: Select context chunks dynamically.
+  // Сначала выкидываем чанки чужого учреждения: фильтр сценария пускает
+  // `scenarioKey=null`, и график ЗАГС ЛО иначе попадает в ответ про КЗАГС.
+  const scopedChunks = filterCrossInstitutionEvidence(
+    question,
+    scenarioKeyForAnswer,
+    chunks,
+    (chunk) => `${chunk.content}\n${chunk.documentId ? (docTitleMap.get(chunk.documentId) ?? '') : ''}`,
+    (chunk) => chunk.scenarioKey
+  );
+  const contextChunks = selectContextChunks(scopedChunks, 5, openKnowledgeLookup);
   console.log('[enhanced-answering] Step 4: Selected', contextChunks.length, 'context chunks');
 
   // Group context chunks by document for source attribution
@@ -1169,11 +1180,17 @@ export async function answerQuestionEnhanced(
       orderBy: { confidence: 'desc' },
     });
     const seenRule = new Set<string>();
-    const ruleCandidates = [...keywordMatched, ...byConfidence].filter((r) => {
-      if (seenRule.has(r.id)) return false;
-      seenRule.add(r.id);
-      return true;
-    });
+    const ruleCandidates = filterCrossInstitutionEvidence(
+      question,
+      scenarioKeyForAnswer,
+      [...keywordMatched, ...byConfidence].filter((r) => {
+        if (seenRule.has(r.id)) return false;
+        seenRule.add(r.id);
+        return true;
+      }),
+      (rule) => `${rule.ruleCode} ${rule.title} ${rule.body} ${rule.document?.title ?? ''}`,
+      (rule) => rule.scenarioKey
+    );
     rules = rankByQuestion(
       ruleCandidates,
       relevanceText,
@@ -1226,11 +1243,17 @@ export async function answerQuestionEnhanced(
       orderBy: { createdAt: 'desc' },
     });
     const seenQa = new Set<string>();
-    const qaCandidates = [...qaPerTerm.flat(), ...qaRecent].filter((q) => {
-      if (seenQa.has(q.id)) return false;
-      seenQa.add(q.id);
-      return true;
-    });
+    const qaCandidates = filterCrossInstitutionEvidence(
+      question,
+      scenarioKeyForAnswer,
+      [...qaPerTerm.flat(), ...qaRecent].filter((q) => {
+        if (seenQa.has(q.id)) return false;
+        seenQa.add(q.id);
+        return true;
+      }),
+      (qa) => `${qa.question} ${qa.answer}`,
+      (qa) => qa.scenarioKey
+    );
     qaPairs = rankByQuestion(
       qaCandidates,
       relevanceText,
@@ -1400,7 +1423,7 @@ export async function answerQuestionEnhanced(
     audience === 'client'
       ? `Тема обращения: ${scenarioLabelForAnswer}. Ниже — проверенные сведения по ней. Опирайся только на них; не называй их, не описывай, откуда они у тебя, и не сообщай, если чего-то в них не оказалось. Не упоминай процедуры и учреждения, которых там нет.\n`
       : openKnowledgeLookup
-        ? `СЦЕНАРИЙ: ${scenarioLabelForAnswer}\nВсе цитаты ниже найдены открытым поиском по базе знаний. Отвечай только по приведенным цитатам.\n`
+        ? `СЦЕНАРИЙ: ${scenarioLabelForAnswer}\nВсе цитаты ниже найдены открытым поиском по базе знаний. Отвечай только по приведенным цитатам. НЕ упоминай другие процедуры, регионы или учреждения, которых нет в этих цитатах.\n`
         : `СЦЕНАРИЙ: ${scenarioLabelForAnswer}  (ключ: ${scenarioKeyForAnswer})\n` +
           `Все цитаты ниже относятся к этому сценарию. НЕ упоминай другие процедуры (например другие регионы или учреждения), даже если они существуют вообще.\n`;
 
@@ -1788,13 +1811,18 @@ ${fixList}
     };
   });
 
+  // Отказ не опирается на цитаты: модель получила приказ «нет данных».
+  // Оставлять правила в «источниках» — тот же обман, что и knowledge_base.
+  const answerSource = resolveMainPathAnswerSource(confidenceLevel);
+  const grounded = answerSource === 'knowledge_base';
+
   const result: EnhancedAnswerResult = {
     answer,
     confidence: overallConfidence,
     confidenceLevel,
     needsClarification,
     suggestedClarification,
-    citations,
+    citations: grounded ? citations : [],
     domainsUsed: intentResult.domains,
     queryAnalysis: {
       originalQuery: question,
@@ -1803,11 +1831,11 @@ ${fixList}
       isAmbiguous: expandedQueries.isAmbiguous,
     },
     clarificationQuestion,
-    primarySource,
-    supplementarySources,
+    primarySource: grounded ? primarySource : undefined,
+    supplementarySources: grounded ? supplementarySources : undefined,
     scenarioKey: scenarioKeyForAnswer,
     scenarioLabel: scenarioLabelForAnswer,
-    answerSource: 'knowledge_base',
+    answerSource,
     requiresHumanReview,
     consistency: consistency ? {
       allSupported: consistency.allSupported,

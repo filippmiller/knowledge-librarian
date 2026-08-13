@@ -78,7 +78,7 @@ interface BotResult {
   confidenceLevel: string;
   needsClarification: boolean;
   suggestedClarification?: string;
-  answerSource?: 'knowledge_base' | 'general_ai' | 'deterministic_guardrail';
+  answerSource?: import('@/lib/ai/answer-source').AnswerSource;
   requiresHumanReview?: boolean;
   consistency?: {
     allSupported: boolean;
@@ -139,6 +139,7 @@ const sourceLabels: Record<string, string> = {
   knowledge_base: 'База знаний',
   general_ai: 'Общие знания ИИ',
   deterministic_guardrail: 'Детерминированное правило',
+  none: 'Нет источника — отказ',
 };
 
 /**

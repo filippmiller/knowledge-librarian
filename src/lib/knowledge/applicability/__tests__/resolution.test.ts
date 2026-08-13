@@ -64,6 +64,20 @@ function triggerIn(privacy: 'PUBLIC' | 'PRIVATE' | null): TriggerDecision {
   );
 }
 
+function triggerFactDecision(
+  factKey: 'consentStatus' | 'reachability',
+  required: 'EXPLICIT' | 'LIMITED',
+  actual: 'EXPLICIT' | 'ABSENT' | 'LIMITED' | 'NORMAL' | null
+): TriggerDecision {
+  const condition: TriggerCondition = factKey === 'consentStatus'
+    ? { all: [{ fact: 'consentStatus', equals: required as 'EXPLICIT' }] }
+    : { all: [{ fact: 'reachability', equals: required as 'LIMITED' }] };
+  return evaluateTrigger(
+    condition,
+    buildQuery({ triggerFacts: actual === null ? {} : { [factKey]: fact(actual) } })
+  );
+}
+
 const seconds = (value: number): NumericConstraint => ({
   factKey: 'max_hold_seconds',
   value,
@@ -117,6 +131,116 @@ describe('§4.1 п.1 — «применяются все»: несвязанны
     );
 
     expect(decision.selected).toEqual(['term', 'step']);
+  });
+});
+
+describe('trigger applicability applies to every knowledge kind', () => {
+  it('privacy-conditioned PROCEDURE_STEP with unknown privacy is selected as conditional evidence', () => {
+    const decision = resolveKnowledgeSet(
+      [candidate({ unitId: 'base' }), candidate({ unitId: 'public-step', trigger: triggerIn(null) })],
+      QUERY
+    );
+    expect(decision.disposition).toBe('ANSWER');
+    expect(decision.selected).toContain('public-step');
+    expect(decision.selectedApplicability).toContainEqual(expect.objectContaining({ unitId: 'public-step', mode: 'CONDITIONAL' }));
+    expect(decision.reasons).toContain('privacyContext_unknown');
+  });
+
+  it('consent-conditioned PROCEDURE_STEP is selected as negative evidence when consent is absent', () => {
+    const decision = resolveKnowledgeSet(
+      [candidate({ unitId: 'consent-step', trigger: triggerFactDecision('consentStatus', 'EXPLICIT', 'ABSENT'), negativeInferenceAllowed: true })],
+      QUERY
+    );
+    expect(decision.selected).toEqual([]);
+    expect(decision.negativeEvidence).toEqual(['consent-step']);
+    expect(decision.selectedApplicability).toContainEqual(expect.objectContaining({ unitId: 'consent-step', mode: 'NEGATIVE' }));
+    expect(decision.reasons).toContain('consentStatus_violated');
+  });
+
+  it('unknown consent procedure remains answerable as an explicit conditional branch', () => {
+    const decision = resolveKnowledgeSet(
+      [candidate({ unitId: 'consent-step', trigger: triggerFactDecision('consentStatus', 'EXPLICIT', null) })],
+      QUERY
+    );
+    expect(decision.disposition).toBe('ANSWER');
+    expect(decision.selectedApplicability).toContainEqual(
+      expect.objectContaining({ unitId: 'consent-step', mode: 'CONDITIONAL' })
+    );
+    expect(decision.reasons).toContain('consentStatus_unknown');
+  });
+
+  it('active reachability branch and unknown consent helper branch answer together', () => {
+    const decision = resolveKnowledgeSet(
+      [
+        candidate({ unitId: 'limited-step', trigger: triggerFactDecision('reachability', 'LIMITED', 'LIMITED') }),
+        candidate({ unitId: 'helper-consent', trigger: triggerFactDecision('consentStatus', 'EXPLICIT', null) }),
+      ],
+      QUERY
+    );
+    expect(decision.disposition).toBe('ANSWER');
+    expect(decision.selected).toEqual(['limited-step', 'helper-consent']);
+    expect(decision.selectedApplicability).toContainEqual(
+      expect.objectContaining({ unitId: 'helper-consent', mode: 'CONDITIONAL' })
+    );
+  });
+
+  it('semantically irrelevant inactive procedure is excluded but preserves its trigger reason', () => {
+    const decision = resolveKnowledgeSet(
+      [candidate({
+        unitId: 'irrelevant-consent',
+        trigger: triggerFactDecision('consentStatus', 'EXPLICIT', 'ABSENT'),
+        semanticRelevance: 'IRRELEVANT',
+      })],
+      QUERY
+    );
+    expect(decision.selected).toEqual([]);
+    expect(decision.excluded).toContainEqual({ unitId: 'irrelevant-consent', reason: 'exception_trigger_inactive' });
+    expect(decision.reasons).toContain('consentStatus_violated');
+  });
+
+  it('reachability-conditioned PROCEDURE_STEP is selected only when LIMITED is active', () => {
+    const active = resolveKnowledgeSet(
+      [candidate({ unitId: 'reach-step', trigger: triggerFactDecision('reachability', 'LIMITED', 'LIMITED') })],
+      QUERY
+    );
+    const inactive = resolveKnowledgeSet(
+      [candidate({ unitId: 'reach-step', trigger: triggerFactDecision('reachability', 'LIMITED', 'NORMAL'), negativeInferenceAllowed: true })],
+      QUERY
+    );
+    expect(active.selected).toEqual(['reach-step']);
+    expect(active.disposition).toBe('ANSWER');
+    expect(inactive.selected).toEqual([]);
+    expect(inactive.negativeEvidence).toEqual(['reach-step']);
+    expect(inactive.selectedApplicability).toContainEqual(expect.objectContaining({ unitId: 'reach-step', mode: 'NEGATIVE' }));
+  });
+
+  it('false generic sufficient condition is excluded and cannot prove a denial', () => {
+    const decision = resolveKnowledgeSet(
+      [candidate({ unitId: 'if-x-then-y', trigger: triggerFactDecision('consentStatus', 'EXPLICIT', 'ABSENT') })],
+      QUERY
+    );
+    expect(decision.negativeEvidence).toEqual([]);
+    expect(decision.excluded).toContainEqual({ unitId: 'if-x-then-y', reason: 'exception_trigger_inactive' });
+    expect(decision.disposition).toBe('HOLD');
+  });
+
+  it('inactive necessary-condition evidence cannot supersede or numerically conflict with operative evidence', () => {
+    const active = candidate({
+      unitId: 'active',
+      numericConstraint: { factKey: 'maximum', value: 5, unit: 'times' },
+    });
+    const inactiveNecessary = candidate({
+      unitId: 'negative',
+      trigger: triggerFactDecision('consentStatus', 'EXPLICIT', 'ABSENT'),
+      negativeInferenceAllowed: true,
+      numericConstraint: { factKey: 'maximum', value: 3, unit: 'times' },
+      supersedes: ['active'],
+    });
+    const decision = resolveKnowledgeSet([active, inactiveNecessary], QUERY);
+    expect(decision.selected).toEqual(['active']);
+    expect(decision.negativeEvidence).toEqual(['negative']);
+    expect(decision.numericConflicts).toEqual([]);
+    expect(decision.excluded).not.toContainEqual(expect.objectContaining({ unitId: 'active' }));
   });
 });
 
@@ -193,9 +317,44 @@ describe('§4.1 п.2 — последствия активации исключ�
     expect(decision.excluded).toEqual([]);
   });
 
-  it('неизвестное условие БЕЗ конкуренции не заставляет переспрашивать', () => {
-    // §4.1 п.2: существование исключения не блокирует общее правило. Родителя
-    // среди кандидатов нет — спорить не с чем, значит и уточнять нечего.
+  it('Q01-M1 / Q05-M1 РЕАЛЬНЫЙ случай: условие неизвестно, а parentRuleRef ПУСТ (экстракция не связала исключение с родителем) — всё равно CLARIFY, не молчаливый ANSWER', () => {
+    // Живой прогон (goal-shift benchmark, 2026-08-09): реальная экстракция
+    // НЕ линкует это конкретное исключение (публичное место) ни к какому
+    // родителю — parentRuleRef приходит null, не "ссылка есть, но не в
+    // выдаче" (тот случай уже покрыт следующим тестом и остаётся ANSWER).
+    // Старая логика isDecisive требовала candidate.parentRuleRef !== null,
+    // поэтому неопределённость этого исключения тихо игнорировалась, и
+    // движок отвечал общим правилом, как будто исключения не существует —
+    // хотя оно РЕАЛЬНО могло изменить ответ (публично vs приватно).
+    //
+    // Отличие от следующего теста ("БЕЗ конкуренции") принципиально: там
+    // exception явно называет родителя, которого просто нет в текущей
+    // выдаче — известно, что спорить не с чем. Здесь родитель НЕИЗВЕСТЕН
+    // вовсе, и любое уверенно выбранное правило МОГЛО БЫ быть тем, что это
+    // исключение переопределяет — рисковать нельзя.
+    const decision = resolveKnowledgeSet(
+      [
+        candidate({ unitId: 'rule-1' }),
+        candidate({
+          unitId: 'rule-5',
+          kind: 'EXCEPTION_RULE',
+          scope: scopeOf('EXCEPTION_RULE'),
+          trigger: triggerIn(null),
+          parentRuleRef: null,
+        }),
+      ],
+      QUERY
+    );
+
+    expect(decision.disposition).toBe('CLARIFY');
+    expect(decision.clarificationNeeds.triggerFacts).toEqual(['privacyContext']);
+    expect(decision.selected).toEqual(['rule-1']);
+    expect(decision.undetermined).toEqual([{ unitId: 'rule-5', reason: 'exception_trigger_unknown' }]);
+  });
+
+  it('неизвестное условие релевантного кандидата требует уточнения даже без явной конкуренции', () => {
+    // После content-relevance gate кандидат уже признан способным менять
+    // ответ; неизвестный trigger нельзя молча считать неактивным.
     const decision = resolveKnowledgeSet(
       [
         candidate({ unitId: 'rule-7' }),
@@ -210,12 +369,12 @@ describe('§4.1 п.2 — последствия активации исключ�
       QUERY
     );
 
-    expect(decision.disposition).toBe('ANSWER');
+    expect(decision.disposition).toBe('CLARIFY');
     expect(decision.selected).toEqual(['rule-7']);
     expect(decision.undetermined).toEqual([
       { unitId: 'rule-5', reason: 'exception_trigger_unknown' },
     ]);
-    expect(decision.clarificationNeeds.triggerFacts).toEqual([]);
+    expect(decision.clarificationNeeds.triggerFacts).toEqual(['privacyContext']);
   });
 
   it('EXCEPTION_RULE без triggerCondition — достоверный дефект данных, а не пробел', () => {
@@ -606,11 +765,6 @@ describe('жёсткая фильтрация не убивает recall', () =>
   });
 
   it('исключение БЕЗ родителя не отвечает как самостоятельное правило', () => {
-    // Находка ревью на PR. §2 делает parentRuleRef обязательным для
-    // EXCEPTION_RULE, но тип кандидата допускает null (миграции, ручной ввод).
-    // Раньше такой unit просто пропускал шаг переопределения и ОСТАВАЛСЯ в
-    // выборке — то есть отвечал как обычное правило, хотя по смыслу он лишь
-    // оговорка к чему-то, чего в ответе нет.
     const decision = resolveKnowledgeSet(
       [
         candidate({
@@ -799,5 +953,177 @@ describe('решение объясняет себя', () => {
       'CLARIFY',
       'HOLD',
     ]);
+  });
+});
+
+describe('вето соседа по блоку (`sourceBlockAnchor`) — Fix 1, 2026-08-11', () => {
+  /**
+   * Точная форма реального сбоя (goal-shift benchmark, регрессия негативных
+   * случаев 6/6 → 3/6 после дисциплинированной реэкстракции): вопрос "муж
+   * может почесать спящей жене, раз она раньше не возражала?". Consent-гейт
+   * (`triggerCondition`: требуется явное согласие) без согласия достоверно
+   * НЕГАТИВЕН — попадает в `negativeEvidence`. Его сосед по тому же
+   * `sourceBlockAnchor` — "наденьте перчатки, соблюдайте лимиты силы и
+   * времени, остановитесь по первой просьбе" — не несёт СОБСТВЕННОГО условия
+   * (`trigger: null`) и раньше молча уходил в `selected`, подавая
+   * операционную инструкцию как основание для ситуации, которую движок уже
+   * признал недопустимой.
+   */
+  const consentAbsent = () => triggerFactDecision('consentStatus', 'EXPLICIT', 'ABSENT');
+
+  it('кандидат без триггера, чей сосед по блоку достоверно отрицателен (в negativeEvidence), НЕ выбирается — уходит в negativeEvidence вместе с ним', () => {
+    const gate = candidate({
+      unitId: 'consent-gate',
+      trigger: consentAbsent(),
+      negativeInferenceAllowed: true,
+      sourceBlockAnchor: 'block-help',
+    });
+    const howTo = candidate({
+      unitId: 'how-to-help',
+      sourceBlockAnchor: 'block-help',
+    });
+
+    const decision = resolveKnowledgeSet([gate, howTo], QUERY);
+
+    expect(decision.selected).toEqual([]);
+    expect(decision.negativeEvidence).toEqual(['consent-gate', 'how-to-help']);
+    expect(decision.excluded).toEqual([]);
+    expect(decision.undetermined).toEqual([]);
+    expect(decision.reasons).toContain('vetoed_by_negative_sibling');
+    expect(decision.selectedApplicability).toContainEqual(
+      expect.objectContaining({ unitId: 'how-to-help', mode: 'NEGATIVE' })
+    );
+    // Отказ остаётся уверенным ANSWER (с negativeEvidence как основанием), а
+    // не вырождается в HOLD: система ЗНАЕТ, почему отказывает.
+    expect(decision.disposition).toBe('ANSWER');
+  });
+
+  it('тот же кандидат БЕЗ соседа вообще — выбирается как прежде (ветировать нечем)', () => {
+    const howTo = candidate({ unitId: 'how-to-help', sourceBlockAnchor: 'block-help' });
+
+    const decision = resolveKnowledgeSet([howTo], QUERY);
+
+    expect(decision.selected).toEqual(['how-to-help']);
+    expect(decision.reasons).not.toContain('vetoed_by_negative_sibling');
+  });
+
+  it('сосед лишь УДЕРЖАН (scope неизвестен) — не голосует, кандидат выбирается как прежде', () => {
+    const howTo = candidate({ unitId: 'how-to-help', sourceBlockAnchor: 'block-help' });
+    const heldSibling = candidate({
+      unitId: 'held-sibling',
+      sourceBlockAnchor: 'block-help',
+      scope: evaluateScope(buildProfile('PROCEDURE_STEP', { scenario: { state: 'UNKNOWN' } }), QUERY),
+    });
+
+    const decision = resolveKnowledgeSet([howTo, heldSibling], QUERY);
+
+    expect(decision.selected).toEqual(['how-to-help']);
+    expect(decision.undetermined).toEqual([{ unitId: 'held-sibling', reason: 'scope_unknown_held' }]);
+    expect(decision.disposition).toBe('ANSWER');
+    expect(decision.reasons).not.toContain('vetoed_by_negative_sibling');
+  });
+
+  it('сосед выбыл по НЕСВЯЗАННОЙ причине (scope CONFLICT) — не голосует, кандидат выбирается как прежде', () => {
+    const howTo = candidate({ unitId: 'how-to-help', sourceBlockAnchor: 'block-help' });
+    const conflicting = candidate({
+      unitId: 'conflicting-sibling',
+      sourceBlockAnchor: 'block-help',
+      scope: evaluateScope(
+        buildProfile('PROCEDURE_STEP', { scenario: scoped(['apostille.min_justice']) }),
+        buildQuery({ facets: { scenario: known(['apostille.zags.spb']) } })
+      ),
+    });
+
+    const decision = resolveKnowledgeSet([howTo, conflicting], QUERY);
+
+    expect(decision.selected).toEqual(['how-to-help']);
+    expect(decision.excluded).toEqual([{ unitId: 'conflicting-sibling', reason: 'scope_conflict' }]);
+    expect(decision.reasons).not.toContain('vetoed_by_negative_sibling');
+  });
+
+  it('сосед с INACTIVE-триггером, но БЕЗ доказанной необходимости условия — не голосует ("cannot prove a denial")', () => {
+    const howTo = candidate({ unitId: 'how-to-help', sourceBlockAnchor: 'block-help' });
+    const unprovenNegative = candidate({
+      unitId: 'unproven-negative-sibling',
+      trigger: consentAbsent(),
+      // negativeInferenceAllowed сознательно НЕ true: движок сам не считает
+      // это отрицание доказательством необходимого условия (см. "false
+      // generic sufficient condition ... cannot prove a denial" выше).
+      sourceBlockAnchor: 'block-help',
+    });
+
+    const decision = resolveKnowledgeSet([howTo, unprovenNegative], QUERY);
+
+    expect(decision.selected).toEqual(['how-to-help']);
+    expect(decision.excluded).toEqual([{ unitId: 'unproven-negative-sibling', reason: 'exception_trigger_inactive' }]);
+    expect(decision.negativeEvidence).toEqual([]);
+    expect(decision.reasons).not.toContain('vetoed_by_negative_sibling');
+  });
+
+  it('сосед-EXCEPTION_RULE с INACTIVE-триггером ("не сработало") — не голосует: это не доказывает ничего про блок', () => {
+    const howTo = candidate({ unitId: 'how-to-help', sourceBlockAnchor: 'block-help' });
+    const inactiveException = candidate({
+      unitId: 'inactive-exception-sibling',
+      kind: 'EXCEPTION_RULE',
+      scope: scopeOf('EXCEPTION_RULE'),
+      trigger: triggerIn('PRIVATE'),
+      parentRuleRef: 'rule-elsewhere',
+      sourceBlockAnchor: 'block-help',
+    });
+
+    const decision = resolveKnowledgeSet([howTo, inactiveException], QUERY);
+
+    expect(decision.selected).toEqual(['how-to-help']);
+    expect(decision.excluded).toEqual([{ unitId: 'inactive-exception-sibling', reason: 'exception_trigger_inactive' }]);
+    expect(decision.reasons).not.toContain('vetoed_by_negative_sibling');
+  });
+
+  it('сосед, снятый как IRRELEVANT (Decision Relevance), — не голосует: причина не относится к текущему запросу', () => {
+    const howTo = candidate({ unitId: 'how-to-help', sourceBlockAnchor: 'block-help' });
+    const irrelevant = candidate({
+      unitId: 'irrelevant-sibling',
+      trigger: consentAbsent(),
+      negativeInferenceAllowed: true,
+      semanticRelevance: 'IRRELEVANT',
+      sourceBlockAnchor: 'block-help',
+    });
+
+    const decision = resolveKnowledgeSet([howTo, irrelevant], QUERY);
+
+    expect(decision.selected).toEqual(['how-to-help']);
+    expect(decision.excluded).toEqual([{ unitId: 'irrelevant-sibling', reason: 'exception_trigger_inactive' }]);
+    expect(decision.negativeEvidence).toEqual([]);
+    expect(decision.reasons).not.toContain('vetoed_by_negative_sibling');
+  });
+
+  it('EXCEPTION_RULE ведёт себя как прежде: само не ветируется соседом и продолжает переопределять родителя', () => {
+    const parent = candidate({ unitId: 'parent-rule', sourceBlockAnchor: 'block-other' });
+    const exception = candidate({
+      unitId: 'active-exception',
+      kind: 'EXCEPTION_RULE',
+      scope: scopeOf('EXCEPTION_RULE'),
+      trigger: triggerIn('PUBLIC'),
+      parentRuleRef: 'parent-rule',
+      // Тот же блок, что и у достоверно негативного соседа ниже — проверяем
+      // именно ИСКЛЮЧЕНИЕ ИЗ вето, не отсутствие повода для него.
+      sourceBlockAnchor: 'block-help',
+    });
+    const negativeSibling = candidate({
+      unitId: 'negative-sibling',
+      trigger: consentAbsent(),
+      negativeInferenceAllowed: true,
+      sourceBlockAnchor: 'block-help',
+    });
+
+    const decision = resolveKnowledgeSet([parent, exception, negativeSibling], QUERY);
+
+    expect(decision.selected).toEqual(['active-exception']);
+    expect(decision.overridden).toEqual([{ unitId: 'parent-rule', byUnitId: 'active-exception' }]);
+    expect(decision.negativeEvidence).toEqual(['negative-sibling']);
+    expect(decision.reasons).not.toContain('vetoed_by_negative_sibling');
+  });
+
+  it('reasons-реестр знает новый код (типовая проверка на замкнутость)', () => {
+    expect(RESOLUTION_REASON_CODES).toContain('vetoed_by_negative_sibling');
   });
 });

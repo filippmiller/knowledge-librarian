@@ -14,8 +14,45 @@ import {
  * - конфликт текущего сообщения с историей попадает в ambiguities, текущее побеждает.
  */
 
-const CURRENT: ConversationMessage = { id: 'm2', role: 'user', text: 'сколько стоит апостиль?' };
-const HISTORY_MSG: ConversationMessage = { id: 'm1', role: 'user', text: 'нужен апостиль на диплом' };
+/**
+ * `text` — намеренно широкий, содержит буквально КАЖДУЮ цитату (`quote`),
+ * используемую тестами ниже с этим `messageId` — pre-retrieval hardening,
+ * Step 5: `buildQueryFrame` теперь требует, чтобы `quote` была настоящей
+ * подстрокой текста referenced-сообщения (раньше проверялось только
+ * непустое `quote`, дословность не проверялась вообще). Один общий фикстур
+ * дешевле, чем переписывать text под каждый тест по отдельности.
+ */
+const CURRENT: ConversationMessage = {
+  id: 'm2',
+  role: 'user',
+  text: [
+    'сколько стоит апостиль в СПб?',
+    'не апостиль',
+    'легализация',
+    'апостиль тоже',
+    'перевод',
+    'муж рядом',
+    'она согласна',
+    '???',
+    'на улице',
+    'дома',
+    'апостиль на загс спб',
+    'загс',
+    'из России',
+  ].join(' '),
+};
+const HISTORY_MSG: ConversationMessage = {
+  id: 'm1',
+  role: 'user',
+  text: [
+    'нужен апостиль на диплом',
+    'свидетельство ЗАГС',
+    'перевод',
+    'апостиль в СПб',
+    'в автобусе',
+    'без согласия',
+  ].join(' '),
+};
 
 function extraction(overrides: Partial<RawQueryExtraction> = {}): RawQueryExtraction {
   return {
@@ -197,8 +234,13 @@ describe('факт из истории не становится UNKNOWN — р�
   });
 });
 
-describe('конфликт текущего сообщения с историей — не молчаливый override', () => {
-  it('разные значения в истории и в текущем -> ambiguities непусто, текущее побеждает', () => {
+describe('additive vs replacement — история и текущее сообщение (pre-retrieval hardening, Step 6)', () => {
+  it('текущее упоминает НОВОЕ значение facet, НЕ повторяя значение из истории -> ОБА сохраняются аддитивно, НЕ конфликт (буквальный пример плана: "нужен перевод" + "и апостиль тоже", текущее не переспрашивает перевод)', () => {
+    // Раньше (до Step 6) это ошибочно считалось конфликтом: winning = current
+    // ТОЛЬКО, когда current непусто, поэтому 'перевод' из истории тихо
+    // терялся, а ambiguities получал ложное "текущее противоречит истории" —
+    // хотя текущее сообщение вообще не высказывалось о переводе, только
+    // ДОБАВИЛО апостиль.
     const frame = buildQueryFrame(
       extraction({
         facetMentions: [
@@ -222,11 +264,50 @@ describe('конфликт текущего сообщения с историе
     );
     expect(frame.facets.service.state).toBe('KNOWN');
     if (frame.facets.service.state === 'KNOWN') {
-      expect(frame.facets.service.include).toEqual(['apostille_spb']);
-      expect(frame.facets.service.evidence[0].source).toBe('CURRENT_MESSAGE');
+      expect([...frame.facets.service.include].sort()).toEqual(['apostille_spb', 'translation']);
     }
-    expect(frame.ambiguities.length).toBeGreaterThan(0);
-    expect(frame.ambiguities.some((a) => a.includes('service'))).toBe(true);
+    expect(frame.ambiguities).toEqual([]);
+  });
+
+  it('текущее ЯВНО исключает значение, известное из истории, и добавляет замену -> история НЕ выигрывает, значение исключено, не включено (буквальный пример плана: "нужен апостиль" + "нет, не апостиль, а легализация")', () => {
+    // Настоящая замена — это явное EXCLUDE того же значения, не просто
+    // "текущее сказало что-то другое". "always union history" здесь был бы
+    // неверным фиксом: apostille_spb обязан оказаться в exclude, а не
+    // остаться в include только потому что история его когда-то включала.
+    const frame = buildQueryFrame(
+      extraction({
+        facetMentions: [
+          {
+            facet: 'service',
+            polarity: 'INCLUDE',
+            rawValue: 'apostille_spb',
+            messageId: HISTORY_MSG.id,
+            quote: 'апостиль в СПб',
+          },
+          {
+            facet: 'service',
+            polarity: 'EXCLUDE',
+            rawValue: 'apostille_spb',
+            messageId: CURRENT.id,
+            quote: 'не апостиль',
+          },
+          {
+            facet: 'service',
+            polarity: 'INCLUDE',
+            rawValue: 'консульская легализация',
+            messageId: CURRENT.id,
+            quote: 'легализация',
+          },
+        ],
+      }),
+      [HISTORY_MSG, CURRENT]
+    );
+    expect(frame.facets.service.state).toBe('KNOWN');
+    if (frame.facets.service.state === 'KNOWN') {
+      expect(frame.facets.service.include).not.toContain('apostille_spb');
+      expect(frame.facets.service.exclude).toContain('apostille_spb');
+      expect(frame.facets.service.include).toContain('consular_legalization');
+    }
   });
 
   it('текущее сообщение ДОБАВЛЯЕТ значение поверх истории (не заменяет) — НЕ конфликт', () => {
@@ -300,6 +381,47 @@ describe('triggerFacts — тот же приоритет источников, 
   it('без упоминания -> UNKNOWN', () => {
     const frame = buildQueryFrame(extraction(), [CURRENT]);
     expect(frame.triggerFacts.helperPresent).toEqual({ state: 'UNKNOWN' });
+  });
+
+  it('Q09-N1: sleeping/current inability deterministically means consent ABSENT', () => {
+    const current = {
+      id: 'q09',
+      role: 'user' as const,
+      text: 'Муж может почесать спящей жене, раз она раньше не возражала?',
+    };
+    const frame = buildQueryFrame(extraction(), [current]);
+    expect(frame.triggerFacts.consentStatus).toMatchObject({
+      state: 'KNOWN',
+      value: 'ABSENT',
+      evidence: [{ source: 'CURRENT_MESSAGE', messageId: 'q09', quote: 'спящей' }],
+    });
+  });
+
+  it('historical or past non-objection never becomes current EXPLICIT consent', () => {
+    const current = { id: 'now', role: 'user' as const, text: 'Она раньше не возражала. Можно?' };
+    const frame = buildQueryFrame(
+      extraction({
+        triggerFactMentions: [
+          { fact: 'consentStatus', rawValue: 'EXPLICIT', messageId: current.id, quote: 'раньше не возражала' },
+        ],
+      }),
+      [current]
+    );
+    expect(frame.triggerFacts.consentStatus).toEqual({ state: 'UNKNOWN' });
+  });
+
+  it('an EXPLICIT consent mention from conversation history is not inherited as current consent', () => {
+    const history = { id: 'past', role: 'user' as const, text: 'В прошлый раз она согласилась.' };
+    const current = { id: 'now', role: 'user' as const, text: 'А сейчас можно?' };
+    const frame = buildQueryFrame(
+      extraction({
+        triggerFactMentions: [
+          { fact: 'consentStatus', rawValue: 'EXPLICIT', messageId: history.id, quote: 'согласилась' },
+        ],
+      }),
+      [history, current]
+    );
+    expect(frame.triggerFacts.consentStatus).toEqual({ state: 'UNKNOWN' });
   });
 
   it('только в истории -> KNOWN, evidence HISTORY, не становится UNKNOWN', () => {
@@ -408,6 +530,74 @@ describe('messageId не из разговора — упоминание не �
       [HISTORY_MSG, CURRENT]
     );
     expect(frame.facets.service).toEqual({ state: 'UNKNOWN' });
+  });
+});
+
+describe('buildQueryFrame — trust boundary: messageId и quote (pre-retrieval hardening, Step 5)', () => {
+  it('пустой (пробельный) message.id — бросает', () => {
+    const messages: ConversationMessage[] = [{ id: '   ', role: 'user', text: 'нужен перевод' }];
+    expect(() => buildQueryFrame(extraction(), messages)).toThrow(/id/i);
+  });
+
+  it('дубль message.id в разговоре — бросает (сообщения неразличимы)', () => {
+    const messages: ConversationMessage[] = [
+      { id: 'dup', role: 'user', text: 'нужен перевод' },
+      { id: 'dup', role: 'user', text: 'и апостиль тоже' },
+    ];
+    expect(() => buildQueryFrame(extraction(), messages)).toThrow(/id/i);
+  });
+
+  it('quote — НЕ дословная подстрока текста referenced-сообщения (сфабрикованная цитата) с РЕАЛЬНЫМ messageId -> mention отбрасывается, не доезжает до QueryFrame', () => {
+    const frame = buildQueryFrame(
+      extraction({
+        facetMentions: [
+          {
+            facet: 'service',
+            polarity: 'INCLUDE',
+            rawValue: 'apostille_spb',
+            messageId: CURRENT.id,
+            quote: 'этой фразы нет в сообщении вообще',
+          },
+        ],
+      }),
+      [CURRENT]
+    );
+    expect(frame.facets.service).toEqual({ state: 'UNKNOWN' });
+  });
+
+  it('quote — дословная подстрока -> mention принимается как раньше (regression guard: quote-проверка не ломает легитимные упоминания)', () => {
+    const frame = buildQueryFrame(
+      extraction({
+        facetMentions: [
+          {
+            facet: 'service',
+            polarity: 'INCLUDE',
+            rawValue: 'apostille_spb',
+            messageId: CURRENT.id,
+            quote: 'апостиль в СПб',
+          },
+        ],
+      }),
+      [CURRENT]
+    );
+    expect(frame.facets.service.state).toBe('KNOWN');
+  });
+
+  it('та же защита для triggerFactMentions — сфабрикованная цитата отбрасывается', () => {
+    const frame = buildQueryFrame(
+      extraction({
+        triggerFactMentions: [
+          {
+            fact: 'helperPresent',
+            rawValue: 'true',
+            messageId: CURRENT.id,
+            quote: 'выдуманная цитата, которой нет в тексте',
+          },
+        ],
+      }),
+      [CURRENT]
+    );
+    expect(frame.triggerFacts.helperPresent).toEqual({ state: 'UNKNOWN' });
   });
 });
 

@@ -1,0 +1,26 @@
+{
+  "ranAt": "2026-08-09T03:52:51.964Z",
+  "docPath": "C:\\dev\\translation\\scripts\\fixtures\\semantic-rule-extraction-test-pack\\uchebnaya_instrukciya_semanticheskoe_izvlechenie_pravil.docx",
+  "extractionRuns": 2,
+  "questionCount": 16,
+  "taintedShingleCount": 344,
+  "unguardedSecretCount": 0,
+  "runIds": [
+    "run-1-2026-08-09T03-46-42-900Z",
+    "run-2-2026-08-09T03-49-29-551Z"
+  ],
+  "dispositionCountsByRun": [
+    {
+      "runId": "run-1-2026-08-09T03-46-42-900Z",
+      "DIRECT_ANSWER": 14,
+      "HOLD": 2,
+      "ERROR": 0
+    },
+    {
+      "runId": "run-2-2026-08-09T03-49-29-551Z",
+      "DIRECT_ANSWER": 16,
+      "HOLD": 0,
+      "ERROR": 0
+    }
+  ]
+}

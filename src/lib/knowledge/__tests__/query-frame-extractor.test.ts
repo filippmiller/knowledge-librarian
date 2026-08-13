@@ -24,8 +24,37 @@ function runConfig(overrides: Partial<StructuredRunConfig> = {}): StructuredRunC
   };
 }
 
+/**
+ * `callAnthropic` теперь читает SSE (translation-gy3), а не плоский JSON —
+ * этот хелпер эмитит настоящую последовательность фреймов
+ * (message_start → content_block_delta → message_delta → message_stop),
+ * ОДНИМ content_block_delta на весь текст. Сигнатура не изменилась.
+ */
 function anthropicOk(text: string): Response {
-  return new Response(JSON.stringify({ content: [{ type: 'text', text }] }), { status: 200 });
+  const frames: Record<string, unknown>[] = [
+    {
+      type: 'message_start',
+      message: {
+        id: 'msg_test',
+        type: 'message',
+        role: 'assistant',
+        model: 'test-model',
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 10, output_tokens: 0 },
+      },
+    },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
+    {
+      type: 'message_delta',
+      delta: { stop_reason: 'end_turn', stop_sequence: null },
+      usage: { output_tokens: 5 },
+    },
+    { type: 'message_stop' },
+  ];
+  const body = frames.map((frame) => `data: ${JSON.stringify(frame)}\n`).join('');
+  return new Response(body, { status: 200 });
 }
 
 let fetchMock: ReturnType<typeof vi.fn>;
@@ -80,6 +109,14 @@ describe('buildExtractionMessages — чистая функция, без сет
     expect(systemMessage.content).toContain('apostille.zags.spb');
     expect(systemMessage.content).toContain('apostille.zags.lo');
   });
+
+  it('prompt pins current-consent semantics and rejects historical consent as EXPLICIT', () => {
+    const systemMessage = buildExtractionMessages([CURRENT]).find((m) => m.role === 'system')!;
+    expect(systemMessage.content).toContain('Спящий человек');
+    expect(systemMessage.content).toContain('означает ABSENT');
+    expect(systemMessage.content).toContain('Прошлое согласие');
+    expect(systemMessage.content).toContain('НИКОГДА не означают текущее EXPLICIT');
+  });
 });
 
 describe('extractQueryFrame — интеграция со structured()', () => {
@@ -93,7 +130,10 @@ describe('extractQueryFrame — интеграция со structured()', () => {
               polarity: 'INCLUDE',
               rawValue: 'apostille_spb',
               messageId: CURRENT.id,
-              quote: 'апостиль',
+              // Дословная подстрока CURRENT.text ('сколько стоит?') —
+              // pre-retrieval hardening Step 5, buildQueryFrame теперь
+              // требует quote-подстроку, а не любую непустую строку.
+              quote: 'сколько стоит',
             },
           ],
           triggerFactMentions: [],
@@ -137,5 +177,18 @@ describe('extractQueryFrame — интеграция со structured()', () => {
     await expect(
       extractQueryFrame({ messages: [CURRENT], runConfig: runConfig() })
     ).rejects.toThrow();
+  });
+
+  it('дубль message.id в messages — extractQueryFrame бросает ту же ошибку, что и прямой вызов buildQueryFrame (item E, pre-retrieval hardening Step 5: прямые вызовы buildQueryFrame и extractQueryFrame проходят одну и ту же валидацию)', async () => {
+    fetchMock.mockResolvedValue(
+      anthropicOk(JSON.stringify({ facetMentions: [], triggerFactMentions: [], questionAspects: [] }))
+    );
+    const dupMessages: ConversationMessage[] = [
+      { id: 'same', role: 'user', text: 'нужен перевод' },
+      { id: 'same', role: 'user', text: 'апостиль тоже' },
+    ];
+    await expect(
+      extractQueryFrame({ messages: dupMessages, runConfig: runConfig() })
+    ).rejects.toThrow(/id/i);
   });
 });

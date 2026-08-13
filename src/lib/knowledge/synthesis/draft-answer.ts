@@ -8,7 +8,9 @@
  * языке, что и существующая телеметрия.
  */
 
-export type AnswerSource = 'knowledge_base' | 'general_ai' | 'deterministic_guardrail';
+import type { AnswerSource } from '@/lib/ai/answer-source';
+
+export type { AnswerSource };
 
 export interface DraftAnswer {
   readonly text: string;

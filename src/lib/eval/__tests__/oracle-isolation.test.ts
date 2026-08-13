@@ -100,15 +100,7 @@ describe('изоляция oracle от продуктового кода', () =>
 
     for (const { file, relative, moduleSpecifiers } of SCANNED) {
       for (const specifier of moduleSpecifiers) {
-        const normalized = specifier.replace(/\\/g, '/');
-        const reachesEval =
-          normalized.includes('lib/eval') ||
-          (normalized.startsWith('.') &&
-            path
-              .resolve(path.dirname(file), normalized)
-              .replace(/\\/g, '/')
-              .includes('/src/lib/eval/'));
-        if (reachesEval) violations.push(`${relative} → ${specifier}`);
+        if (reachesEvalModule(file, specifier)) violations.push(`${relative} → ${specifier}`);
       }
     }
 
@@ -153,5 +145,81 @@ describe('изоляция oracle от продуктового кода', () =>
     expect(
       scanSourceReferences(concepts).stringLiterals.join(' ')
     ).not.toContain('semantic-rule-extraction-test-pack');
+  });
+});
+
+/**
+ * Раннер экстракции живёт ВНЕ `src/` (`scripts/run-extraction.ts`), поэтому
+ * НЕ попадает под `PRODUCT_FILES` выше — но обязан быть oracle-blind так же
+ * строго (его собственный докстринг это уже утверждает, план §0.3 №3/№5), а
+ * до этого шага это была ТОЛЬКО конвенция, не машинная проверка —
+ * независимое ревью PR #76, Step 4.
+ *
+ * Явный, МИНИМАЛЬНЫЙ allowlist, а не широкое `scripts/**` — в `scripts/`
+ * живут десятки несвязанных скриптов (тарифы, telegram-бот, аудиты и т.п.),
+ * подавляющее большинство из которых не имеет отношения к Aurora v2. Грейдер
+ * и e2e-раннер (`scripts/run-eval-corpus.ts`, `scripts/test-extraction-pack.ts`
+ * и т.п.) СОЗНАТЕЛЬНО не входят в этот список — им читать oracle разрешено
+ * (§0.3 №3, та же роль, что `src/lib/eval/` для продуктового кода), поэтому
+ * применение к ним этих ворот было бы неверным инвариантом, а не
+ * дополнительной защитой.
+ */
+const ORACLE_BLIND_SCRIPTS = ['scripts/run-extraction.ts'] as const;
+
+/** Та же логика "достаёт ли specifier до lib/eval", что и в воротах
+ *  продуктового кода выше — вынесена в helper, чтобы не дублировать policy
+ *  между двумя describe-блоками одного файла. */
+function reachesEvalModule(fromFile: string, specifier: string): boolean {
+  const normalized = specifier.replace(/\\/g, '/');
+  return (
+    normalized.includes('lib/eval') ||
+    (normalized.startsWith('.') &&
+      path.resolve(path.dirname(fromFile), normalized).replace(/\\/g, '/').includes('/src/lib/eval/'))
+  );
+}
+
+describe('изоляция oracle — scripts/ раннеры экстракции (explicit allowlist, независимое ревью PR #76 Step 4)', () => {
+  it('allowlist указывает на существующие файлы — иначе ворота молча ничего не проверяют', () => {
+    for (const relative of ORACLE_BLIND_SCRIPTS) {
+      expect(fs.existsSync(path.join(REPO_ROOT, relative)), `${relative} не найден`).toBe(true);
+    }
+  });
+
+  it('раннер экстракции не импортирует lib/eval — ни статически, ни динамически, ни через import x = require(...)', () => {
+    const violations: string[] = [];
+    for (const relative of ORACLE_BLIND_SCRIPTS) {
+      const full = path.join(REPO_ROOT, relative);
+      const { moduleSpecifiers } = scanSourceReferences(full);
+      for (const specifier of moduleSpecifiers) {
+        if (reachesEvalModule(full, specifier)) violations.push(`${relative} → ${specifier}`);
+      }
+    }
+    expect(violations, 'раннер экстракции тянет evaluation-only модуль').toEqual([]);
+  });
+
+  it('раннер экстракции не упоминает файлы oracle строковым литералом', () => {
+    const violations: string[] = [];
+    for (const relative of ORACLE_BLIND_SCRIPTS) {
+      const full = path.join(REPO_ROOT, relative);
+      const { stringLiterals } = scanSourceReferences(full);
+      for (const literal of stringLiterals) {
+        for (const fragment of FORBIDDEN_LITERAL_FRAGMENTS) {
+          if (literal.includes(fragment)) violations.push(`${relative} → ${fragment}`);
+        }
+      }
+    }
+    expect(violations, 'обращение к oracle в обход графа импортов').toEqual([]);
+  });
+
+  it('раннер экстракции не зашивает путь к учебному DOCX литералом — источник обязан приходить только через --doc=', () => {
+    const violations: string[] = [];
+    for (const relative of ORACLE_BLIND_SCRIPTS) {
+      const full = path.join(REPO_ROOT, relative);
+      const { stringLiterals } = scanSourceReferences(full);
+      if (stringLiterals.some((literal) => literal.includes(SOURCE_DOCX_FILENAME))) {
+        violations.push(relative);
+      }
+    }
+    expect(violations).toEqual([]);
   });
 });

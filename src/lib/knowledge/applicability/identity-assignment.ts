@@ -5,6 +5,7 @@ import {
   resolveEvidenceOffsets,
 } from './identity';
 import type { ExtractedKnowledgeUnit } from './extraction';
+import type { CanonicalBlockKind } from '../docx-canonical-blocks';
 
 /**
  * Реальное место unit'а в источнике — по нему считается `sourceBlockAnchor`.
@@ -15,15 +16,34 @@ import type { ExtractedKnowledgeUnit } from './extraction';
 export interface SourceBlockLocation {
   readonly anchor: string;
   readonly text: string;
+  readonly kind?: CanonicalBlockKind;
+  /** Breadcrumb заголовков — семантические метаданные (человекочитаемый
+   *  контекст, review packet), НЕ участвует в `sourceBlockAnchor` (Step 3,
+   *  независимое ревью PR #76: см. `computeSourceBlockAnchor`). */
   readonly sectionPath: string;
+  /** Позиционный путь в дереве документа — структурный дискриминатор
+   *  `sourceBlockAnchor`, а не `sectionPath`. */
+  readonly structuralPath: string;
   readonly blockStart: number;
   readonly blockEnd: number;
 }
 
-export interface PersistedKnowledgeUnit extends ExtractedKnowledgeUnit {
+/**
+ * `extractionRef`/`parentExtractionRef` (сырой уровень, `extraction.ts`) не
+ * переживают persistence — preflight C (translation-djc): `extractionRef` не
+ * identity, а `parentRuleRef` здесь ВСЕГДА либо настоящий `unitId` родителя
+ * этого же прогона, либо `null` (если unit самостоятелен, либо
+ * `parentExtractionRef` не резолвился — не должно происходить для units,
+ * прошедших `validateParentRefs` (которая с P0-фикса translation-rbj сама
+ * обнуляет невалидные ссылки), но эта функция не полагается на это молча,
+ * см. `safeUnitIdByExtractionRef`/`toPersistedUnit`).
+ */
+export interface PersistedKnowledgeUnit
+  extends Omit<ExtractedKnowledgeUnit, 'extractionRef' | 'parentExtractionRef'> {
   readonly sourceBlockAnchor: string;
   readonly unitId: string;
   readonly contentHash: string;
+  readonly parentRuleRef: string | null;
 }
 
 export interface UnresolvedEvidence {
@@ -42,6 +62,13 @@ export interface IdentityAssignmentResult {
   readonly unresolvedEvidence: readonly UnresolvedEvidence[];
 }
 
+interface ResolvedUnit {
+  readonly unit: ExtractedKnowledgeUnit;
+  readonly sourceBlockAnchor: string;
+  readonly unitId: string;
+  readonly contentHash: string;
+}
+
 /**
  * Назначает `sourceBlockAnchor`/`unitId`/`contentHash` каждому unit'у и
  * обнаруживает ambiguous duplicate (PR F, план §3): два unit'а, схлопнувшиеся
@@ -54,7 +81,7 @@ export function assignIdentity(
   blocksByAnchor: ReadonlyMap<string, SourceBlockLocation>,
   sourceRevisionHash: string
 ): IdentityAssignmentResult {
-  const resolved: PersistedKnowledgeUnit[] = [];
+  const resolved: ResolvedUnit[] = [];
   const unresolvedEvidence: UnresolvedEvidence[] = [];
 
   for (const unit of units) {
@@ -78,7 +105,7 @@ export function assignIdentity(
 
     const sourceBlockAnchor = computeSourceBlockAnchor(
       sourceRevisionHash,
-      block.sectionPath,
+      block.structuralPath,
       block.blockStart,
       block.blockEnd
     );
@@ -91,11 +118,14 @@ export function assignIdentity(
     const unitId = computeUnitId(sourceBlockAnchor, absoluteStart, absoluteEnd, unit.kind);
     const contentHash = computeContentHash(unit);
 
-    resolved.push({ ...unit, sourceBlockAnchor, unitId, contentHash });
+    resolved.push({ unit, sourceBlockAnchor, unitId, contentHash });
   }
 
+  const unitIdByExtractionRef = safeUnitIdByExtractionRef(resolved);
+  const persisted = resolved.map((r) => toPersistedUnit(r, unitIdByExtractionRef));
+
   const byUnitId = new Map<string, PersistedKnowledgeUnit[]>();
-  for (const u of resolved) {
+  for (const u of persisted) {
     const group = byUnitId.get(u.unitId);
     if (group) group.push(u);
     else byUnitId.set(u.unitId, [u]);
@@ -111,41 +141,72 @@ export function assignIdentity(
     }
   }
 
-  const finalUnits = resolveParentRuleRefs(unambiguous);
-
-  return { units: finalUnits, ambiguousDuplicates, unresolvedEvidence };
+  return { units: unambiguous, ambiguousDuplicates, unresolvedEvidence };
 }
 
 /**
- * `parentRuleRef` (PR E) обязана ссылаться на `unitId`, построенный этим
- * модулем, ИЛИ на сырой source anchor, если родительский unit ещё не прошёл
- * экстракцию (план §3, PR F). Переписывает ссылку в `unitId`, когда ровно
- * ОДИН unit этого прогона занимает anchor, на который ссылается
- * `parentRuleRef` — иначе (ноль или несколько кандидатов, т.е. неоднозначно,
- * кто именно родитель) оставляет сырой anchor: угадывание родителя из
- * нескольких кандидатов было бы тем же самым классом ошибки, что и случайный
- * LLM-ordinal у ambiguous duplicate.
+ * `extractionRef -> unitId`, ОТКАЗОУСТОЙЧИВАЯ к дублям, даже если
+ * `validateParentRefs` не вызывалась перед `assignIdentity` (P0,
+ * translation-rbj, независимое ревью PR #76: `assignIdentity` — экспортируемая
+ * функция, ничто на уровне типов не заставляет вызывающего сначала
+ * провалидировать). Обычный `new Map(...)` при задвоенном `extractionRef`
+ * молча оставил бы ПОСЛЕДНЕГО кандидата (last-write-wins, зависимо от порядка
+ * LLM output) — здесь любой `extractionRef`, встретившийся у >1 `resolved`
+ * unit'а, вообще НЕ попадает в карту: `.get()` для него честно вернёт
+ * `undefined`, что `toPersistedUnit` уже трактует как "родитель не резолвился".
  */
-function resolveParentRuleRefs(
-  units: readonly PersistedKnowledgeUnit[]
-): PersistedKnowledgeUnit[] {
-  const candidatesByAnchor = new Map<string, string[]>();
-  for (const u of units) {
-    const list = candidatesByAnchor.get(u.sourceSpan.anchor);
-    if (list) list.push(u.unitId);
-    else candidatesByAnchor.set(u.sourceSpan.anchor, [u.unitId]);
+function safeUnitIdByExtractionRef(resolved: readonly ResolvedUnit[]): ReadonlyMap<string, string> {
+  const grouped = new Map<string, string[]>();
+  for (const r of resolved) {
+    const list = grouped.get(r.unit.extractionRef);
+    if (list) list.push(r.unitId);
+    else grouped.set(r.unit.extractionRef, [r.unitId]);
   }
 
-  return units.map((u) => {
-    if (u.parentRuleRef === null) return u;
-    // Сам unit тоже мог оказаться на этом anchor (его собственный
-    // sourceSpan.anchor совпадает с parentRuleRef, который он указал) — это
-    // не кандидат в родители самому себе, исключается ДО подсчёта
-    // однозначности, а не после.
-    const candidates = (candidatesByAnchor.get(u.parentRuleRef) ?? []).filter(
-      (id) => id !== u.unitId
-    );
-    if (candidates.length !== 1) return u;
-    return { ...u, parentRuleRef: candidates[0] };
-  });
+  const safe = new Map<string, string>();
+  for (const [extractionRef, unitIds] of grouped) {
+    if (unitIds.length === 1) safe.set(extractionRef, unitIds[0]);
+  }
+  return safe;
+}
+
+/**
+ * Строит persisted-запись из `ResolvedUnit`, заменяя `parentExtractionRef`
+ * (сырая, per-run ссылка) на настоящий `unitId` родителя (preflight C,
+ * translation-djc) — по карте `extractionRef -> unitId`
+ * (`safeUnitIdByExtractionRef`, устойчивой к дублям).
+ *
+ * `parentExtractionRef`, не резолвившийся в этой карте (задвоен, не
+ * существует — не должно происходить для units, прошедших
+ * `validateParentRefs` раньше в пайплайне, та функция это уже проверяет и
+ * помечает `DANGLING_PARENT_REF`, а с P0-фикса ещё и обнуляет само поле — но
+ * эта функция не полагается на это молча, см. `safeUnitIdByExtractionRef`),
+ * даёт `parentRuleRef: null` — НЕ сырую строку: `extractionRef` явно объявлен
+ * не-identity полем и не имеет права пережить persistence ни в каком виде.
+ *
+ * Самоссылка (`parentExtractionRef === extractionRef`) отдельно исключена
+ * ДО обращения к карте: без этой проверки unit, чьё evidence резолвилось,
+ * автоматически резолвил бы САМ СЕБЯ через карту (его собственный
+ * `extractionRef` там ЕСТЬ) — `parentRuleRef === unitId`, то есть persisted
+ * self-reference, ровно тот класс бага, который обнаружило независимое
+ * ревью PR #76.
+ */
+function toPersistedUnit(
+  resolved: ResolvedUnit,
+  unitIdByExtractionRef: ReadonlyMap<string, string>
+): PersistedKnowledgeUnit {
+  const { extractionRef, parentExtractionRef, ...rest } = resolved.unit;
+
+  const parentRuleRef =
+    parentExtractionRef === null || parentExtractionRef === extractionRef
+      ? null
+      : (unitIdByExtractionRef.get(parentExtractionRef) ?? null);
+
+  return {
+    ...rest,
+    sourceBlockAnchor: resolved.sourceBlockAnchor,
+    unitId: resolved.unitId,
+    contentHash: resolved.contentHash,
+    parentRuleRef,
+  };
 }

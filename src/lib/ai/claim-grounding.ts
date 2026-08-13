@@ -32,6 +32,11 @@ export interface RiskyClaim {
   context: string;
 }
 
+interface LocatedRiskyClaim extends RiskyClaim {
+  readonly start: number;
+  readonly end: number;
+}
+
 /**
  * Пробелы внутри числа бывают обычные, неразрывные и тонкие: «35 400», «35 400»,
  * «35 400». Для сравнения все они убираются, иначе источник и ответ не совпадут
@@ -188,7 +193,12 @@ const UNIT_DIGIT_ALTERNATION = [...NUMERAL_WORDS.entries()]
  * Точку и другие знаки зазор не пересекает (`[а-яё]+`), поэтому склейка через
  * границу предложения невозможна.
  */
-const GAP = String.raw`(?:\s+[а-яё]+)?\s*`;
+/** A recognized unit word is evidence, not an adjective-like filler. Without
+ * this guard `30 секунд цикл` produced both 30 seconds and a fabricated
+ * 30 cycles claim by swallowing `секунд` as GAP. */
+const RECOGNIZED_UNIT_WORD = String.raw`(?:руб(?:л(?:ей|я|ь|и|ю|ём|ем)?)?|дн[еяй][а-яё]*|день|сутк[а-яё]*|суток|недел[а-яё]+|месяц[а-яё]*|час[а-яё]*|минут[а-яё]*|процент[а-яё]*|секунд[а-яё]*|сек|цикл[а-яё]*)`;
+const NON_UNIT_FILLER = String.raw`(?!(?:${RECOGNIZED_UNIT_WORD})(?![а-яёА-ЯЁ]))[а-яё]+`;
+const GAP = String.raw`(?:\s+${NON_UNIT_FILLER})?\s*`;
 
 /**
  * Тот же зазор, но заполнитель НЕ имеет права сам быть числительным словом.
@@ -197,7 +207,7 @@ const GAP = String.raw`(?:\s+[а-яё]+)?\s*`;
  * прилагательное — та же дыра, которую решает `compoundWordPattern`, только
  * с другой стороны (голова составного числа вместо хвоста).
  */
-const WORD_GAP = String.raw`(?:\s+(?!(?:${NUMERAL_ALTERNATION})(?![а-яёА-ЯЁ]))[а-яё]+)?\s*`;
+const WORD_GAP = String.raw`(?:\s+(?!(?:${NUMERAL_ALTERNATION})(?![а-яёА-ЯЁ]))${NON_UNIT_FILLER})?\s*`;
 
 function singlePattern(spec: UnitSpec): RegExp {
   return new RegExp(String.raw`(${NUM})${MAGNITUDE}${GAP}${spec.pattern}`, 'giu');
@@ -260,7 +270,7 @@ function wordPattern(spec: UnitSpec): RegExp {
 }
 
 function add(
-  into: Map<string, RiskyClaim>,
+  into: Map<string, LocatedRiskyClaim>,
   spec: UnitSpec,
   rawValue: string,
   text: string,
@@ -270,7 +280,7 @@ function add(
 ): void {
   const value = applyMagnitude(normalizeNumber(rawValue), magnitude);
   if (!value || Number(value) === 0) return;
-  const key = claimKey(spec.unit, value);
+  const key = `${claimKey(spec.unit, value)}@${at}`;
   if (into.has(key)) return;
   const from = Math.max(0, at - 40);
   into.set(key, {
@@ -278,6 +288,8 @@ function add(
     unit: spec.unit,
     kind: spec.kind,
     context: text.slice(from, Math.min(text.length, at + matchLength + 40)).replace(/\s+/g, ' ').trim(),
+    start: at,
+    end: at + matchLength,
   });
 }
 
@@ -285,8 +297,8 @@ function claimKey(unit: string, value: string): string {
   return `${unit}:${value}`;
 }
 
-export function extractRiskyClaims(text: string): RiskyClaim[] {
-  const found = new Map<string, RiskyClaim>();
+function extractLocatedRiskyClaims(text: string): LocatedRiskyClaim[] {
+  const found = new Map<string, LocatedRiskyClaim>();
 
   for (const spec of UNITS) {
     // Сначала диапазоны: они дают обе границы. Одиночный проход после этого
@@ -331,6 +343,36 @@ export function extractRiskyClaims(text: string): RiskyClaim[] {
   }
 
   return [...found.values()];
+}
+
+export function extractRiskyClaims(text: string): RiskyClaim[] {
+  const uniqueClaims = new Map<string, RiskyClaim>();
+  for (const { start: _start, end: _end, ...claim } of extractLocatedRiskyClaims(text)) {
+    uniqueClaims.set(claimKey(claim.unit, claim.value), claim);
+  }
+  return [...uniqueClaims.values()];
+}
+
+/** Removes only numeric+unit premises unsupported by selected evidence while
+ * preserving the qualitative question. This prevents the answer model from
+ * echoing a user-supplied number that the strict verifier must reject. */
+export function redactUnsupportedNumericClaims(text: string, selectedSources: readonly string[]): string {
+  const allowed = new Set(
+    extractLocatedRiskyClaims(selectedSources.join(' ¦ ')).map((claim) => claimKey(claim.unit, claim.value))
+  );
+  const unsupported = extractLocatedRiskyClaims(text)
+    .filter((claim) => !allowed.has(claimKey(claim.unit, claim.value)))
+    .sort((a, b) => b.start - a.start);
+  let redacted = text;
+  for (const claim of unsupported) {
+    const replacement = claim.kind === 'money'
+      ? 'указанная сумма'
+      : claim.kind === 'percent'
+        ? 'указанный процент'
+        : 'указанная продолжительность';
+    redacted = `${redacted.slice(0, claim.start)}${replacement}${redacted.slice(claim.end)}`;
+  }
+  return redacted;
 }
 
 export interface GroundingVerdict {

@@ -78,6 +78,22 @@ export function scanSourceReferences(filePath: string): ScannedReferences {
       }
     }
 
+    // `import x = require('...')` (ImportEqualsDeclaration/ExternalModuleReference,
+    // preflight B, translation-5lf) — синтаксически НЕ ImportDeclaration и НЕ
+    // CallExpression-require, отдельная ветка грамматики TS. Без явной
+    // обработки specifier всё равно попал бы в общий `stringLiterals` через
+    // рекурсию ниже, но НЕ в `moduleSpecifiers` — а именно `moduleSpecifiers`
+    // проверяет ворота "продуктовый код не импортирует lib/eval"
+    // (oracle-isolation.test.ts), то есть этот синтаксис обходил бы ворота
+    // молча, оставаясь незамеченным именно там, где он опасен.
+    if (
+      ts.isImportEqualsDeclaration(node) &&
+      ts.isExternalModuleReference(node.moduleReference) &&
+      ts.isStringLiteralLike(node.moduleReference.expression)
+    ) {
+      moduleSpecifiers.push(node.moduleReference.expression.text);
+    }
+
     if (ts.isStringLiteralLike(node)) {
       stringLiterals.push(node.text);
     }
