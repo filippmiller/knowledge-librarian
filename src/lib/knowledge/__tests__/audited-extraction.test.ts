@@ -234,6 +234,117 @@ describe('extractKnowledgeUnitsWithCompletenessAudit', () => {
     expect(repaired.triggerCondition).toEqual({ all: [{ fact: 'privacyContext', equals: 'PUBLIC' }] });
   });
 
+  // b5 (aurora-v12) / b12 (aurora-v13), 2026-08-11: the third shape, and the
+  // one neither guard above covers. The auditor rejects the existing unit's
+  // triggerCondition as INVENTED -- the block says nothing about the trigger
+  // fact at all -- and demands a plain unit with no trigger and no parent.
+  // Repair complies exactly: triggerCondition:null, and there is no new child
+  // to hand the trigger to, because the trigger should simply not exist.
+  // `triggerHandedToNewChild` is therefore false, `preserveTrigger` fires, and
+  // the invented trigger is resurrected onto the very unit the auditor just
+  // rejected -- so the re-audit repeats its finding verbatim, rounds run out
+  // and the block hard-aborts. Repair answers correctly both times; the merge
+  // step between repair and re-audit is what throws the answer away.
+  it('b5/b12 shape: auditor objecting to an invented trigger lets the repair delete it outright', async () => {
+    const text = 'Использованную салфетку выбрасывают; повторно применять её нельзя.';
+    const extractor = async () => ({
+      units: [
+        unit({
+          kind: 'EXCEPTION_RULE',
+          extractionRef: 'u1',
+          statement: 'Использованную салфетку выбрасывают.',
+          // Invented: the block contains no condition about resource availability.
+          triggerCondition: { all: [{ fact: 'resourceAvailability', equals: 'UNAVAILABLE' }] },
+          parentExtractionRef: null,
+          sourceSpan: { anchor: 'b5', quote: 'Использованную салфетку выбрасывают' },
+        }),
+      ],
+      structuredResult: {} as never,
+    });
+    // Plain removal: one replacement unit, no sibling/child anywhere in the
+    // response -- there is nothing to hand the trigger off to.
+    const repairExtractor = async () => ({
+      units: [
+        unit({
+          kind: 'PROCEDURE_STEP',
+          extractionRef: 'b0-u1',
+          statement: 'Использованную салфетку выбрасывают; повторно применять её нельзя.',
+          triggerCondition: null,
+          parentExtractionRef: null,
+          sourceSpan: { anchor: 'b5', quote: 'Использованную салфетку выбрасывают' },
+        }),
+      ],
+      structuredResult: {} as never,
+    });
+    let audits = 0;
+    const auditor = async (): Promise<BlockCoverageAuditResult> => ++audits === 1
+      ? { blockAnchor: 'b5', findings: [{
+          verdict: 'UNREPRESENTED_CLAUSE',
+          quote: text,
+          explanation: 'triggerCondition resourceAvailability выдуман: в тексте нет условия про доступность ресурса',
+          quoteVerified: true,
+        }], hasGap: true }
+      : { blockAnchor: 'b5', findings: [{ verdict: 'COVERED', quote: '', explanation: 'clean', quoteVerified: false }], hasGap: false };
+
+    const result = await extractKnowledgeUnitsWithCompletenessAudit(
+      [block('b5', text)], 5, { runConfig: {} as never }, {} as never, { extractor, repairExtractor, auditor }
+    );
+
+    const repaired = result.units.find((item) => item.extractionRef === 'b0-u1')!;
+    expect(repaired.triggerCondition).toBeNull();
+    expect(result.auditResults[0].findings[0].verdict).toBe('COVERED');
+  });
+
+  // The veto above must require BOTH overlap AND trigger vocabulary. An
+  // actionable finding that merely happens to share evidence with this unit
+  // while objecting to something else entirely must NOT be able to pose as an
+  // objection to the trigger and wipe it.
+  it('overlapping finding that does not name the trigger still preserves the existing triggerCondition', async () => {
+    const text = 'Использованную салфетку выбрасывают; повторно применять её нельзя.';
+    const extractor = async () => ({
+      units: [
+        unit({
+          kind: 'EXCEPTION_RULE',
+          extractionRef: 'u1',
+          statement: 'Использованную салфетку выбрасывают.',
+          triggerCondition: { all: [{ fact: 'resourceAvailability', equals: 'UNAVAILABLE' }] },
+          parentExtractionRef: null,
+          sourceSpan: { anchor: 'b5', quote: 'Использованную салфетку выбрасывают' },
+        }),
+      ],
+      structuredResult: {} as never,
+    });
+    const repairExtractor = async () => ({
+      units: [
+        unit({
+          kind: 'EXCEPTION_RULE',
+          extractionRef: 'b0-u1',
+          statement: 'Использованную салфетку выбрасывают; повторно применять её нельзя.',
+          triggerCondition: null,
+          parentExtractionRef: null,
+          sourceSpan: { anchor: 'b5', quote: 'Использованную салфетку выбрасывают' },
+        }),
+      ],
+      structuredResult: {} as never,
+    });
+    let audits = 0;
+    const auditor = async (): Promise<BlockCoverageAuditResult> => ++audits === 1
+      ? { blockAnchor: 'b5', findings: [{
+          verdict: 'UNREPRESENTED_CLAUSE',
+          quote: text,
+          explanation: 'вторая половина предложения про повторное применение не представлена отдельным юнитом',
+          quoteVerified: true,
+        }], hasGap: true }
+      : { blockAnchor: 'b5', findings: [{ verdict: 'COVERED', quote: '', explanation: 'clean', quoteVerified: false }], hasGap: false };
+
+    const result = await extractKnowledgeUnitsWithCompletenessAudit(
+      [block('b5', text)], 5, { runConfig: {} as never }, {} as never, { extractor, repairExtractor, auditor }
+    );
+
+    const repaired = result.units.find((item) => item.extractionRef === 'b0-u1')!;
+    expect(repaired.triggerCondition).toEqual({ all: [{ fact: 'resourceAvailability', equals: 'UNAVAILABLE' }] });
+  });
+
   it('quality-v2 b13: разделяет широкую составную evidence-цитату на три доказуемые clause spans', () => {
     const quote = 'Помощник обязан надеть чистые одноразовые перчатки, соблюдать ограничения по силе и времени и немедленно остановиться по первой просьбе.';
     const refined = refineCoextensiveEvidence([

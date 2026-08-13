@@ -42,6 +42,7 @@ import type { ExtractionRunConfig } from '@/lib/ai/extraction-run';
 import type { ChatMessage } from '@/lib/ai/chat-provider';
 import { structured } from '@/lib/ai/structured-output';
 import { quoteSpansOverlap } from './quote-locator';
+import { TRIGGER_FACT_KEYS } from './applicability/trigger-facts';
 import {
   CYCLES_VS_TIMES_RULE,
   NUMERIC_SPLIT_IDENTITY_RULE,
@@ -81,6 +82,19 @@ export interface AuditedExtractionDeps {
 
 export type CoverageAuditStage = 'INITIAL_AUDIT' | 'FINAL_AUDIT';
 export const FOCUSED_REPAIR_MAX_ROUNDS = 3;
+
+/**
+ * Closed vocabulary that lets a coverage finding count as an objection to a
+ * unit's own `triggerCondition` (see `findingObjectsToExistingTrigger` below).
+ * Derived from `TRIGGER_FACT_REGISTRY`, never hand-listed: a fact added to the
+ * registry is recognised here automatically, and a fact removed from it stops
+ * being recognised — the alternative, a literal array of keywords, would drift
+ * away from the auditor's actual vocabulary silently.
+ */
+export const TRIGGER_OBJECTION_MARKERS: readonly string[] = Object.freeze([
+  'triggerCondition',
+  ...TRIGGER_FACT_KEYS,
+]);
 
 export interface AuditedExtractionCheckpoint {
   loadAudit(stage: CoverageAuditStage, options: AuditBlockCoverageOptions): BlockCoverageAuditResult | undefined;
@@ -525,12 +539,7 @@ export async function extractKnowledgeUnitsWithCompletenessAudit(
           other.triggerCondition !== null &&
           !currentUnitsForBlock.some((unit) => unit.extractionRef === other.extractionRef)
         );
-        const preserveTrigger =
-          candidate.triggerCondition === null &&
-          existing.triggerCondition !== null &&
-          !triggerHandedToNewChild;
-        const preserveNumeric = candidate.numericConstraint === null && existing.numericConstraint !== null;
-        const actionableFindingOverlapsExisting = pendingAudit.findings.some((finding) =>
+        const findingsOverlappingExisting = pendingAudit.findings.filter((finding) =>
           (finding.verdict === 'POSSIBLE_OMISSION' || finding.verdict === 'UNREPRESENTED_CLAUSE') &&
           finding.quoteVerified && finding.quote.length > 0 &&
           [existing.sourceSpan, ...Object.values(existing.evidenceByField)].some((evidence) =>
@@ -538,6 +547,33 @@ export async function extractKnowledgeUnitsWithCompletenessAudit(
             quoteSpansOverlap(block.text, finding.quote, evidence.quote)
           )
         );
+        const actionableFindingOverlapsExisting = findingsOverlappingExisting.length > 0;
+        // Third shape, distinct from both the ordinary "repair forgot to
+        // restate the field" case and the b4 hand-off above: the auditor
+        // rejects the trigger itself as INVENTED and repair complies by
+        // deleting it, with no child to receive it (observed live, blocks b5
+        // in aurora-v12 and b12 in aurora-v13, 2026-08-11 — the same fabricated
+        // resourceAvailability on "Использованную салфетку выбрасывают").
+        // Preserving the trigger there resurrects exactly what the auditor
+        // just rejected, so the re-audit repeats its finding verbatim and the
+        // block hard-aborts once rounds run out.
+        //
+        // Two conditions, deliberately, not one: overlap ALONE (i.e. reusing
+        // actionableFindingOverlapsExisting) would let a finding about this
+        // unit's kind, parent or number pose as an objection to the trigger
+        // merely by sharing an evidence span. Requiring the explanation to
+        // name triggerCondition or a fact from the closed TRIGGER_FACT_REGISTRY
+        // ties the veto to the auditor's own fixed vocabulary rather than to
+        // keyword guessing.
+        const findingObjectsToExistingTrigger = findingsOverlappingExisting.some((finding) =>
+          TRIGGER_OBJECTION_MARKERS.some((marker) => finding.explanation.includes(marker))
+        );
+        const preserveTrigger =
+          candidate.triggerCondition === null &&
+          existing.triggerCondition !== null &&
+          !triggerHandedToNewChild &&
+          !findingObjectsToExistingTrigger;
+        const preserveNumeric = candidate.numericConstraint === null && existing.numericConstraint !== null;
         const mayClearMalformedExceptionParent =
           existing.kind === 'EXCEPTION_RULE' &&
           (existing.parentExtractionRef === null || existing.triggerCondition === null) &&
