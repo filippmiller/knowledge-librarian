@@ -10,6 +10,7 @@
 
 import type { Audience } from '@/lib/knowledge/audience';
 import type { EnhancedAnswerResult } from '@/lib/ai/enhanced-answering-engine';
+import { ANSWER_SOURCES, type AnswerSource } from '@/lib/ai/answer-source';
 import type { TelemetryMode } from '@/lib/ai/answer-telemetry';
 import {
   CLIENT_HOLDING_ANSWER,
@@ -28,9 +29,6 @@ import {
   type CaseResult,
   type ExpectedDisposition,
 } from './disposition';
-
-const ANSWER_SOURCES = ['knowledge_base', 'general_ai', 'deterministic_guardrail'] as const;
-type AnswerSource = (typeof ANSWER_SOURCES)[number];
 
 const AUDIENCES = ['internal', 'client'] as const;
 

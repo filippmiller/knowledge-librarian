@@ -32,6 +32,11 @@ export interface RiskyClaim {
   context: string;
 }
 
+interface LocatedRiskyClaim extends RiskyClaim {
+  readonly start: number;
+  readonly end: number;
+}
+
 /**
  * Пробелы внутри числа бывают обычные, неразрывные и тонкие: «35 400», «35 400»,
  * «35 400». Для сравнения все они убираются, иначе источник и ответ не совпадут
@@ -104,17 +109,108 @@ const UNITS: UnitSpec[] = [
   {
     unit: 'day',
     kind: 'duration',
-    pattern: String.raw`(?:(?:календарн[а-яё]*|рабоч[а-яё]*)\s+)?(?:дн[еяй][а-яё]*|день|р\.\s*д\.?|к\.\s*д\.?|р\/д)`,
+    pattern: String.raw`(?:(?:календарн[а-яё]*|рабоч[а-яё]*)\s+)?(?:дн[еяй][а-яё]*|день|сутк[а-яё]*|суток|р\.\s*д\.?|к\.\s*д\.?|р\/д)`,
   },
   { unit: 'week', kind: 'duration', pattern: String.raw`(?:календарн[а-яё]*\s+)?недел[а-яё]+` },
   { unit: 'month', kind: 'duration', pattern: String.raw`(?:календарн[а-яё]*\s+)?месяц[а-яё]*` },
   { unit: 'hour', kind: 'duration', pattern: String.raw`час[а-яё]*` },
   { unit: 'minute', kind: 'duration', pattern: String.raw`минут[а-яё]*` },
   { unit: 'percent', kind: 'percent', pattern: String.raw`(?:%|процент[а-яё]*)` },
+  // Секунды и циклы — домен процедурных инструкций (не только прайсов).
+  // Без них ограничения вида «не дольше 15 секунд, не более 3 циклов»
+  // не распознавались как утверждения вовсе, то есть не проверялись ничем.
+  { unit: 'second', kind: 'duration', pattern: String.raw`(?:секунд[а-яё]*|сек\.?(?![а-яё]))` },
+  { unit: 'cycle', kind: 'duration', pattern: String.raw`цикл[а-яё]*` },
 ];
 
+/**
+ * Числительные словами.
+ *
+ * Зачем: инструкции формулируют часть ограничений словом — «не более ТРЁХ
+ * циклов», «дольше ДВУХ суток». Проверка, читающая только цифры, к таким числам
+ * слепа, и выдуманное «не более ПЯТИ циклов» не содержит ни одной цифры, то есть
+ * не проверяется вообще.
+ *
+ * Почему это не порождает ложных утверждений: числительное засчитывается ТОЛЬКО
+ * непосредственно перед известной единицей. «Один из способов» утверждением не
+ * становится — «способов» не единица измерения; «в два раза» тоже, потому что
+ * «раз» намеренно НЕ единица: это множитель («в два раза быстрее»), а не счёт.
+ */
+const NUMERAL_WORDS: ReadonlyMap<string, string> = new Map([
+  ['один', '1'], ['одного', '1'], ['одна', '1'], ['одну', '1'], ['одной', '1'],
+  ['два', '2'], ['две', '2'], ['двух', '2'], ['двум', '2'],
+  ['три', '3'], ['трёх', '3'], ['трех', '3'], ['трём', '3'], ['трем', '3'],
+  ['четыре', '4'], ['четырёх', '4'], ['четырех', '4'],
+  ['пять', '5'], ['пяти', '5'],
+  ['шесть', '6'], ['шести', '6'],
+  ['семь', '7'], ['семи', '7'],
+  ['восемь', '8'], ['восьми', '8'],
+  ['девять', '9'], ['девяти', '9'],
+  ['десять', '10'], ['десяти', '10'],
+  ['одиннадцать', '11'], ['одиннадцати', '11'],
+  ['двенадцать', '12'], ['двенадцати', '12'],
+  ['тринадцать', '13'], ['тринадцати', '13'],
+  ['четырнадцать', '14'], ['четырнадцати', '14'],
+  ['пятнадцать', '15'], ['пятнадцати', '15'],
+  ['двадцать', '20'], ['двадцати', '20'],
+  ['тридцать', '30'], ['тридцати', '30'],
+]);
+
+/** Длинные формы первыми: «пятнадцати» не должно съедаться формой «пяти». */
+const NUMERAL_ALTERNATION = [...NUMERAL_WORDS.keys()]
+  .sort((a, b) => b.length - a.length)
+  .join('|');
+
+/**
+ * Составные числительные («двадцать пять», «тридцать два») — десяток и
+ * единица, идущие подряд. Выводятся из `NUMERAL_WORDS`, а не заведены отдельной
+ * таблицей: диапазон значений (кратно 10 от 20 — «единица», 1–9) вычисляется
+ * один раз, и добавление нового десятка в основную таблицу автоматически
+ * включает его в составную сборку.
+ */
+const DECADE_ALTERNATION = [...NUMERAL_WORDS.entries()]
+  .filter(([, value]) => Number(value) % 10 === 0 && Number(value) >= 20)
+  .map(([word]) => word)
+  .sort((a, b) => b.length - a.length)
+  .join('|');
+
+const UNIT_DIGIT_ALTERNATION = [...NUMERAL_WORDS.entries()]
+  .filter(([, value]) => Number(value) >= 1 && Number(value) <= 9)
+  .map(([word]) => word)
+  .sort((a, b) => b.length - a.length)
+  .join('|');
+
+/**
+ * Одно необязательное слово между числом и единицей: «не более трёх ТАКИХ
+ * циклов», «15 ПОЛНЫХ секунд». Ровно одно, а не любое количество: больший зазор
+ * начинает склеивать соседние утверждения («15 минут до конца рабочего дня»).
+ *
+ * Симметрично для цифр и слов намеренно. Если зазор допускать только для
+ * числительных словами, то вставленное прилагательное становится способом
+ * обойти проверку в цифровой форме — «не более 3 таких циклов» прошло бы
+ * непроверенным.
+ *
+ * Точку и другие знаки зазор не пересекает (`[а-яё]+`), поэтому склейка через
+ * границу предложения невозможна.
+ */
+/** A recognized unit word is evidence, not an adjective-like filler. Without
+ * this guard `30 секунд цикл` produced both 30 seconds and a fabricated
+ * 30 cycles claim by swallowing `секунд` as GAP. */
+const RECOGNIZED_UNIT_WORD = String.raw`(?:руб(?:л(?:ей|я|ь|и|ю|ём|ем)?)?|дн[еяй][а-яё]*|день|сутк[а-яё]*|суток|недел[а-яё]+|месяц[а-яё]*|час[а-яё]*|минут[а-яё]*|процент[а-яё]*|секунд[а-яё]*|сек|цикл[а-яё]*)`;
+const NON_UNIT_FILLER = String.raw`(?!(?:${RECOGNIZED_UNIT_WORD})(?![а-яёА-ЯЁ]))[а-яё]+`;
+const GAP = String.raw`(?:\s+${NON_UNIT_FILLER})?\s*`;
+
+/**
+ * Тот же зазор, но заполнитель НЕ имеет права сам быть числительным словом.
+ * Только для `wordPattern`: без этого ограничения «двадцати [пяти] секунд»
+ * матчился бы как «двадцать» (20) с «пяти» проглоченным как будто это
+ * прилагательное — та же дыра, которую решает `compoundWordPattern`, только
+ * с другой стороны (голова составного числа вместо хвоста).
+ */
+const WORD_GAP = String.raw`(?:\s+(?!(?:${NUMERAL_ALTERNATION})(?![а-яёА-ЯЁ]))${NON_UNIT_FILLER})?\s*`;
+
 function singlePattern(spec: UnitSpec): RegExp {
-  return new RegExp(String.raw`(${NUM})${MAGNITUDE}\s*${spec.pattern}`, 'giu');
+  return new RegExp(String.raw`(${NUM})${MAGNITUDE}${GAP}${spec.pattern}`, 'giu');
 }
 
 /**
@@ -124,11 +220,57 @@ function singlePattern(spec: UnitSpec): RegExp {
  * верхнюю границу, потому что первая половина диапазона не примыкает к единице.
  */
 function rangePattern(spec: UnitSpec): RegExp {
-  return new RegExp(String.raw`(${NUM})${DASH}(${NUM})${MAGNITUDE}\s*${spec.pattern}`, 'giu');
+  return new RegExp(String.raw`(${NUM})${DASH}(${NUM})${MAGNITUDE}${GAP}${spec.pattern}`, 'giu');
+}
+
+/**
+ * Составное числительное («двадцать» + «пять» = 25), примыкающее к единице
+ * НАПРЯМУЮ (без `GAP` между частями — по-русски десяток и единица не
+ * разделяются посторонним словом).
+ *
+ * НАЙДЕНО АДВЕРСАРИАЛЬНЫМ РЕВЬЮ: без этого правила `GAP` в одиночном
+ * `wordPattern` молча съедал вторую часть составного числительного как будто
+ * это было прилагательное-заполнитель («15 ПОЛНЫХ секунд») — «двадцать пять»
+ * разбиралось как «двадцать» (20) с потерянным «пять». Хуже того: если первое
+ * слово составного числительного случайно совпадало с реальным числом
+ * источника («тридцать два» против источника «30»), выдуманное число проходило
+ * заземление как «подтверждённое».
+ */
+function compoundWordPattern(spec: UnitSpec): RegExp {
+  return new RegExp(
+    String.raw`(?<![а-яёА-ЯЁ])(${DECADE_ALTERNATION})\s+(${UNIT_DIGIT_ALTERNATION})(?![а-яёА-ЯЁ])${GAP}${spec.pattern}`,
+    'giu'
+  );
+}
+
+/**
+ * Числительное словом, примыкающее к единице. Границы — просмотры по кириллице,
+ * а не `\b`: `\b` в JS считает границей стык любой не-ASCII буквы с буквой, и
+ * «трёх» находилось бы внутри «острёхватка».
+ *
+ * Отрицательный просмотр назад после первой границы запрещает захватывать
+ * ВТОРОЕ слово составного числительного как отдельное одиночное — иначе
+ * `compoundWordPattern` корректно собрал бы «двадцать пять» в 25, а этот же
+ * проход СВЕРХУ добавил бы «пять» (5) как отдельное, никогда не произнесённое
+ * утверждение: оба regex сканируют текст независимо, и без запрета оба находят
+ * совпадение на пересекающихся позициях.
+ *
+ * `\s+`, НЕ `\s` — найдено вторым ревью. С одиночным пробелом просмотр назад
+ * проверял ровно один пробельный символ, и «двадцати  пяти» (двойной пробел)
+ * проходил мимо запрета: «двадцати» оставался заблокирован, но между словами
+ * было два пробела, а не один, и лишний символ ломал точное совпадение
+ * lookbehind. V8 поддерживает lookbehind переменной длины, так что `\s+`
+ * работает корректно и для одного пробела, и для таба, и для нескольких.
+ */
+function wordPattern(spec: UnitSpec): RegExp {
+  return new RegExp(
+    String.raw`(?<![а-яёА-ЯЁ])(?<!(?:${DECADE_ALTERNATION})\s+)(${NUMERAL_ALTERNATION})(?![а-яёА-ЯЁ])${WORD_GAP}${spec.pattern}`,
+    'giu'
+  );
 }
 
 function add(
-  into: Map<string, RiskyClaim>,
+  into: Map<string, LocatedRiskyClaim>,
   spec: UnitSpec,
   rawValue: string,
   text: string,
@@ -138,7 +280,7 @@ function add(
 ): void {
   const value = applyMagnitude(normalizeNumber(rawValue), magnitude);
   if (!value || Number(value) === 0) return;
-  const key = claimKey(spec.unit, value);
+  const key = `${claimKey(spec.unit, value)}@${at}`;
   if (into.has(key)) return;
   const from = Math.max(0, at - 40);
   into.set(key, {
@@ -146,6 +288,8 @@ function add(
     unit: spec.unit,
     kind: spec.kind,
     context: text.slice(from, Math.min(text.length, at + matchLength + 40)).replace(/\s+/g, ' ').trim(),
+    start: at,
+    end: at + matchLength,
   });
 }
 
@@ -153,8 +297,8 @@ function claimKey(unit: string, value: string): string {
   return `${unit}:${value}`;
 }
 
-export function extractRiskyClaims(text: string): RiskyClaim[] {
-  const found = new Map<string, RiskyClaim>();
+function extractLocatedRiskyClaims(text: string): LocatedRiskyClaim[] {
+  const found = new Map<string, LocatedRiskyClaim>();
 
   for (const spec of UNITS) {
     // Сначала диапазоны: они дают обе границы. Одиночный проход после этого
@@ -172,9 +316,63 @@ export function extractRiskyClaims(text: string): RiskyClaim[] {
     while ((m = single.exec(text)) !== null) {
       add(found, spec, m[1], text, m.index, m[0].length, m[2]);
     }
+
+    // Составные — ПЕРЕД одиночными числительными словами: «двадцать пять»
+    // обязано собраться в 25 раньше, чем что-либо решит, что делать с
+    // отдельным «пять». wordPattern сам исключает вторую часть составного
+    // через отрицательный просмотр назад, так что порядок здесь для ясности
+    // чтения, а корректность уже обеспечена регулярками.
+    const compound = compoundWordPattern(spec);
+    while ((m = compound.exec(text)) !== null) {
+      const decadeValue = NUMERAL_WORDS.get(m[1].toLowerCase());
+      const unitValue = NUMERAL_WORDS.get(m[2].toLowerCase());
+      if (decadeValue !== undefined && unitValue !== undefined) {
+        const composed = String(Number(decadeValue) + Number(unitValue));
+        add(found, spec, composed, text, m.index, m[0].length);
+      }
+    }
+
+    // Числительные словами — последними: цифровые формы уже занесены, а ключ
+    // `unit:value` отсекает дубль, если одно и то же число названо обоими
+    // способами в одном тексте.
+    const words = wordPattern(spec);
+    while ((m = words.exec(text)) !== null) {
+      const value = NUMERAL_WORDS.get(m[1].toLowerCase());
+      if (value !== undefined) add(found, spec, value, text, m.index, m[0].length);
+    }
   }
 
   return [...found.values()];
+}
+
+export function extractRiskyClaims(text: string): RiskyClaim[] {
+  const uniqueClaims = new Map<string, RiskyClaim>();
+  for (const { start: _start, end: _end, ...claim } of extractLocatedRiskyClaims(text)) {
+    uniqueClaims.set(claimKey(claim.unit, claim.value), claim);
+  }
+  return [...uniqueClaims.values()];
+}
+
+/** Removes only numeric+unit premises unsupported by selected evidence while
+ * preserving the qualitative question. This prevents the answer model from
+ * echoing a user-supplied number that the strict verifier must reject. */
+export function redactUnsupportedNumericClaims(text: string, selectedSources: readonly string[]): string {
+  const allowed = new Set(
+    extractLocatedRiskyClaims(selectedSources.join(' ¦ ')).map((claim) => claimKey(claim.unit, claim.value))
+  );
+  const unsupported = extractLocatedRiskyClaims(text)
+    .filter((claim) => !allowed.has(claimKey(claim.unit, claim.value)))
+    .sort((a, b) => b.start - a.start);
+  let redacted = text;
+  for (const claim of unsupported) {
+    const replacement = claim.kind === 'money'
+      ? 'указанная сумма'
+      : claim.kind === 'percent'
+        ? 'указанный процент'
+        : 'указанная продолжительность';
+    redacted = `${redacted.slice(0, claim.start)}${replacement}${redacted.slice(claim.end)}`;
+  }
+  return redacted;
 }
 
 export interface GroundingVerdict {

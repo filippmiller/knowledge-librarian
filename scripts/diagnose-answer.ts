@@ -40,6 +40,7 @@ const SOURCE_BADGE: Record<string, string> = {
   knowledge_base: '🟢 ИЗ ДОКУМЕНТОВ (RAG: чанки + правила + Q&A)',
   general_ai: '🔴 ИЗ ОБЩЕГО ЗНАНИЯ МОДЕЛИ (НЕ из документов!)',
   deterministic_guardrail: '🟡 ХАРДКОД-GUARDRAIL (захардкожено в коде)',
+  none: '⚪ ОТКАЗ — в документах опоры нет',
 };
 
 function badgeForResult(r: EnhancedAnswerResult): string {

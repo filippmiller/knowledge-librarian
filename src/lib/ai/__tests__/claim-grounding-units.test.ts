@@ -1,0 +1,135 @@
+import { describe, expect, it } from 'vitest';
+import { checkClaimGrounding, extractRiskyClaims } from '../claim-grounding';
+
+/**
+ * Расширение словаря единиц и поддержка числительных СЛОВАМИ
+ * (Beads translation-3bk, найдено при работе над PR H).
+ *
+ * Почему это понадобилось: правило 4 учебного пакета формулирует третье
+ * ограничение словом — «не более ТРЁХ таких циклов», а правило 7 — «более ТРЁХ
+ * раз», «дольше ДВУХ суток». Проверка, читающая только цифры, к этим числам
+ * слепа: галлюцинация «не более пяти циклов» не содержит ни одной цифры и
+ * проходила бы ворота, не будучи проверенной вообще.
+ *
+ * Почему числительные словами БЕЗОПАСНЫ здесь: они засчитываются ТОЛЬКО рядом с
+ * известной единицей. «Один из способов» не даёт утверждения, потому что
+ * «способов» — не единица измерения. Именно примыкание к единице отделяет
+ * количественное утверждение от разговорного оборота.
+ */
+
+const claimSet = (text: string) =>
+  new Set(extractRiskyClaims(text).map((c) => `${c.unit}:${c.value}`));
+
+describe('единицы учебного домена', () => {
+  it('Q04-N1 prefers the nearest seconds unit and does not fabricate 30 cycles', () => {
+    const answer = 'Даже при соблюдении паузы в 30 секунд цикл нельзя повторять бесконечно; разрешено не более трёх таких циклов.';
+    const claims = claimSet(answer);
+    expect(claims).toContain('second:30');
+    expect(claims).toContain('cycle:3');
+    expect(claims).not.toContain('cycle:30');
+    expect(checkClaimGrounding(answer, [
+      'После непрерывного почёсывания требуется пауза не менее 30 секунд.',
+      'За один эпизод разрешено не более трёх таких циклов.',
+    ]).grounded).toBe(true);
+  });
+
+  it.each([
+    ['После 5 минут часов ожидания.', 'minute:5', 'hour:5'],
+    ['После 2 дней недель ожидания.', 'day:2', 'week:2'],
+    ['После 4 часов минут ожидания.', 'hour:4', 'minute:4'],
+  ])('recognized unit cannot be swallowed as GAP: %s', (text, nearest, fabricated) => {
+    const claims = claimSet(text);
+    expect(claims).toContain(nearest);
+    expect(claims).not.toContain(fabricated);
+  });
+
+  it('распознаёт секунды', () => {
+    expect(claimSet('не дольше 15 секунд подряд')).toContain('second:15');
+  });
+
+  it('распознаёт сокращение «сек»', () => {
+    expect(claimSet('пауза 30 сек.')).toContain('second:30');
+  });
+
+  it('распознаёт циклы', () => {
+    expect(claimSet('не более 3 циклов за эпизод')).toContain('cycle:3');
+  });
+
+  it('секунды и минуты — разные единицы, число одно', () => {
+    const verdict = checkClaimGrounding('Не дольше 15 минут.', ['Не дольше 15 секунд.']);
+
+    expect(verdict.grounded).toBe(false);
+    expect(verdict.ungrounded[0].unit).toBe('minute');
+  });
+});
+
+describe('числительные словами', () => {
+  it('«трёх циклов» даёт то же утверждение, что «3 цикла»', () => {
+    expect(claimSet('не более трёх таких циклов')).toContain('cycle:3');
+  });
+
+  it('принимает написание через «е»: «трех»', () => {
+    expect(claimSet('не более трех циклов')).toContain('cycle:3');
+  });
+
+  it('«пятнадцати секунд» — это 15 секунд', () => {
+    expect(claimSet('не дольше пятнадцати секунд')).toContain('second:15');
+  });
+
+  it('«двух суток» — это 2 дня', () => {
+    expect(claimSet('дольше двух суток')).toContain('day:2');
+  });
+
+  it('ответ словами заземляется источником в цифрах', () => {
+    const verdict = checkClaimGrounding('Не более трёх циклов.', [
+      'За один эпизод разрешено не более 3 циклов.',
+    ]);
+
+    expect(verdict.grounded).toBe(true);
+  });
+
+  it('ЛОВИТ галлюцинацию, выраженную словом', () => {
+    const verdict = checkClaimGrounding('Не более пяти циклов.', [
+      'За один эпизод разрешено не более 3 циклов.',
+    ]);
+
+    expect(verdict.grounded).toBe(false);
+    expect(verdict.ungrounded[0].value).toBe('5');
+  });
+});
+
+describe('числительные словами не создают ложных утверждений', () => {
+  it('date and clock syntax remain non-claims without an adjacent unit', () => {
+    expect(extractRiskyClaims('Встреча 07.08.2026 в 15:30.')).toEqual([]);
+  });
+
+  it('«один из способов» — не количественное утверждение', () => {
+    expect(extractRiskyClaims('Один из способов — перейти в уединённое место.')).toEqual([]);
+  });
+
+  it('«в два раза быстрее» — множитель, а не единица измерения', () => {
+    expect(extractRiskyClaims('Это в два раза быстрее.')).toEqual([]);
+  });
+
+  it('числительное без единицы игнорируется', () => {
+    expect(extractRiskyClaims('Есть три причины так поступить.')).toEqual([]);
+  });
+});
+
+describe('регрессия: прежнее поведение сохранено', () => {
+  it('деньги по-прежнему извлекаются', () => {
+    expect(claimSet('стоимость 1100 руб.')).toContain('rub:1100');
+  });
+
+  it('рабочие дни по-прежнему не путаются с рублями', () => {
+    expect(claimSet('срок 3 р.д.')).toContain('day:3');
+  });
+
+  it('проценты по-прежнему извлекаются', () => {
+    expect(claimSet('предоплата 70%')).toContain('percent:70');
+  });
+
+  it('множитель по-прежнему масштабируется', () => {
+    expect(claimSet('12 тыс. рублей')).toContain('rub:12000');
+  });
+});

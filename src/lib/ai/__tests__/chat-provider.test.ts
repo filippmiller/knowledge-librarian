@@ -12,11 +12,24 @@ import {
   createChatCompletion,
   createChatCompletionDetailed,
   createChatCompletionStreamDetailed,
+  isRetryableChatCompletionError,
+  normalizeJsonResponse,
   resolveFallbackPolicy,
   resolveRunConfig,
   streamChatCompletionTokens,
   type ChatCompletionOptions,
 } from '../chat-provider';
+import { CostLedger } from '../cost-ledger';
+
+describe('outer ChatCompletionError retry policy', () => {
+  it.each([400, 401, 403, 404, 422])('classifies permanent %s as non-retryable', (statusCode) => {
+    expect(isRetryableChatCompletionError(new ChatCompletionError('permanent', [], { statusCode }))).toBe(false);
+  });
+
+  it.each([408, 409, 429, 500, 502, 503])('classifies transient %s as retryable', (statusCode) => {
+    expect(isRetryableChatCompletionError(new ChatCompletionError('transient', [], { statusCode }))).toBe(true);
+  });
+});
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const MESSAGES: ChatCompletionOptions['messages'] = [
@@ -25,10 +38,40 @@ const MESSAGES: ChatCompletionOptions['messages'] = [
 
 let fetchMock: ReturnType<typeof vi.fn>;
 
-function anthropicOk(text: string): Response {
-  return new Response(JSON.stringify({ content: [{ type: 'text', text }] }), {
-    status: 200,
-  });
+/**
+ * `callAnthropic` теперь читает SSE (translation-gy3), а не плоский JSON —
+ * этот хелпер эмитит настоящую последовательность фреймов
+ * (message_start → content_block_delta → message_delta → message_stop),
+ * ОДНИМ content_block_delta на весь текст, чтобы rawText реконструировался
+ * байт-в-байт. Сигнатура не изменилась — ~45 существующих вызовов этого
+ * файла правок не требуют.
+ */
+function anthropicOk(
+  text: string,
+  usage: { input_tokens: number; output_tokens: number } = { input_tokens: 10, output_tokens: 5 }
+): Response {
+  return anthropicSseFramesResponse([
+    {
+      type: 'message_start',
+      message: {
+        id: 'msg_test',
+        type: 'message',
+        role: 'assistant',
+        model: 'test-model',
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: usage.input_tokens, output_tokens: 0 },
+      },
+    },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
+    {
+      type: 'message_delta',
+      delta: { stop_reason: 'end_turn', stop_sequence: null },
+      usage: { output_tokens: usage.output_tokens },
+    },
+    { type: 'message_stop' },
+  ]);
 }
 
 /** 500 не входит в RETRYABLE_STATUS_CODES — фоллбэк начинается сразу, без sleep. */
@@ -36,8 +79,14 @@ function anthropicFailure(status = 500, body = 'anthropic is down'): Response {
   return new Response(body, { status });
 }
 
-function openaiOk(text: string) {
-  return { choices: [{ message: { content: text } }] };
+function openaiOk(
+  text: string,
+  usage: { prompt_tokens: number; completion_tokens: number } = {
+    prompt_tokens: 12,
+    completion_tokens: 6,
+  }
+) {
+  return { choices: [{ message: { content: text } }], usage };
 }
 
 function openaiFailure(message = 'openai is down') {
@@ -69,7 +118,7 @@ function sseEvents(texts: string[]): string {
       (text) =>
         `data: ${JSON.stringify({
           type: 'content_block_delta',
-          delta: { text },
+          delta: { type: 'text_delta', text },
         })}\n`
     )
     .join('');
@@ -78,6 +127,21 @@ function sseEvents(texts: string[]): string {
 function sseResponse(texts: string[]): Response {
   const body = sseEvents(texts) + 'data: [DONE]\n';
   return new Response(new TextEncoder().encode(body), { status: 200 });
+}
+
+/**
+ * Общий билдер SSE-тела из произвольной последовательности фреймов —
+ * каждый фрейм становится строкой `data: {...}\n`. `sseEvents()`/`sseResponse()`
+ * выше годятся только для чистого потока `content_block_delta`; этот билдер
+ * нужен там, где важны `message_start`/`message_delta` usage или mid-stream
+ * `error`-фрейм (translation-gy3 streaming fix).
+ */
+function anthropicSseFrames(frames: Record<string, unknown>[]): string {
+  return frames.map((frame) => `data: ${JSON.stringify(frame)}\n`).join('');
+}
+
+function anthropicSseFramesResponse(frames: Record<string, unknown>[]): Response {
+  return new Response(anthropicSseFrames(frames), { status: 200 });
 }
 
 /**
@@ -236,6 +300,79 @@ describe('resolveFallbackPolicy', () => {
   });
 });
 
+describe('beforeProviderAttempt hard circuit breaker', () => {
+  it('budgeted OpenAI request disables hidden SDK retries', async () => {
+    openaiCreate.mockResolvedValue(openaiOk('ok'));
+    await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'openai',
+      fallbackPolicy: 'NONE',
+      beforeProviderAttempt: () => {},
+    });
+
+    expect(openaiCreate.mock.calls[0][1]).toMatchObject({ maxRetries: 0 });
+  });
+
+  it('ordinary production OpenAI request preserves the shared client retry policy', async () => {
+    openaiCreate.mockResolvedValue(openaiOk('ok'));
+    await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'openai',
+      fallbackPolicy: 'NONE',
+    });
+
+    expect(openaiCreate.mock.calls[0][1]).not.toHaveProperty('maxRetries');
+  });
+
+  it('ceiling=1 prevents the second primary raw retry', async () => {
+    vi.useFakeTimers();
+    try {
+      fetchMock.mockResolvedValue(anthropicFailure(429, 'rate_limit'));
+      let reservations = 0;
+      const promise = createChatCompletionDetailed({
+        messages: MESSAGES,
+        provider: 'anthropic',
+        fallbackPolicy: 'NONE',
+        beforeProviderAttempt: () => {
+          if (reservations >= 1) throw new Error('paid-call ceiling');
+          reservations += 1;
+        },
+      });
+      const rejection = expect(promise).rejects.toThrow('paid-call ceiling');
+
+      await vi.runAllTimersAsync();
+      await rejection;
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(reservations).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ceiling=1 prevents a fallback raw request after the primary request', async () => {
+    fetchMock.mockResolvedValue(anthropicFailure(500));
+    openaiCreate.mockResolvedValue(openaiOk('must not be reached'));
+    let reservations = 0;
+
+    await expect(
+      createChatCompletionDetailed({
+        messages: MESSAGES,
+        provider: 'anthropic',
+        providerModels: { openai: 'gpt-fallback' },
+        fallbackPolicy: 'CROSS_PROVIDER',
+        beforeProviderAttempt: () => {
+          if (reservations >= 1) throw new Error('paid-call ceiling');
+          reservations += 1;
+        },
+      })
+    ).rejects.toThrow('paid-call ceiling');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(openaiCreate).not.toHaveBeenCalled();
+    expect(reservations).toBe(1);
+  });
+});
+
 describe('resolveRunConfig', () => {
   it('отдаёт фактическую конфигурацию прогона, а не сырые env', () => {
     expect(
@@ -296,6 +433,47 @@ describe('createChatCompletionDetailed — primary success', () => {
       createChatCompletion({ messages: MESSAGES, provider: 'anthropic' })
     ).resolves.toBe('hello');
   });
+
+  // Cost meter (Task 37, 2026-08-09): token usage was previously discarded
+  // entirely at this layer — callAnthropic/callOpenAI returned only `string`,
+  // throwing away the provider's own usage block. No cost/call meter could
+  // exist without this. Captured per-attempt (not just on the final result)
+  // because a failed/retried attempt still costs real tokens.
+  it('захватывает usage из ответа Anthropic (input_tokens/output_tokens)', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('hello', { input_tokens: 123, output_tokens: 45 }));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+    });
+
+    expect(result.attempts[0].usage).toEqual({ inputTokens: 123, outputTokens: 45 });
+  });
+
+  it('захватывает usage из ответа OpenAI (prompt_tokens/completion_tokens)', async () => {
+    openaiCreate.mockResolvedValue(openaiOk('hi', { prompt_tokens: 77, completion_tokens: 33 }));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'openai',
+    });
+
+    expect(result.attempts[0].usage).toEqual({ inputTokens: 77, outputTokens: 33 });
+  });
+
+  // Call-trace log (2026-08-10): the user has zero visibility into
+  // what was actually SENT to the model, only aggregate cost. requestMessages
+  // is the source for that — the exact prompt behind any given attempt.
+  it('несёт requestMessages — ровно options.messages, для трассировки вызова', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('hello'));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+    });
+
+    expect(result.requestMessages).toEqual(MESSAGES);
+  });
 });
 
 describe('OpenAI JSON-режим требует упоминания JSON в сообщениях', () => {
@@ -343,6 +521,151 @@ describe('OpenAI JSON-режим требует упоминания JSON в с�
   });
 });
 
+describe('prompt caching (Anthropic)', () => {
+  // W1-B (2026-08-10): большие system-промпты (экстракция, coverage-audit,
+  // QueryFrame) переотправлялись на КАЖДЫЙ вызов по полной входной цене.
+  // Минимумы кэширования — из скилла `claude-api` (сверено 2026-08-10):
+  // claude-sonnet-5 → 1024 токена.
+
+  /** ~5250 ASCII-символов ≈ 1312 токенов по оценке провайдер-слоя — выше
+   *  минимума Sonnet 5 (1024) и ниже минимума неизвестной модели (4096). */
+  const LONG_SYSTEM = 'System instructions line. '.repeat(210);
+
+  it('ставит cache breakpoint на system-промпт, когда он выше минимума модели', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('ok'));
+
+    await createChatCompletionDetailed({
+      messages: [{ role: 'system', content: LONG_SYSTEM }, ...MESSAGES],
+      provider: 'anthropic',
+      model: 'claude-sonnet-5',
+    });
+
+    expect(anthropicRequestBodies()[0].system).toEqual([
+      {
+        type: 'text',
+        text: LONG_SYSTEM.trim(),
+        cache_control: { type: 'ephemeral' },
+      },
+    ]);
+  });
+
+  it('короткий system-промпт остаётся строкой: breakpoint ниже минимума впустую', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('ok'));
+
+    await createChatCompletionDetailed({
+      messages: [{ role: 'system', content: 'Отвечай кратко.' }, ...MESSAGES],
+      provider: 'anthropic',
+      model: 'claude-sonnet-5',
+    });
+
+    expect(anthropicRequestBodies()[0].system).toBe('Отвечай кратко.');
+  });
+
+  it('модель с неизвестным минимумом кэшируется fail-closed, а не наугад', async () => {
+    // claude-env-default нет в таблице минимумов — берётся самый строгий
+    // документированный минимум (4096), и промпт на ~1300 токенов его не
+    // проходит. Иначе слой ставил бы breakpoint вслепую на модели, чей
+    // порог может оказаться выше (минимум НЕ монотонен по поколениям).
+    fetchMock.mockResolvedValue(anthropicOk('ok'));
+
+    await createChatCompletionDetailed({
+      messages: [{ role: 'system', content: LONG_SYSTEM }, ...MESSAGES],
+      provider: 'anthropic',
+    });
+
+    expect(anthropicRequestBodies()[0].system).toBe(LONG_SYSTEM.trim());
+  });
+
+  it('стриминг кэширует тот же system-префикс', async () => {
+    fetchMock.mockResolvedValue(sseResponse(['ok']));
+
+    const operation = createChatCompletionStreamDetailed({
+      messages: [{ role: 'system', content: LONG_SYSTEM }, ...MESSAGES],
+      provider: 'anthropic',
+      model: 'claude-sonnet-5',
+    });
+    await operation.completion;
+
+    expect(anthropicRequestBodies()[0].system).toEqual([
+      {
+        type: 'text',
+        text: LONG_SYSTEM.trim(),
+        cache_control: { type: 'ephemeral' },
+      },
+    ]);
+  });
+
+  it('OpenAI-путь не трогается: у него другая семантика кэширования', async () => {
+    openaiCreate.mockResolvedValue(openaiOk('ok'));
+
+    await createChatCompletionDetailed({
+      messages: [{ role: 'system', content: LONG_SYSTEM }, ...MESSAGES],
+      provider: 'openai',
+      model: 'gpt-4o',
+    });
+
+    expect(JSON.stringify(openaiCreate.mock.calls[0][0])).not.toContain('cache_control');
+  });
+
+  it('поднимает cache-счётчики Anthropic в usage — добавочно, не подменяя input/output', async () => {
+    fetchMock.mockResolvedValue(
+      anthropicSseFramesResponse([
+        {
+          type: 'message_start',
+          message: {
+            id: 'msg_test',
+            type: 'message',
+            role: 'assistant',
+            model: 'test-model',
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: {
+              input_tokens: 12,
+              output_tokens: 0,
+              cache_creation_input_tokens: 1300,
+              cache_read_input_tokens: 0,
+            },
+          },
+        },
+        { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
+        {
+          type: 'message_delta',
+          delta: { stop_reason: 'end_turn', stop_sequence: null },
+          usage: { output_tokens: 5 },
+        },
+        { type: 'message_stop' },
+      ])
+    );
+
+    const result = await createChatCompletionDetailed({
+      messages: [{ role: 'system', content: LONG_SYSTEM }, ...MESSAGES],
+      provider: 'anthropic',
+      model: 'claude-sonnet-5',
+    });
+
+    expect(result.attempts[0].usage).toEqual({
+      inputTokens: 12,
+      outputTokens: 5,
+      cacheCreationInputTokens: 1300,
+      cacheReadInputTokens: 0,
+    });
+  });
+
+  it('без cache-счётчиков usage остаётся ровно {inputTokens, outputTokens}', async () => {
+    // Регрессия на уже существующие моки в других файлах: они сверяют usage
+    // через toEqual, и ключ со значением undefined сделал бы их красными.
+    fetchMock.mockResolvedValue(anthropicOk('ok', { input_tokens: 10, output_tokens: 5 }));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+    });
+
+    expect(result.attempts[0].usage).toEqual({ inputTokens: 10, outputTokens: 5 });
+  });
+});
+
 describe('createChatCompletionDetailed — фоллбэк', () => {
   it('при providerModels уходит к резерву с ЕГО model ID, а не с закреплённым', async () => {
     fetchMock.mockResolvedValue(anthropicFailure());
@@ -368,6 +691,11 @@ describe('createChatCompletionDetailed — фоллбэк', () => {
     expect(openaiCreate).toHaveBeenCalledTimes(1);
     expect(openaiCreate.mock.calls[0][0].model).toBe('gpt-4o-mini');
     expect(anthropicRequestBodies()[0].model).toBe('claude-sonnet-5');
+
+    // Call-trace log: retry/fallback переезжают к другому провайдеру/модели, но НЕ
+    // меняют промпт — requestMessages на результате остаётся тем же, что было
+    // отправлено первичной попытке.
+    expect(result.requestMessages).toEqual(MESSAGES);
   });
 
   it('fail-closed: закреплённая модель без providerModels НЕ уходит другому провайдеру', async () => {
@@ -510,6 +838,10 @@ describe('createChatCompletionDetailed — полный отказ', () => {
       outcome: 'ERROR',
       statusCode: 500,
     });
+
+    // Call-trace log: полный отказ (ни один провайдер не ответил) — ответа нет
+    // вообще, но что именно спрашивали остаётся видимым в трассировке.
+    expect(error.requestMessages).toEqual(MESSAGES);
   });
 });
 
@@ -796,6 +1128,8 @@ describe('streaming', () => {
     expect(metadata.fallbackUsed).toBe(false);
     expect(metadata.attempts).toHaveLength(1);
     expect(metadata.attempts[0].outcome).toBe('SUCCESS');
+    // Call-trace log: тот же call-trace источник, что и у не-стримингового пути.
+    expect(metadata.requestMessages).toEqual(MESSAGES);
   });
 
   it('completion разрешается, даже если tokens не читали ВООБЩЕ', async () => {
@@ -876,6 +1210,8 @@ describe('streaming', () => {
       errorCode: 'ABORTED_BY_CALLER',
     });
     listeners.expectAllReleased();
+    // Call-trace log: даже при явной отмене видно, что именно спрашивали.
+    expect(error.requestMessages).toEqual(MESSAGES);
 
     // Повторный abort() и abort() после завершения — no-op, не второй attempt.
     operation.abort();
@@ -1090,5 +1426,672 @@ describe('streaming', () => {
       outcome: 'ABORTED',
       errorCode: 'ATTEMPT_TIMEOUT',
     });
+  });
+});
+
+/**
+ * translation-gy3: `callAnthropic` (the NON-streaming `createChatCompletionDetailed`
+ * path) sends `max_tokens` without `stream: true`. Above ~16K max_tokens this
+ * idles through Anthropic's think+generate phase until the server closes the
+ * socket — `TypeError: fetch failed` — with all 3 retries hitting the same
+ * wall. Fix: stream unconditionally in `callAnthropic`, reusing the SSE
+ * parser `streamProviderTokens` already has, and buffer it into the same
+ * single `ChatCompletionResult` callers already get (no public contract
+ * change — `createChatCompletionDetailed` still returns one buffered result,
+ * not an async iterable).
+ */
+describe('callAnthropic reads SSE (translation-gy3 streaming fix)', () => {
+  it('stream:true присутствует в теле запроса даже при maxTokens 16000', async () => {
+    // Anthropic требует стрим выше ~16K max_tokens — порог, на котором и падал
+    // живой прогон. Мы проверяем только исходящее тело, поэтому содержимое
+    // ответа само по себе неважно — НО он обязан быть ПОЛНЫМ SSE-стримом
+    // (anthropicOk), а не `{}`: с completeness-гейтом (translation-gy3
+    // hardening) пустое тело классифицируется как incomplete_stream и
+    // ретраится 3 раза РЕАЛЬНЫМИ таймерами (тут нет vi.useFakeTimers()) —
+    // тест раньше проходил случайно быстро, а стал бы падать по таймауту.
+    fetchMock.mockResolvedValue(anthropicOk('ok'));
+
+    await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      maxTokens: 16000,
+      fallbackPolicy: 'NONE',
+    }).catch(() => undefined);
+
+    expect(anthropicRequestBodies()[0]).toMatchObject({ stream: true, max_tokens: 16000 });
+  });
+
+  it('SSE-фреймы (message_start → content_block_delta → message_delta → message_stop) собираются в тот же результат, что раньше давал плоский JSON', async () => {
+    const wholeText = 'ответ, пришедший одним content_block_delta без разбивки';
+    fetchMock.mockResolvedValue(
+      anthropicSseFramesResponse([
+        {
+          type: 'message_start',
+          message: {
+            id: 'msg_test',
+            type: 'message',
+            role: 'assistant',
+            model: 'test-model',
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: {
+              input_tokens: 42,
+              output_tokens: 0,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 17,
+            },
+          },
+        },
+        { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: wholeText } },
+        {
+          type: 'message_delta',
+          delta: { stop_reason: 'end_turn', stop_sequence: null },
+          usage: { output_tokens: 9 },
+        },
+        { type: 'message_stop' },
+      ])
+    );
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      fallbackPolicy: 'NONE',
+    });
+
+    // rawText реконструируется байт-в-байт: ОДИН content_block_delta несёт
+    // целый текст без разбивки — это то, на что смотрит wasRepaired() в
+    // structured-output.ts.
+    expect(result.text).toBe(wholeText);
+    expect(result.rawText).toBe(wholeText);
+    expect(result.attempts).toHaveLength(1);
+    // message_start даёт input_tokens/cache-счётчики и НАЧАЛЬНЫЙ output_tokens
+    // (0) — message_delta.usage.output_tokens (9) обязан его ЗАМЕСТИТЬ.
+    expect(result.attempts[0].usage).toEqual({
+      inputTokens: 42,
+      outputTokens: 9,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 17,
+    });
+  });
+
+  it('регрессия cost ledger: успешный стримленый вызов несёт usage — CostLedger.record() с maxTotalUsd не бросает UnverifiableCostError', async () => {
+    // Ловушка: CostLedger.record() бросает UnverifiableCostError, когда
+    // maxTotalUsd задан, а SUCCESS-попытка приходит БЕЗ usage. Aurora-раннер
+    // всегда задаёт бюджет — значит, если стриминговый путь вернёт успешный
+    // результат без usage, первый же успешный вызов ЛЮБОГО бюджетированного
+    // прогона падает. Собран напрямую через anthropicSseFramesResponse (а не
+    // через anthropicOk), чтобы ДО фикса тест падал по правильной причине —
+    // старый response.json() не переживает SSE-тело, а не потому, что usage
+    // случайно совпал с уже работавшим плоским JSON.
+    fetchMock.mockResolvedValue(
+      anthropicSseFramesResponse([
+        {
+          type: 'message_start',
+          message: {
+            id: 'msg_test',
+            type: 'message',
+            role: 'assistant',
+            model: 'test-model',
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: { input_tokens: 100, output_tokens: 0 },
+          },
+        },
+        { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
+        {
+          type: 'message_delta',
+          delta: { stop_reason: 'end_turn', stop_sequence: null },
+          usage: { output_tokens: 50 },
+        },
+        { type: 'message_stop' },
+      ])
+    );
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      model: 'claude-sonnet-5', // ценённая модель — см. MODEL_PRICING в cost.ts
+      fallbackPolicy: 'NONE',
+    });
+
+    const ledger = new CostLedger({ maxTotalUsd: 100 });
+    expect(() => ledger.record('test-purpose', result.attempts)).not.toThrow();
+  });
+
+  it('mid-stream error-фрейм всплывает как ChatCompletionError с errorCode, а не тонет молча', async () => {
+    // Существующий парсер фильтровал только content_block_delta и МОЛЧА
+    // проглатывал всё остальное, включая error-фреймы — retry/fallback
+    // классификация никогда их не видела. fallbackPolicy: 'NONE', чтобы
+    // проверить именно классификацию ошибки, а не то, что резерв её замаскировал.
+    vi.useFakeTimers();
+    try {
+      // overloaded_error ретраится — mockImplementation, а не mockResolvedValue:
+      // каждый retry обязан получить СВЕЖИЙ Response с непрочитанным телом,
+      // иначе повторное чтение того же стрима падает с ERR_INVALID_STATE, а не
+      // с той ошибкой, которую тест проверяет.
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(
+          anthropicSseFramesResponse([
+            { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } },
+            { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } },
+          ])
+        )
+      );
+
+      const promise = createChatCompletionDetailed({
+        messages: MESSAGES,
+        provider: 'anthropic',
+        fallbackPolicy: 'NONE',
+      });
+      // Снимаем таймеры backoff'а (RETRYABLE_ERROR_CODES), прежде чем ждать
+      // финальное отклонение.
+      const errorPromise = promise.catch((e: unknown) => e);
+      await vi.runAllTimersAsync();
+      const error = (await errorPromise) as ChatCompletionError;
+
+      expect(error).toBeInstanceOf(ChatCompletionError);
+      expect(error.errorCode).toBe('overloaded_error');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+/**
+ * Model-migration regression: `thinking` was never set anywhere in this file
+ * — omission used to mean "no extended thinking". On Claude Sonnet 5 (and
+ * Claude Opus 5) omission enables ADAPTIVE thinking instead, the opposite of
+ * the semantics every call site in this file was written for (structured
+ * JSON extraction/audit/classification, not reasoning). Live evidence: the
+ * dependency-graph-proposal stage (maxTokens: 16000) burned the entire
+ * budget on thinking twice in a row — outputTokens: 16000/16000, rawText: ''
+ * — surfacing a confusing SCHEMA_MISMATCH instead of an honest truncation
+ * error. See the comments at the `thinking: { type: 'disabled' }` call sites
+ * in chat-provider.ts for the full writeup; these tests are the RED/GREEN
+ * evidence for the fix.
+ */
+describe('thinking: disabled — восстановление pre-Sonnet-5 семантики', () => {
+  it('буферизованный путь (postAnthropicMessages) отправляет thinking: {type: "disabled"}', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('ok'));
+
+    await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+    });
+
+    expect(anthropicRequestBodies()[0]).toMatchObject({
+      thinking: { type: 'disabled' },
+    });
+  });
+
+  it('token-streaming путь (streamProviderTokens/buildBody) тоже отправляет thinking: {type: "disabled"}', async () => {
+    fetchMock.mockResolvedValue(sseResponse(['ok']));
+
+    const tokens: string[] = [];
+    for await (const token of streamChatCompletionTokens({
+      messages: MESSAGES,
+      provider: 'anthropic',
+    })) {
+      tokens.push(token);
+    }
+
+    expect(tokens).toEqual(['ok']);
+    expect(anthropicRequestBodies()[0]).toMatchObject({
+      thinking: { type: 'disabled' },
+    });
+  });
+
+  // Interaction check (see chat-provider.ts:997 area — temperature-deprecated
+  // retry): the retry only strips `temperature` on the second attempt, it
+  // must never drop `thinking`. Both raw HTTP bodies carry thinking:disabled.
+  it('thinking:disabled присутствует в ОБОИХ попытках temperature-deprecated ретрая', async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response('temperature: deprecated for this model', { status: 400 }))
+      .mockResolvedValueOnce(anthropicOk('recovered'));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      fallbackPolicy: 'NONE',
+    });
+
+    expect(result.text).toBe('recovered');
+    const bodies = anthropicRequestBodies();
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toMatchObject({ thinking: { type: 'disabled' }, temperature: 0.3 });
+    expect(bodies[1]).toMatchObject({ thinking: { type: 'disabled' } });
+    expect(bodies[1].temperature).toBeUndefined();
+  });
+});
+
+/**
+ * translation-gy3 hardening (2026-08-11): `callAnthropic` had no notion of a
+ * COMPLETE Anthropic message, so a stream cut short by a mid-response socket
+ * close (SSE has no Content-Length — a FIN mid-stream is indistinguishable
+ * from a clean end) could return SUCCESS built from whatever partial state
+ * happened to be collected. Worst case (Path B below): `message_start`'s
+ * PROVISIONAL `usage.output_tokens` (almost always 0) satisfied the old
+ * `typeof outputTokens === 'number'` guard on its own, so a stream that died
+ * before `message_delta` ever arrived came back as a real SUCCESS with
+ * `usage.outputTokens: 0` and — if any text had already streamed in —
+ * partial text presented as the complete answer. This describe block is the
+ * RED/GREEN evidence for the fix: a completeness gate in `callAnthropic` plus
+ * an end-of-stream flush in `parseAnthropicSseFrames`.
+ */
+describe('callAnthropic completeness gate (translation-gy3 hardening)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('Path A: 200 с пустым телом — ERROR, а не фиктивный SUCCESS с usage: null, и классифицируется как retryable', async () => {
+    // Раньше response.json() на пустом теле падал сам по себе (ERROR) — это
+    // была РЕГРЕССИЯ по сравнению со старым не-стримовым путём. С SSE-парсером
+    // пустое тело — это просто ноль фреймов; без гейта цикл дал бы SUCCESS с
+    // usage: null, и CostLedger.record() падал бы на UnverifiableCostError на
+    // любом бюджетированном прогоне — далеко от настоящей причины.
+    vi.useFakeTimers();
+    // mockImplementation, а не mockResolvedValue: каждый retry обязан
+    // получить СВЕЖИЙ Response — тот же самый объект на повторное чтение
+    // упал бы с ERR_INVALID_STATE, а не с ошибкой, которую проверяет тест.
+    fetchMock.mockImplementation(() => Promise.resolve(new Response('', { status: 200 })));
+
+    const promise = createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      fallbackPolicy: 'NONE',
+    });
+    const errorPromise = promise.catch((e: unknown) => e);
+    await vi.runAllTimersAsync();
+    const error = (await errorPromise) as ChatCompletionError;
+
+    expect(error).toBeInstanceOf(ChatCompletionError);
+    expect(error.errorCode).toBe('incomplete_stream');
+    expect(error.message).toContain('no SSE frames were received');
+
+    // retryable — доказано ДЕЙСТВИЕМ (внутренний retry-цикл реально дёргает
+    // fetch ещё 3 раза тем же провайдером: MAX_RETRIES=3 → 4 попытки), а не
+    // только чтением классификатора.
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(error.attempts).toHaveLength(4);
+    expect(
+      error.attempts.every((a) => a.outcome === 'ERROR' && a.errorCode === 'incomplete_stream')
+    ).toBe(true);
+    // Внешняя политика (то, что читают вызывающие после полного отказа)
+    // согласна с внутренней: errorCode retryable → статуса нет →
+    // isRetryableChatCompletionError по умолчанию true для status===undefined.
+    expect(isRetryableChatCompletionError(error)).toBe(true);
+  });
+
+  it('Path B (money bug): message_start + частичный текст, БЕЗ message_delta — ERROR, никогда не SUCCESS с partial text и outputTokens: 0', async () => {
+    vi.useFakeTimers();
+    const partialText = 'частичный ответ, пришедший до обрыва соединения';
+    // mockImplementation — каждый retry получает свежий Response.
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        anthropicSseFramesResponse([
+          {
+            type: 'message_start',
+            message: {
+              id: 'msg_test',
+              type: 'message',
+              role: 'assistant',
+              model: 'test-model',
+              content: [],
+              stop_reason: null,
+              stop_sequence: null,
+              // 2500 РЕАЛЬНЫХ input-токенов уже потрачены; output_tokens: 0
+              // здесь — ПРОВИЗОРНОЕ значение Anthropic (стрим только начался),
+              // не финальное. Ниже никакого message_delta не будет —
+              // соединение обрывается сразу после текста.
+              usage: { input_tokens: 2500, output_tokens: 0 },
+            },
+          },
+          { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: partialText } },
+          // Обрыв здесь. Ни message_delta, ни message_stop не приходят.
+        ])
+      )
+    );
+
+    const promise = createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      fallbackPolicy: 'NONE',
+    });
+    const outcomePromise = promise.catch((e: unknown) => e);
+    await vi.runAllTimersAsync();
+    const outcome = await outcomePromise;
+
+    // УТВЕРЖДЕНИЕ, РАДИ КОТОРОГО СУЩЕСТВУЕТ ЭТОТ ТЕСТ: до фикса именно эта
+    // форма — partial text как будто это полный ответ, с outputTokens: 0 —
+    // возвращалась как SUCCESS. Проверяем явно и отдельно от instanceof-теста
+    // ниже, чтобы регрессия провалилась ИМЕННО на этой строке с неправильной
+    // формой в diff, а не на общем «not an Error».
+    expect(outcome).not.toMatchObject({
+      text: partialText,
+      attempts: [expect.objectContaining({ usage: { inputTokens: 2500, outputTokens: 0 } })],
+    });
+
+    expect(outcome).toBeInstanceOf(ChatCompletionError);
+    const error = outcome as ChatCompletionError;
+    expect(error.errorCode).toBe('incomplete_stream');
+    // Ни один attempt не несёт usage вовсе — тем более не {outputTokens: 0}.
+    expect(error.attempts.every((a) => a.usage === undefined)).toBe(true);
+    expect(isRetryableChatCompletionError(error)).toBe(true);
+  });
+
+  it('Path C: message_start без input_tokens в usage — ERROR, не SUCCESS с usage: null', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        anthropicSseFramesResponse([
+          {
+            type: 'message_start',
+            message: {
+              id: 'msg_test',
+              type: 'message',
+              role: 'assistant',
+              model: 'test-model',
+              content: [],
+              stop_reason: null,
+              stop_sequence: null,
+              usage: { output_tokens: 0 }, // input_tokens отсутствует целиком
+            },
+          },
+          { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'x' } },
+          {
+            type: 'message_delta',
+            delta: { stop_reason: 'end_turn', stop_sequence: null },
+            usage: { output_tokens: 3 },
+          },
+          { type: 'message_stop' },
+        ])
+      )
+    );
+
+    const promise = createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      fallbackPolicy: 'NONE',
+    });
+    const errorPromise = promise.catch((e: unknown) => e);
+    await vi.runAllTimersAsync();
+    const error = (await errorPromise) as ChatCompletionError;
+
+    expect(error).toBeInstanceOf(ChatCompletionError);
+    expect(error.errorCode).toBe('incomplete_stream');
+    expect(error.message).toContain('input_tokens');
+  });
+
+  it('Path D: content_block_delta + message_delta без message_start — ERROR', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        anthropicSseFramesResponse([
+          { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'x' } },
+          {
+            type: 'message_delta',
+            delta: { stop_reason: 'end_turn', stop_sequence: null },
+            usage: { output_tokens: 3 },
+          },
+          { type: 'message_stop' },
+        ])
+      )
+    );
+
+    const promise = createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      fallbackPolicy: 'NONE',
+    });
+    const errorPromise = promise.catch((e: unknown) => e);
+    await vi.runAllTimersAsync();
+    const error = (await errorPromise) as ChatCompletionError;
+
+    expect(error).toBeInstanceOf(ChatCompletionError);
+    expect(error.errorCode).toBe('incomplete_stream');
+    expect(error.message).toContain('message_start');
+  });
+
+  it('Path E: финальный message_delta БЕЗ завершающего \\n всё равно парсится — доказывает EOS flush', async () => {
+    // Без EOS-флаша эта последняя (незавершённая \n) строка осталась бы в
+    // buffer и была бы молча отброшена — Path E из ревью деградировал бы
+    // обратно в Path B (message_delta потерян → outputTokens не пришёл).
+    const wholeText = 'ответ, полностью пришедший до обрыва хвостового переноса строки';
+    const frames = [
+      {
+        type: 'message_start',
+        message: {
+          id: 'msg_test',
+          type: 'message',
+          role: 'assistant',
+          model: 'test-model',
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 30, output_tokens: 0 },
+        },
+      },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: wholeText } },
+      {
+        type: 'message_delta',
+        delta: { stop_reason: 'end_turn', stop_sequence: null },
+        usage: { output_tokens: 11 },
+      },
+      // Обрыв здесь — message_stop так и не пришёл, а сам message_delta не
+      // терминирован \n (см. построение body ниже).
+    ];
+    const lines = frames.map((frame) => `data: ${JSON.stringify(frame)}`);
+    // Каждая строка сохраняет СВОЙ разделитель, кроме самой последней — так
+    // смоделирован сокет, закрывшийся ровно на последнем байте message_delta,
+    // до того как ушёл завершающий \n.
+    const body = lines.slice(0, -1).map((line) => `${line}\n`).join('') + lines[lines.length - 1];
+    fetchMock.mockResolvedValue(new Response(body, { status: 200 }));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      fallbackPolicy: 'NONE',
+    });
+
+    expect(result.text).toBe(wholeText);
+    expect(result.rawText).toBe(wholeText);
+    expect(result.attempts).toHaveLength(1);
+    expect(result.attempts[0].outcome).toBe('SUCCESS');
+    expect(result.attempts[0].usage).toEqual({ inputTokens: 30, outputTokens: 11 });
+  });
+
+  it('regression guard: happy-path стрим (message_start → delta → message_delta → message_stop) по-прежнему даёт байт-в-байт тот же usage', async () => {
+    // Гейт не должен требовать НИЧЕГО сверх того, что нормальный ответ уже
+    // несёт — этот тест сгорел бы, потребуй гейт что-то лишнее (например,
+    // message_stop, который сознательно не требуется — см. комментарий в
+    // callAnthropic).
+    fetchMock.mockResolvedValue(anthropicOk('hello', { input_tokens: 10, output_tokens: 5 }));
+
+    const result = await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      fallbackPolicy: 'NONE',
+    });
+
+    expect(result.text).toBe('hello');
+    expect(result.rawText).toBe('hello');
+    expect(result.attempts).toHaveLength(1);
+    expect(result.attempts[0].outcome).toBe('SUCCESS');
+    expect(result.attempts[0].usage).toEqual({ inputTokens: 10, outputTokens: 5 });
+  });
+});
+
+describe('normalizeJsonResponse — проза перед JSON (thinking: disabled, 2026-08-11)', () => {
+  // Точная форма реального ответа: scratchpad/aurora-v11/call-trace.jsonl,
+  // последняя запись на момент бага (coverage-audit, 604 output tokens —
+  // не обрыв, errorMessage в трассе: "findings: Invalid input: expected
+  // array, received undefined [invalid_type]"). С выключенным `thinking`
+  // (см. postAnthropicMessages) модель рассуждает вслух и по ходу
+  // ЦИТИРУЕТ пример JSON (`{"all":[...]}`, в одинарных бэктиках прямо в
+  // прозе), а настоящий ответ идёт только в ```json-заборе в конце.
+  const REAL_COVERAGE_AUDIT_RESPONSE =
+    "Смотрю на unit 4: в описании uncertainties говорится, что triggerCondition и parentExtractionRef оставлены null, но в самом JSON видно, что triggerCondition установлен на `{\"all\":[{\"fact\":\"helperPresent\",\"equals\":false}]}`, а parentExtractionRef установлен на \"b2-u3\". Это внутреннее несоответствие между полями и описанием uncertainty — сама uncertainty утверждает одно, а структура показывает другое. Также \"helperPresent\" не связано по смыслу с \"желанием продолжить\" — это придуманный trigger, не вытекающий из текста.\n\nТакже стоит проверить \"1\" — там numericConstraint unit \"секунд\" (не \"seconds\"), но так как проверка на русском, это, вероятно, приемлемо в контексте локали; сосредоточусь на структурных проблемах согласно инструкции.\n\n```json\n{\"findings\": [\n  {\"verdict\": \"UNREPRESENTED_CLAUSE\", \"quote\": \"желание продолжить не отменяет ограничение\", \"explanation\": \"Unit b2-u4 содержит противоречие: triggerCondition фактически задан как {helperPresent: false}, хотя явного основания для такого условия в тексте нет («желание продолжить» не относится к присутствию помощника), и при этом собственная uncertainty утверждает, что triggerCondition и parentExtractionRef оставлены null — что не соответствует фактическому содержанию unit. Это структурная ошибка: либо trigger придуман и должен быть удалён (оставлен null, как заявлено в uncertainty), либо uncertainty неверно описывает реальную структуру unit. В любом случае корректное представление этого утверждения (presentation-only, без придуманного trigger) отсутствует.\"}\n]}\n```";
+
+  it('реальный обрыв: находит настоящий ответ (```json-забор), а не пример-цитату внутри рассуждения', () => {
+    const result = normalizeJsonResponse(REAL_COVERAGE_AUDIT_RESPONSE);
+    const parsed = JSON.parse(result) as { findings?: unknown };
+
+    expect(parsed).not.toHaveProperty('all'); // это была бы форма примера-цитаты, не ответа
+    expect(Array.isArray(parsed.findings)).toBe(true);
+    expect(parsed.findings).toEqual([
+      expect.objectContaining({
+        verdict: 'UNREPRESENTED_CLAUSE',
+        quote: 'желание продолжить не отменяет ограничение',
+      }),
+    ]);
+  });
+
+  it('забор в позиции 0 — прежнее поведение не изменилось', () => {
+    const payload = { kind: 'PRICE', price: 100 };
+    const result = normalizeJsonResponse('```json\n' + JSON.stringify(payload) + '\n```');
+    expect(JSON.parse(result)).toEqual(payload);
+  });
+
+  it('без забора, чистый JSON — прежнее поведение не изменилось', () => {
+    const payload = { kind: 'PRICE', price: 100 };
+    const result = normalizeJsonResponse(JSON.stringify(payload));
+    expect(JSON.parse(result)).toEqual(payload);
+  });
+
+  it('несколько заборов: побеждает последний, что разбирается как JSON', () => {
+    const early = { role: 'example', note: 'не используй меня' };
+    const real = { role: 'answer', note: 'используй меня' };
+    const text =
+      'Пример структуры:\n```json\n' +
+      JSON.stringify(early) +
+      '\n```\n\nА вот настоящий ответ:\n```json\n' +
+      JSON.stringify(real) +
+      '\n```';
+
+    expect(JSON.parse(normalizeJsonResponse(text))).toEqual(real);
+  });
+
+  it('последний забор — не JSON: откатывается к более раннему валидному забору, а не к первой скобке в тексте', () => {
+    const real = { role: 'answer', note: 'используй меня' };
+    const text =
+      '```json\n' +
+      JSON.stringify(real) +
+      '\n```\n\nИ ещё заметка от модели:\n```\nэто вообще не JSON, просто текст\n```';
+
+    expect(JSON.parse(normalizeJsonResponse(text))).toEqual(real);
+  });
+
+  // Различает Fix A от Fix B: контент ПОСЛЕ настоящего забора, который сам
+  // по себе тоже похож на полный JSON, не должен перебивать забор — заборы
+  // разбираются ПЕРВЫМИ и целиком, раньше, чем в дело идёт сканирование
+  // голых скобок по всему тексту.
+  it('приоритет забора над отдельным JSON-фрагментом ПОСЛЕ него', () => {
+    const real = { findings: [{ verdict: 'REAL' }] };
+    const decoyAfterFence = { findings: [] };
+    const text =
+      'Вот ответ:\n```json\n' +
+      JSON.stringify(real) +
+      '\n```\n\nP.S. для сравнения раньше было бы `' +
+      JSON.stringify(decoyAfterFence) +
+      '` (пустой массив).';
+
+    expect(JSON.parse(normalizeJsonResponse(text))).toEqual(real);
+  });
+
+  // Различает Fix B от старого поведения: без единого забора, прозы ДО и
+  // ПОСЛЕ первого JSON-подобного фрагмента, старый код склеивал оба
+  // значения в одну нераспознаваемую строку и падал в '{}' (эмпирически
+  // проверено на реальной фикстуре выше — тот же механизм).
+  it('без заборов вовсе, два независимых JSON-значения подряд: побеждает последнее', () => {
+    const text =
+      'Например, формат такой: {"example":true}. А теперь настоящий ответ: {"kind":"X","value":1}';
+
+    expect(JSON.parse(normalizeJsonResponse(text))).toEqual({ kind: 'X', value: 1 });
+  });
+
+  it('оборванный (незакрытый) ```json-забор посреди прозы: результат всё ещё парсится (обрыв остаётся виден raw-тексту, не этой функции)', () => {
+    const text = 'Рассуждаю над ответом...\n\n```json\n{"findings": [{"verdict": "UNREPRESENTED';
+
+    // normalizeJsonResponse() сама не отвечает за детекцию обрыва — это
+    // работа wasRepaired() в structured-output.ts, которая сравнивает
+    // СЫРОЙ текст (несбалансированный здесь) с результатом ЭТОЙ функции.
+    // Эта функция обязана лишь не бросить исключение и вернуть что-то
+    // парсящееся — иначе wasRepaired() не дойдёт до сравнения балансов и
+    // ответ уйдёт как INVALID_JSON, а не TRUNCATED_JSON.
+    const result = normalizeJsonResponse(text);
+    expect(() => JSON.parse(result)).not.toThrow();
+  });
+
+  it('проза без единого валидного JSON где-либо — как и раньше, пустой объект', () => {
+    expect(normalizeJsonResponse('Извините, не могу ответить.')).toBe('{}');
+  });
+
+  it('пустой ответ — как и раньше, пустой объект', () => {
+    expect(normalizeJsonResponse('   ')).toBe('{}');
+  });
+});
+
+describe('JSON-only инструкция явно запрещает преамбулу и код-забор (2026-08-11)', () => {
+  // «Не оборачивай в markdown» само по себе не запрещает прозу ДО/ПОСЛЕ
+  // объекта — только обёртку вокруг него. С выключенным `thinking`
+  // (Sonnet 5 / Opus 5, см. postAnthropicMessages) рассуждение вслух прямо
+  // в ответе стало нормой, и прежней формулировки было недостаточно, чтобы
+  // это явно запретить. normalizeJsonResponse остаётся обязательной сеткой
+  // безопасности независимо от этой инструкции — она лишь снижает частоту.
+  it('Anthropic system-инструкция явно запрещает преамбулу, объяснение и код-забор — прежний текст сохранён', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('{"ok":true}'));
+
+    await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      responseFormat: 'json_object',
+    });
+
+    const system = anthropicRequestBodies()[0].system as string;
+    expect(system).toContain('no preamble');
+    expect(system).toContain('no code fence');
+    expect(system).toContain('Respond with valid JSON only.');
+    expect(system).toContain('Do not wrap in markdown or add commentary.');
+  });
+
+  it('OpenAI JSON-инструкция явно запрещает преамбулу, объяснение и код-забор — прежний текст сохранён', async () => {
+    openaiCreate.mockResolvedValue(openaiOk('{"ok":true}'));
+
+    await createChatCompletionDetailed({
+      messages: [{ role: 'user', content: 'Извлеки правила из документа.' }],
+      provider: 'openai',
+      responseFormat: 'json_object',
+    });
+
+    const sent = openaiCreate.mock.calls[0][0].messages as { role: string; content: string }[];
+    const instruction = sent[sent.length - 1].content;
+    expect(instruction).toContain('no preamble');
+    expect(instruction).toContain('no code fence');
+    expect(instruction).toContain('Respond with valid JSON only.');
+    expect(instruction).toContain('Do not wrap in markdown or add commentary.');
+  });
+
+  it('обе инструкции — Anthropic и OpenAI — используют один и тот же текст (не разошлись)', async () => {
+    fetchMock.mockResolvedValue(anthropicOk('{"ok":true}'));
+    openaiCreate.mockResolvedValue(openaiOk('{"ok":true}'));
+
+    await createChatCompletionDetailed({
+      messages: MESSAGES,
+      provider: 'anthropic',
+      responseFormat: 'json_object',
+    });
+    await createChatCompletionDetailed({
+      messages: [{ role: 'user', content: 'Извлеки правила из документа.' }],
+      provider: 'openai',
+      responseFormat: 'json_object',
+    });
+
+    const anthropicSystem = anthropicRequestBodies()[0].system as string;
+    const sent = openaiCreate.mock.calls[0][0].messages as { role: string; content: string }[];
+    const openaiInstruction = sent[sent.length - 1].content;
+
+    expect(anthropicSystem).toBe(openaiInstruction);
   });
 });

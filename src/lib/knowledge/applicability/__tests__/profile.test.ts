@@ -167,7 +167,7 @@ describe('NOT_APPLICABLE ≠ UNKNOWN ≠ GLOBAL', () => {
           kind: 'PRICE_RULE',
           facets: {
             scenario: SCOPED_SCENARIO,
-            service: { state: 'SCOPED', include: ['apostille.zags'] },
+            service: { state: 'SCOPED', include: ['apostille_spb'] },
           },
         })
       )
@@ -178,7 +178,7 @@ describe('NOT_APPLICABLE ≠ UNKNOWN ≠ GLOBAL', () => {
           kind: 'PROCEDURE_STEP',
           facets: {
             scenario: SCOPED_SCENARIO,
-            service: { state: 'SCOPED', include: ['apostille.zags'] },
+            service: { state: 'SCOPED', include: ['apostille_spb'] },
           },
         })
       )
@@ -380,7 +380,7 @@ describe('каждый kind реестра имеет хотя бы один в�
     },
     PRICE_RULE: {
       scenario: SCOPED_SCENARIO,
-      service: { state: 'SCOPED', include: ['apostille.zags'] },
+      service: { state: 'SCOPED', include: ['apostille_spb'] },
     },
   };
 

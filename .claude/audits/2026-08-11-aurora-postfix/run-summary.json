@@ -1,0 +1,122 @@
+{
+  "ranAt": "2026-08-11T16:23:46.592Z",
+  "docPath": "D:\\DEV\\knowledge-librarian\\scripts\\fixtures\\semantic-rule-extraction-test-pack\\uchebnaya_instrukciya_semanticheskoe_izvlechenie_pravil.docx",
+  "dependencyGraphStage": "SKIPPED",
+  "dependencyGraphSkipReason": "Явный флаг --dependency-graph=skip: граф зависимостей пропущен, ни одного provider-вызова для proposal/audit/repair не сделано. Граф — все units как изолированные конечные точки, edges пуст; expandRetrievedDependencies выродился в тождество, в кандидатный пул попадают только retrieval seeds (поведение до commit a0a17ba). grade-aurora-fixture.ts откажется засчитать этот прогон как acceptance score без --accept-skipped-graph.",
+  "extractionRuns": 1,
+  "questionCount": 16,
+  "taintedShingleCount": 344,
+  "unguardedSecretCount": 0,
+  "runIds": [
+    "run-1-2026-08-11T16-15-33-202Z"
+  ],
+  "dependencyGraphsByRun": [
+    {
+      "runId": "run-1-2026-08-11T16-15-33-202Z",
+      "artifactPath": null,
+      "artifactContentDigest": "ace12b95cb215cf21b07eb13a5047f045880f7e244e3aa6006f1103b2ff89a9c",
+      "graphFingerprint": "7946a91cb11d737bb51e555f077b6b5ddce9cae88d04a60291e296a6c23122ff",
+      "restored": false
+    }
+  ],
+  "dispositionCountsByRun": [
+    {
+      "runId": "run-1-2026-08-11T16-15-33-202Z",
+      "DIRECT_ANSWER": 10,
+      "UNVERIFIED_ANSWER": 3,
+      "HOLD": 3,
+      "ERROR": 0
+    }
+  ],
+  "cost": {
+    "totalUsd": 0.41978973999999997,
+    "totalAttemptCount": 92,
+    "reservedPaidCallCount": 92,
+    "maxPaidCalls": 300,
+    "byPurpose": [
+      {
+        "purpose": "query-frame",
+        "callCount": 16,
+        "attemptCount": 16,
+        "totalUsd": 0.041250999999999996,
+        "pricedAttemptCount": 16,
+        "unpricedAttemptCount": 0,
+        "unverifiableSuccessCount": 0
+      },
+      {
+        "purpose": "query-embedding",
+        "callCount": 16,
+        "attemptCount": 16,
+        "totalUsd": 0.00001174,
+        "pricedAttemptCount": 16,
+        "unpricedAttemptCount": 0,
+        "unverifiableSuccessCount": 0
+      },
+      {
+        "purpose": "reranker",
+        "callCount": 16,
+        "attemptCount": 16,
+        "totalUsd": 0.18438799999999997,
+        "pricedAttemptCount": 16,
+        "unpricedAttemptCount": 0,
+        "unverifiableSuccessCount": 0
+      },
+      {
+        "purpose": "decision-relevance",
+        "callCount": 16,
+        "attemptCount": 16,
+        "totalUsd": 0.09570899999999999,
+        "pricedAttemptCount": 16,
+        "unpricedAttemptCount": 0,
+        "unverifiableSuccessCount": 0
+      },
+      {
+        "purpose": "synthesis",
+        "callCount": 13,
+        "attemptCount": 13,
+        "totalUsd": 0.045434,
+        "pricedAttemptCount": 13,
+        "unpricedAttemptCount": 0,
+        "unverifiableSuccessCount": 0
+      },
+      {
+        "purpose": "challenge-compatibility",
+        "callCount": 3,
+        "attemptCount": 3,
+        "totalUsd": 0.014903999999999999,
+        "pricedAttemptCount": 3,
+        "unpricedAttemptCount": 0,
+        "unverifiableSuccessCount": 0
+      },
+      {
+        "purpose": "condition-preservation",
+        "callCount": 8,
+        "attemptCount": 8,
+        "totalUsd": 0.022996,
+        "pricedAttemptCount": 8,
+        "unpricedAttemptCount": 0,
+        "unverifiableSuccessCount": 0
+      },
+      {
+        "purpose": "recovery-synthesis",
+        "callCount": 2,
+        "attemptCount": 2,
+        "totalUsd": 0.008708,
+        "pricedAttemptCount": 2,
+        "unpricedAttemptCount": 0,
+        "unverifiableSuccessCount": 0
+      },
+      {
+        "purpose": "recovery-condition-preservation",
+        "callCount": 2,
+        "attemptCount": 2,
+        "totalUsd": 0.006388,
+        "pricedAttemptCount": 2,
+        "unpricedAttemptCount": 0,
+        "unverifiableSuccessCount": 0
+      }
+    ]
+  },
+  "callTracePath": "scratchpad\\aurora-v9\\call-trace.jsonl",
+  "abortedBy": null
+}

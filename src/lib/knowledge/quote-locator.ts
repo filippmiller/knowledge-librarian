@@ -209,3 +209,24 @@ export function locateQuote(text: string, quote: string | null | undefined): Quo
     ambiguous: bestCount > 1,
   };
 }
+
+/**
+ * True iff `quoteA` and `quoteB` occupy overlapping spans of `text` — either
+ * direction (one a substring of the other) or a partial shift. Both quotes
+ * must actually locate in `text`; an unlocatable quote can't be proven to
+ * overlap anything, so it's treated as non-overlapping rather than throwing
+ * — same "can't prove it, don't claim it" discipline as `locateQuote` itself.
+ *
+ * General-purpose extension of `locateQuote`'s own domain, not duplicated
+ * business logic: two independent callers need exactly this check —
+ * `audited-extraction.ts`'s focused-retry dedup (does a re-extracted unit's
+ * quote already overlap an existing unit's quote for the same block) and
+ * the oracle-taint auto-retry's targeted per-block resample (does a fresh
+ * candidate's quote still overlap whatever originally tripped the check).
+ */
+export function quoteSpansOverlap(text: string, quoteA: string, quoteB: string): boolean {
+  const a = locateQuote(text, quoteA);
+  const b = locateQuote(text, quoteB);
+  if (a === null || b === null) return false;
+  return a.start < b.end && b.start < a.end;
+}
