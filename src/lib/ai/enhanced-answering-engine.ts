@@ -1417,8 +1417,8 @@ export async function answerQuestionEnhanced(
   // цена в прайсе есть. Ветка стоит ИМЕННО ЗДЕСЬ, а не выше: она не имеет права
   // перебить найденный базой ответ, потому что строка прайса — это цена, а не
   // ответ на вопрос целиком. Перед общими знаниями она законна: там альтернатива
-  // — модель без источников вовсе.
-  if (confidenceLevel === 'insufficient' && !hasStrongQaMatch) {
+  // — модель без источников вовсе. Условие — см. shouldAttemptTariffRescue().
+  if (shouldAttemptTariffRescue(confidenceLevel, hasStrongQaMatch)) {
     const priced = lookupTariffForQuestion(question, tariffs);
     if (priced.kind === 'single' || priced.kind === 'variants') {
       // Клиенту перечень вариантов не выкладывается. Владелец бюро: «Ну смысл
@@ -2104,6 +2104,25 @@ export function mergeCitations<T extends EvidenceCitation>(
     if (merged.length >= MAX_CITATIONS) break;
   }
   return merged;
+}
+
+/**
+ * Стоит ли пробовать ответить напрямую из прайса, минуя LLM-синтез
+ * (translation-92x).
+ *
+ * `low` входит сюда же, а не только `insufficient`: признак уверенности
+ * считается ДО того, как прайс вообще загружен, и честно занижает его по
+ * одному лишь retrieval'у — а дальше ЛЮБОЙ `low` придерживался от клиента
+ * политикой доставки независимо от того, что реально было в ответе.
+ * `lookupTariffForQuestion` при этом остаётся строгим фильтром: срабатывает
+ * только на однозначном совпадении с одной услугой, поэтому расширение не
+ * рискует подставить цену под расплывчатый вопрос.
+ */
+export function shouldAttemptTariffRescue(
+  confidenceLevel: 'high' | 'medium' | 'low' | 'insufficient',
+  hasStrongQaMatch: boolean
+): boolean {
+  return (confidenceLevel === 'insufficient' || confidenceLevel === 'low') && !hasStrongQaMatch;
 }
 
 /** Общая обвязка детерминированного ответа: разная у веток только суть. */
