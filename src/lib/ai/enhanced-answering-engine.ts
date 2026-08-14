@@ -20,7 +20,7 @@ import { polishCanonicalAnswer } from '@/lib/ai/canonical-answer-polisher';
 import { type QAPair } from '@prisma/client';
 import { verifyAnswer, type ConsistencyReport } from '@/lib/ai/consistency-gate';
 import { recordHallucinationLog, type TelemetryMode } from '@/lib/ai/answer-telemetry';
-import { checkClaimGrounding } from '@/lib/ai/claim-grounding';
+import { checkClaimGrounding, claimExcerpt, type GroundedClaim } from '@/lib/ai/claim-grounding';
 import {
   detectIssuingRegion,
   resolveApostilleTerritoriality,
@@ -2063,7 +2063,7 @@ export interface SynthesisEvidence {
  * цитаты в том же порядке, в каком встретил числа.
  */
 export function buildEvidenceCitations(
-  supported: readonly { readonly sourceIndexes: readonly number[] }[],
+  supported: readonly GroundedClaim[],
   evidence: readonly SynthesisEvidence[]
 ): EvidenceCitation[] {
   const seen = new Set<number>();
@@ -2076,7 +2076,13 @@ export function buildEvidenceCitations(
       if (seen.has(index)) continue;
       seen.add(index);
       const item = evidence[index];
-      if (item) out.push(item.citation);
+      if (item) {
+        // Фрагмент ВОКРУГ подтверждающего числа, а не первые N символов
+        // источника: в длинном чанке или теле правила число часто стоит
+        // дальше, и цитата-префикс не содержала бы того, что подтверждает.
+        const excerpt = claimExcerpt(item.text, claim.unit, claim.value, CITATION_QUOTE_CHARS);
+        out.push(excerpt ? { ...item.citation, quote: excerpt } : item.citation);
+      }
       break;
     }
   }

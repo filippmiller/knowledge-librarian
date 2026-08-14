@@ -353,6 +353,44 @@ export function extractRiskyClaims(text: string): RiskyClaim[] {
   return [...uniqueClaims.values()];
 }
 
+/**
+ * Фрагмент источника ВОКРУГ конкретного утверждения, не длиннее `maxChars`.
+ *
+ * Нужен цитатам-подтверждениям. Обрезать источник по первым N символам нельзя:
+ * в длинном чанке или теле правила подтверждающее число часто стоит дальше, и
+ * цитата снова не содержит того, что подтверждает — то есть разрыв атрибуции
+ * сохраняется ровно там, где источник длинный (находка ревью на PR #87).
+ *
+ * `null` — утверждения в этом тексте нет. Поиск идёт тем же разбором, что и
+ * заземление, поэтому «нашлось при заземлении, но не нашлось здесь» невозможно
+ * по построению: разъехаться двум разным реализациям тут было бы нечем.
+ */
+export function claimExcerpt(
+  source: string,
+  unit: string,
+  value: string,
+  maxChars: number
+): string | null {
+  const hit = extractLocatedRiskyClaims(source).find(
+    (claim) => claim.unit === unit && claim.value === value
+  );
+  if (!hit) return null;
+  if (source.length <= maxChars) return source;
+
+  // Окно центрируется на утверждении, но не вылезает за границы текста: у
+  // числа в начале источника «левая половина» отдаётся правой стороне, иначе
+  // цитата была бы короче предела без всякой причины.
+  const claimLength = hit.end - hit.start;
+  const padding = Math.max(0, maxChars - claimLength);
+  let start = hit.start - Math.floor(padding / 2);
+  if (start < 0) start = 0;
+  if (start + maxChars > source.length) start = Math.max(0, source.length - maxChars);
+  const end = Math.min(source.length, start + maxChars);
+
+  const body = source.slice(start, end).trim();
+  return `${start > 0 ? '...' : ''}${body}${end < source.length ? '...' : ''}`;
+}
+
 /** Removes only numeric+unit premises unsupported by selected evidence while
  * preserving the qualitative question. This prevents the answer model from
  * echoing a user-supplied number that the strict verifier must reject. */

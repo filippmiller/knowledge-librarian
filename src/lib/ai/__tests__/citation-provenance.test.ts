@@ -98,6 +98,41 @@ describe('buildEvidenceCitations()', () => {
     expect(buildEvidenceCitations(verdict.supported, ev)).toHaveLength(1);
   });
 
+  /**
+   * Находка ревью PR #87. Цитата бралась как первые 200 символов источника, а в
+   * длинном чанке или теле правила подтверждающее число часто стоит дальше —
+   * и цитата снова не содержала того, что подтверждает. То есть разрыв
+   * атрибуции сохранялся ровно там, где источник длинный.
+   */
+  it('число за пределом обрезки всё равно попадает в цитату', () => {
+    const longSource =
+      'Общие положения о порядке оказания услуг бюро переводов. '.repeat(12) +
+      'Нотариальное заверение перевода — 1 100 руб. за документ. ' +
+      'Дальнейшие разделы прайса к вопросу не относятся. '.repeat(12);
+    const ev: SynthesisEvidence[] = [
+      {
+        text: longSource,
+        citation: { documentTitle: 'Прайс', quote: longSource.slice(0, 200), relevanceScore: 1 },
+      },
+    ];
+    // Предусловие: число действительно лежит за пределом обрезки. Без этой
+    // проверки тест прошёл бы и на старом поведении, ничего не проверив.
+    expect(longSource.indexOf('1 100')).toBeGreaterThan(200);
+
+    const verdict = checkClaimGrounding('Заверение стоит 1 100 рублей.', ev.map((e) => e.text));
+    const citations = buildEvidenceCitations(verdict.supported, ev);
+
+    expect(citations[0].quote).toContain('1 100');
+    expect(citations[0].quote.length).toBeLessThanOrEqual(206); // 200 + многоточия
+  });
+
+  it('короткий источник цитируется целиком, без многоточий', () => {
+    const ev = evidence();
+    const verdict = checkClaimGrounding('Стоит 1 100 рублей.', ev.map((e) => e.text));
+
+    expect(buildEvidenceCitations(verdict.supported, ev)[0].quote).toBe(TARIFF_LINE);
+  });
+
   it('ответ без чисел подтверждать нечем — цитат-подтверждений нет', () => {
     const ev = evidence();
     const verdict = checkClaimGrounding('Оригинал привозить не нужно.', ev.map((e) => e.text));
