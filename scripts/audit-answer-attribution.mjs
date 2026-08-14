@@ -112,10 +112,30 @@ function extractAmounts(text) {
 
 const norm = (s) => (s || '').replace(/[\s ]/g, '');
 
+/**
+ * Прайс целиком, СТРАНИЦАМИ.
+ *
+ * `/api/tariffs` игнорирует `limit` и отдаёт первую страницу — 50 строк из
+ * 1622, и все они из раздела TRANSLATION. С такой базой сравнения цены
+ * заверения (1100, 1250, 1300, 1450) выглядят выдуманными, и аудит рапортует
+ * галлюцинации там, где их нет. Я на этом попался при первом прогоне —
+ * отсюда пагинация и этот комментарий.
+ */
+async function fetchAllTariffs() {
+  const first = await get('/api/tariffs?page=1');
+  const items = [...first.items];
+  for (let page = 2; page <= first.pageCount; page++) {
+    items.push(...(await get(`/api/tariffs?page=${page}`)).items);
+  }
+  return items;
+}
+
 async function main() {
   process.stdout.write('Загружаю тарифы...\n');
-  const tariffRaw = JSON.stringify(await get('/api/tariffs?limit=1000'));
+  const tariffRows = await fetchAllTariffs();
+  const tariffRaw = JSON.stringify(tariffRows);
   const tariffNums = new Set((tariffRaw.match(/\d+/g) || []));
+  process.stdout.write(`Прайс: ${tariffRows.length} строк\n`);
 
   const results = [];
   for (const t of QUESTIONS) {
