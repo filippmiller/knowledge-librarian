@@ -20,7 +20,7 @@ import { polishCanonicalAnswer } from '@/lib/ai/canonical-answer-polisher';
 import { type QAPair } from '@prisma/client';
 import { verifyAnswer, type ConsistencyReport } from '@/lib/ai/consistency-gate';
 import { recordHallucinationLog, type TelemetryMode } from '@/lib/ai/answer-telemetry';
-import { checkClaimGrounding } from '@/lib/ai/claim-grounding';
+import { checkClaimGrounding, claimExcerpt, type GroundedClaim } from '@/lib/ai/claim-grounding';
 import {
   detectIssuingRegion,
   resolveApostilleTerritoriality,
@@ -1375,12 +1375,43 @@ export async function answerQuestionEnhanced(
   // видела, и признавать его источником нельзя — иначе выдумка считается
   // подтверждённой. Один массив на проверку связности и на заземление чисел,
   // чтобы они не разъехались в том, что считают источником.
-  const synthesisSources = [
-    ...tariffContext.sources,
-    ...contextChunks.map((c) => c.content),
-    ...rules.map((r) => `[${r.ruleCode}] ${r.title}: ${r.body}`),
-    ...qaPairs.map((q) => `${q.question} ${q.answer}`),
+  // Каждый источник несёт с собой то, чем его можно ПОКАЗАТЬ. Без этого
+  // заземление знает, что число настоящее, но предъявить подтверждение не
+  // может, и пользователю уходит посторонняя цитата (translation-ijy):
+  // ответ «1 100 рублей» выходил с цитатой «150 рублей плюс стоимость НЗ»,
+  // потому что цитаты брались только из правил, а цена пришла из прайса.
+  const synthesisEvidence: SynthesisEvidence[] = [
+    ...tariffContext.sources.map((line) => ({
+      text: line,
+      citation: { documentTitle: 'Прайс', quote: line, relevanceScore: EVIDENCE_RELEVANCE },
+    })),
+    ...contextChunks.map((c) => ({
+      text: c.content,
+      citation: {
+        documentTitle: c.documentId ? (docTitleMap.get(c.documentId) ?? 'Документ') : 'Документ',
+        quote: c.content.slice(0, CITATION_QUOTE_CHARS),
+        relevanceScore: c.semanticScore,
+      },
+    })),
+    ...rules.map((r) => ({
+      text: `[${r.ruleCode}] ${r.title}: ${r.body}`,
+      citation: {
+        ruleCode: r.ruleCode,
+        documentTitle: r.document?.title,
+        quote: ruleQuote(r.body),
+        relevanceScore: EVIDENCE_RELEVANCE,
+      },
+    })),
+    ...qaPairs.map((q) => ({
+      text: `${q.question} ${q.answer}`,
+      citation: {
+        documentTitle: 'Вопрос-ответ',
+        quote: `${q.question} — ${q.answer}`,
+        relevanceScore: EVIDENCE_RELEVANCE,
+      },
+    })),
   ];
+  const synthesisSources = synthesisEvidence.map((e) => e.text);
 
   // База знаний ничего не нашла — но услуга могла быть названа целиком, и тогда
   // цена в прайсе есть. Ветка стоит ИМЕННО ЗДЕСЬ, а не выше: она не имеет права
@@ -1795,6 +1826,9 @@ ${fixList}
     })
     .sort((a, b) => b.relevanceScore - a.relevanceScore);
 
+  // Цитаты-подтверждения: ровно те источники, которые заземлили числа ответа.
+  const evidenceCitations = buildEvidenceCitations(grounding.supported, synthesisEvidence);
+
   // Build citations with REAL relevance scores.
   // Rules don't come with their own retrieval score (they're fetched by domain
   // filter, not ranked by the query). We approximate by matching each rule's
@@ -1818,17 +1852,24 @@ ${fixList}
     .filter((r) => r.documentId != null && contextDocIds.has(r.documentId))
     .sort((a, b) => (docScoreByDocId.get(b.documentId ?? '') ?? 0) - (docScoreByDocId.get(a.documentId ?? '') ?? 0));
   const citationRules = (provenanceRules.length > 0 ? provenanceRules : rules).slice(0, 5);
-  const citations = citationRules.map((r) => {
+  const ruleCitations = citationRules.map((r) => {
     const authority = getVoiceAuthority(r.sourceSpan);
     return {
       ruleCode: r.ruleCode,
       documentTitle: r.document?.title,
-      quote: r.body.slice(0, 200) + (r.body.length > 200 ? '...' : ''),
+      quote: ruleQuote(r.body),
       relevanceScore: r.documentId ? (docScoreByDocId.get(r.documentId) ?? 0) : 0,
       authorityTag: authority.authorityTag,
       priority: authority.priority,
     };
   });
+
+  // Подтверждения идут ПЕРВЫМИ, тематические правила — следом, до общего
+  // предела. Правила не выбрасываются: у ответа без чисел подтверждать нечего,
+  // и там прежний список — единственный осмысленный. Порядок важен: первой
+  // пользователь читает ту цитату, в которой названная сумма действительно
+  // стоит, а не ту, что просто пришла из релевантного документа.
+  const citations = mergeCitations(evidenceCitations, ruleCitations);
 
   // Отказ не опирается на цитаты: модель получила приказ «нет данных».
   // Оставлять правила в «источниках» — тот же обман, что и knowledge_base.
@@ -1971,6 +2012,98 @@ function formatAmountRange(tariffs: { amount: number | null }[]): string {
   const max = Math.max(...amounts);
   const money = (n: number) => `${n.toLocaleString('ru-RU')} ₽`;
   return min === max ? money(min) : `${money(min)} до ${money(max)}`;
+}
+
+/** Сколько символов источника уходит в цитату. */
+const CITATION_QUOTE_CHARS = 200;
+
+/** Сколько цитат показывается пользователю всего. */
+const MAX_CITATIONS = 5;
+
+/**
+ * Оценка для цитаты-подтверждения. У прайсовой строки и Q&A-пары своего
+ * retrieval-скора нет — они попадают в контекст не поиском. Ставится максимум
+ * и это не подгонка: «источник содержит названное в ответе значение дословно»
+ * — более сильное отношение к вопросу, чем любая семантическая близость
+ * документа, которой измеряются остальные цитаты.
+ */
+const EVIDENCE_RELEVANCE = 1;
+
+export interface EvidenceCitation {
+  ruleCode?: string;
+  documentTitle?: string;
+  quote: string;
+  relevanceScore: number;
+}
+
+/** Одинаковая обрезка в обоих местах — иначе одна и та же цитата правила
+ *  приходит из подтверждений и из тематических правил как две разные. */
+function ruleQuote(body: string): string {
+  return body.slice(0, CITATION_QUOTE_CHARS) + (body.length > CITATION_QUOTE_CHARS ? '...' : '');
+}
+
+/** Источник синтеза вместе с тем, чем его предъявить пользователю. */
+export interface SynthesisEvidence {
+  /** Текст, который ушёл в промпт и по которому идёт заземление. */
+  readonly text: string;
+  readonly citation: EvidenceCitation;
+}
+
+/**
+ * Цитаты из источников, которые РЕАЛЬНО заземлили числа ответа.
+ *
+ * Раньше цитаты брались только из правил, а цена приходила из прайса или из
+ * Q&A-пары — источник ответа в пул цитат не попадал по построению, и
+ * подтверждающая цитата не могла появиться в принципе (translation-ijy,
+ * замер: 76% названных сумм без подтверждения). Здесь связь обратная:
+ * цитата выводится из заземления, поэтому подтверждает по построению, а не
+ * по совпадению темы.
+ *
+ * Порядок — по порядку появления утверждений в ответе: пользователь читает
+ * цитаты в том же порядке, в каком встретил числа.
+ */
+export function buildEvidenceCitations(
+  supported: readonly GroundedClaim[],
+  evidence: readonly SynthesisEvidence[]
+): EvidenceCitation[] {
+  const seen = new Set<number>();
+  const out: EvidenceCitation[] = [];
+  for (const claim of supported) {
+    for (const index of claim.sourceIndexes) {
+      // Одно число может стоять в нескольких источниках. Показывается первый:
+      // остальные то же самое подтвердят повторно и вытеснят подтверждения
+      // ОСТАЛЬНЫХ чисел ответа за предел списка.
+      if (seen.has(index)) continue;
+      seen.add(index);
+      const item = evidence[index];
+      if (item) {
+        // Фрагмент ВОКРУГ подтверждающего числа, а не первые N символов
+        // источника: в длинном чанке или теле правила число часто стоит
+        // дальше, и цитата-префикс не содержала бы того, что подтверждает.
+        const excerpt = claimExcerpt(item.text, claim.unit, claim.value, CITATION_QUOTE_CHARS);
+        out.push(excerpt ? { ...item.citation, quote: excerpt } : item.citation);
+      }
+      break;
+    }
+  }
+  return out;
+}
+
+/** Подтверждения впереди, остальное следом, без дублей, до предела. */
+export function mergeCitations<T extends EvidenceCitation>(
+  evidenceCitations: readonly EvidenceCitation[],
+  ruleCitations: readonly T[]
+): (EvidenceCitation | T)[] {
+  const merged: (EvidenceCitation | T)[] = [];
+  const seenQuotes = new Set<string>();
+  for (const citation of [...evidenceCitations, ...ruleCitations]) {
+    const key = `${citation.ruleCode ?? ''}|${citation.quote}`;
+    if (seenQuotes.has(key)) continue;
+    seenQuotes.add(key);
+    merged.push(citation);
+    if (merged.length >= MAX_CITATIONS) break;
+  }
+  return merged;
 }
 
 /** Общая обвязка детерминированного ответа: разная у веток только суть. */

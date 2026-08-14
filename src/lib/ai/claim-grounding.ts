@@ -353,6 +353,44 @@ export function extractRiskyClaims(text: string): RiskyClaim[] {
   return [...uniqueClaims.values()];
 }
 
+/**
+ * Фрагмент источника ВОКРУГ конкретного утверждения, не длиннее `maxChars`.
+ *
+ * Нужен цитатам-подтверждениям. Обрезать источник по первым N символам нельзя:
+ * в длинном чанке или теле правила подтверждающее число часто стоит дальше, и
+ * цитата снова не содержит того, что подтверждает — то есть разрыв атрибуции
+ * сохраняется ровно там, где источник длинный (находка ревью на PR #87).
+ *
+ * `null` — утверждения в этом тексте нет. Поиск идёт тем же разбором, что и
+ * заземление, поэтому «нашлось при заземлении, но не нашлось здесь» невозможно
+ * по построению: разъехаться двум разным реализациям тут было бы нечем.
+ */
+export function claimExcerpt(
+  source: string,
+  unit: string,
+  value: string,
+  maxChars: number
+): string | null {
+  const hit = extractLocatedRiskyClaims(source).find(
+    (claim) => claim.unit === unit && claim.value === value
+  );
+  if (!hit) return null;
+  if (source.length <= maxChars) return source;
+
+  // Окно центрируется на утверждении, но не вылезает за границы текста: у
+  // числа в начале источника «левая половина» отдаётся правой стороне, иначе
+  // цитата была бы короче предела без всякой причины.
+  const claimLength = hit.end - hit.start;
+  const padding = Math.max(0, maxChars - claimLength);
+  let start = hit.start - Math.floor(padding / 2);
+  if (start < 0) start = 0;
+  if (start + maxChars > source.length) start = Math.max(0, source.length - maxChars);
+  const end = Math.min(source.length, start + maxChars);
+
+  const body = source.slice(start, end).trim();
+  return `${start > 0 ? '...' : ''}${body}${end < source.length ? '...' : ''}`;
+}
+
 /** Removes only numeric+unit premises unsupported by selected evidence while
  * preserving the qualitative question. This prevents the answer model from
  * echoing a user-supplied number that the strict verifier must reject. */
@@ -375,12 +413,27 @@ export function redactUnsupportedNumericClaims(text: string, selectedSources: re
   return redacted;
 }
 
+/** Заземлённое утверждение вместе с тем, ЧТО именно его подтвердило. */
+export interface GroundedClaim extends RiskyClaim {
+  /**
+   * Индексы в переданном `sources` — все источники, где это утверждение есть.
+   *
+   * Ради этого поля проверка и стала поисточниковой. Без него вызывающий знает
+   * «число настоящее», но не знает, чем его подтвердить, и вынужден показывать
+   * пользователю какой-то другой источник — ровно тот разрыв атрибуции, из-за
+   * которого ответ «1 100 рублей» выходил с цитатой «150 рублей».
+   */
+  readonly sourceIndexes: readonly number[];
+}
+
 export interface GroundingVerdict {
   grounded: boolean;
   /** Утверждения, которых нет в источниках в том же качестве. */
   ungrounded: RiskyClaim[];
   /** Сколько рискованных утверждений всего — оценка «числовитости» ответа. */
   total: number;
+  /** Заземлённые утверждения с указанием подтвердивших источников. */
+  supported: GroundedClaim[];
 }
 
 /**
@@ -391,18 +444,37 @@ export interface GroundingVerdict {
  * обрезом дала бы ложную тревогу. Передавать сюда чанки, которые до промпта не
  * дошли, тоже нельзя: число из отброшенного чанка модель не видела, и признать
  * его источником — значит заземлить выдумку.
+ *
+ * Разбор идёт ПОИСТОЧНИКОВО, а не по склейке всего в одну строку. Помимо
+ * провенанса это само по себе строже: при склейке источник, кончающийся на
+ * «1100», и следующий, начинающийся с «рублей», давали несуществующее
+ * утверждение «1100 рублей» и заземляли выдумку. Раньше от этого защищал
+ * разделитель с не-пробельным символом; теперь склейки нет вовсе, и защищать
+ * нечего — граница источника непреодолима физически.
  */
 export function checkClaimGrounding(answer: string, sources: string[]): GroundingVerdict {
   const claims = extractRiskyClaims(answer);
-  if (claims.length === 0) return { grounded: true, ungrounded: [], total: 0 };
+  if (claims.length === 0) {
+    return { grounded: true, ungrounded: [], total: 0, supported: [] };
+  }
 
-  // Разделитель обязан содержать НЕ-пробельный символ. Между числом и единицей
-  // в шаблонах стоит `\s*`, а перевод строки — тоже пробел: при склейке через
-  // «\n» источник, кончающийся на «1100», и следующий, начинающийся с «рублей»,
-  // давали несуществующее утверждение «1100 рублей» и заземляли выдумку.
-  const sourceClaims = extractRiskyClaims(sources.join(' ¦ '));
-  const allowed = new Set(sourceClaims.map((c) => claimKey(c.unit, c.value)));
+  const sourcesByClaim = new Map<string, number[]>();
+  sources.forEach((source, index) => {
+    for (const claim of extractRiskyClaims(source)) {
+      const key = claimKey(claim.unit, claim.value);
+      const found = sourcesByClaim.get(key);
+      if (found) found.push(index);
+      else sourcesByClaim.set(key, [index]);
+    }
+  });
 
-  const ungrounded = claims.filter((c) => !allowed.has(claimKey(c.unit, c.value)));
-  return { grounded: ungrounded.length === 0, ungrounded, total: claims.length };
+  const ungrounded: RiskyClaim[] = [];
+  const supported: GroundedClaim[] = [];
+  for (const claim of claims) {
+    const indexes = sourcesByClaim.get(claimKey(claim.unit, claim.value));
+    if (indexes) supported.push({ ...claim, sourceIndexes: indexes });
+    else ungrounded.push(claim);
+  }
+
+  return { grounded: ungrounded.length === 0, ungrounded, total: claims.length, supported };
 }
