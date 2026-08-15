@@ -1570,7 +1570,16 @@ ${confidenceLevel === 'insufficient'
   let consistency: ConsistencyReport | undefined;
   const initialAnswerForLog = answer;
   let regenerated = false;
-  if (contextChunks.length > 0 && confidenceLevel !== 'insufficient') {
+  // Ворота проверки утверждений открываются, если есть ЛЮБОЕ доказательство
+  // синтеза, а не только чанки. Пока условие смотрело на чанки, ответ,
+  // собранный из одних ПРАВИЛ (translation-wmq: уровень поднят семантикой
+  // правила при нуле чанков), проезжал мимо verifyAnswer целиком: consistency
+  // оставался undefined, поэтому ни consistency_failed, ни unsupported_claims
+  // не могли потребовать человека — и такой ответ уходил клиенту без единой
+  // проверки на выдумки. Ровно тот путь, который этот же PR делает
+  // доставляемым, обязан проходить тот же контроль, что и остальные.
+  const hasSynthesisEvidence = contextChunks.length > 0 || rules.length > 0 || qaPairs.length > 0;
+  if (hasSynthesisEvidence && confidenceLevel !== 'insufficient') {
     try {
       // Verify against the FULL synthesis context — chunks AND rules AND Q&A —
       // not just chunks. The synthesizer legitimately uses rules and Q&A as
