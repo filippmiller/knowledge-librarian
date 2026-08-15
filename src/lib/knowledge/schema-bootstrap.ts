@@ -74,6 +74,16 @@ export const KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS: readonly string[] = [
         FOREIGN KEY ("runId") REFERENCES "KnowledgeExtractionRun"("id") ON DELETE CASCADE ON UPDATE CASCADE;
     END IF;
   END $$`,
+  // Rule.embedding (translation-wmq). Семантический вектор правила: без него
+  // уверенность ответа считалась только по чанкам и Q&A, а правила не весили
+  // ничего — измеримо приводило к «не знаю» при знании в базе.
+  //
+  // Колонка NULLABLE и без бэкфилла здесь СОЗНАТЕЛЬНО: заполнять её DDL'ом
+  // нечем (вектор считает модель, не Postgres), а до заполнения
+  // `scripts/backfill-rule-embeddings.ts` поведение остаётся ровно прежним —
+  // правило без вектора в оценку уверенности не входит. Поэтому выкладка
+  // безопасна сама по себе и не требует согласованности с прогоном скрипта.
+  `ALTER TABLE "Rule" ADD COLUMN IF NOT EXISTS "embedding" JSONB`,
 ];
 
 /** Ключ advisory-лока: два инстанса на одном деплое не гоняют DDL наперегонки. */

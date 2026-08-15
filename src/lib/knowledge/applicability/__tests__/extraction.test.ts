@@ -295,6 +295,19 @@ describe('extractedKnowledgeUnitSchema — extractionRef/parentExtractionRef (pr
     );
   });
 
+  // Живой прогон (--stage=extraction, openai/gpt-4o, 2026-08-14): 6 из 6
+  // попыток модель пропускала ключ parentExtractionRef целиком у
+  // самостоятельных unit'ов вместо явного null — extractedKnowledgeUnitSchema
+  // отвергал каждую, извлечение падало на любом документе с хотя бы одним
+  // самостоятельным unit'ом. Тот же класс поведения, что уже покрыт для
+  // uncertainties выше (2026-08-09) — parentExtractionRef тогда отставал.
+  it('unit без ключа parentExtractionRef -> валиден, становится null', () => {
+    const { parentExtractionRef: _omitted, ...withoutParentRef } = validUnit();
+    const parsed = extractedKnowledgeUnitSchema.safeParse(withoutParentRef);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.parentExtractionRef).toBeNull();
+  });
+
   it('parentExtractionRef: null — валидно (unit самостоятелен)', () => {
     expect(
       extractedKnowledgeUnitSchema.safeParse(validUnit({ parentExtractionRef: null })).success

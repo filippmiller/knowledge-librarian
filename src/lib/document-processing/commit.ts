@@ -2,6 +2,7 @@ import prisma from '@/lib/db';
 import { generateEmbeddings } from '@/lib/openai';
 import { lintRules, type LintInput, type LintWarning } from './extraction-lint';
 import { setDocumentAudience } from '@/lib/knowledge/audience';
+import { ruleEmbeddingText } from '@/lib/knowledge/rule-embedding';
 
 export interface CommitResult {
   success: boolean;
@@ -188,7 +189,30 @@ export async function commitDocumentKnowledge(documentId: string, options: Commi
   // Process rules
   const rules = verifiedItems.filter((i) => i.itemType === 'RULE');
   const lintInputs: LintInput[] = [];
-  for (const item of rules) {
+
+  // Семантические векторы правил (translation-wmq). Считаются ОДНИМ батчем на
+  // весь документ, как у чанков ниже: правил в документе десятки, отдельный
+  // вызов на каждое — лишние round-trip'ы на ровном месте.
+  //
+  // Отказ эмбеддингов НЕ роняет коммит: правило создаётся с `embedding: null`
+  // и продолжает участвовать в поиске по ключевым словам ровно как раньше.
+  // Знание, доехавшее до базы без вектора, полезнее, чем не доехавшее вовсе;
+  // добрать вектор можно потом (scripts/backfill-rule-embeddings.ts).
+  let ruleEmbeddings: (number[] | null)[] = rules.map(() => null);
+  if (rules.length > 0) {
+    try {
+      ruleEmbeddings = await generateEmbeddings(
+        rules.map((item) => {
+          const d = item.data as { title: string; body: string };
+          return ruleEmbeddingText(d.title, d.body);
+        })
+      );
+    } catch (error) {
+      console.warn('[COMMIT] Не удалось посчитать эмбеддинги правил, продолжаю без них:', error);
+    }
+  }
+
+  for (const [ruleIndex, item] of rules.entries()) {
     const data = item.data as {
       ruleCode: string;
       title: string;
@@ -213,6 +237,7 @@ export async function commitDocumentKnowledge(documentId: string, options: Commi
         body: data.body,
         confidence: data.confidence,
         sourceSpan: data.sourceSpan,
+        embedding: ruleEmbeddings[ruleIndex] ?? undefined,
       },
     });
 

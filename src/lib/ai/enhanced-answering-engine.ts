@@ -21,6 +21,8 @@ import { type QAPair } from '@prisma/client';
 import { verifyAnswer, type ConsistencyReport } from '@/lib/ai/consistency-gate';
 import { recordHallucinationLog, type TelemetryMode } from '@/lib/ai/answer-telemetry';
 import { checkClaimGrounding, claimExcerpt, type GroundedClaim } from '@/lib/ai/claim-grounding';
+import { generateEmbeddings } from '@/lib/openai';
+import { cosineSimilarity, parseStoredEmbedding } from '@/lib/knowledge/rule-embedding';
 import {
   detectIssuingRegion,
   resolveApostilleTerritoriality,
@@ -1324,7 +1326,7 @@ export async function answerQuestionEnhanced(
   const bestSemanticScore = contextChunks.length > 0
     ? Math.max(...contextChunks.map(c => c.semanticScore))
     : 0;
-  const overallConfidence = Math.min(
+  let overallConfidence = Math.min(
     // A strong QA match contributes its own confidence floor so the reported
     // number stays honest when the answer rests on a QAPair, not doc chunks.
     Math.max(bestSemanticScore, hasStrongQaMatch ? bestQaMatch : 0),
@@ -1356,6 +1358,53 @@ export async function answerQuestionEnhanced(
     needsClarification = true;
     suggestedClarification = expandedQueries.suggestedClarification ||
       'Не могли бы вы уточнить ваш вопрос? Например, указать конкретный тип документа или услугу.';
+  }
+
+  // Семантика найденных правил (translation-wmq). Считается ТОЛЬКО когда
+  // чанки и Q&A не дотянули: на здоровом пути это лишний вызов эмбеддингов на
+  // каждый вопрос, а решение он там всё равно не изменит (потолок правил —
+  // `medium`, а этот путь уже дал medium/high).
+  let bestRuleSemanticScore: number | null = null;
+  if ((confidenceLevel === 'insufficient' || confidenceLevel === 'low') && rules.length > 0) {
+    const embedded = rules
+      .map((rule) => parseStoredEmbedding(rule.embedding))
+      .filter((v): v is number[] => v !== null);
+    if (embedded.length > 0) {
+      try {
+        const [questionVector] = await generateEmbeddings([question]);
+        for (const vector of embedded) {
+          const score = cosineSimilarity(questionVector, vector);
+          if (score !== null && (bestRuleSemanticScore === null || score > bestRuleSemanticScore)) {
+            bestRuleSemanticScore = score;
+          }
+        }
+      } catch (error) {
+        // Отказ эмбеддингов не должен ронять ответ: без этого сигнала система
+        // ведёт себя ровно как до translation-wmq, а не отказывает вовсе.
+        console.warn('[enhanced-answering] Семантика правил недоступна, иду без неё:', error);
+      }
+    }
+  }
+
+  const confidenceLevelBeforeRules = confidenceLevel;
+  confidenceLevel = resolveConfidenceWithRules(confidenceLevel, bestRuleSemanticScore);
+  if (confidenceLevel !== confidenceLevelBeforeRules) {
+    // ЧИСЛО обязано подняться вместе с уровнем. Политика доставки
+    // (`explainAutoAnswer`) проверяет ОБА: сначала уровень, потом сырое
+    // `confidence` против `autoAnswerMinConfidence` оператора. Поднятый
+    // уровень при нулевом числе давал `below_min_confidence` — измерено на
+    // песочнице: вопросы доходили до medium и всё равно удерживались, то есть
+    // фикс не доводил дело до клиента. Уровень и число обязаны говорить одно.
+    overallConfidence = Math.min(Math.max(overallConfidence, bestRuleSemanticScore ?? 0), 1.0);
+    console.log(
+      `[enhanced-answering] Уровень поднят правилами: ${confidenceLevelBeforeRules} → ${confidenceLevel} ` +
+        `(семантика лучшего правила ${bestRuleSemanticScore?.toFixed(3)})`
+    );
+    // Уточняющий вопрос снимается вместе с подъёмом: он выставлялся ровно
+    // потому, что отвечать было не на чем. Оставить его — значит спросить
+    // клиента «уточните» и тут же ответить по существу.
+    needsClarification = false;
+    suggestedClarification = undefined;
   }
 
   // Step 9: Build context and generate answer
@@ -1521,7 +1570,16 @@ ${confidenceLevel === 'insufficient'
   let consistency: ConsistencyReport | undefined;
   const initialAnswerForLog = answer;
   let regenerated = false;
-  if (contextChunks.length > 0 && confidenceLevel !== 'insufficient') {
+  // Ворота проверки утверждений открываются, если есть ЛЮБОЕ доказательство
+  // синтеза, а не только чанки. Пока условие смотрело на чанки, ответ,
+  // собранный из одних ПРАВИЛ (translation-wmq: уровень поднят семантикой
+  // правила при нуле чанков), проезжал мимо verifyAnswer целиком: consistency
+  // оставался undefined, поэтому ни consistency_failed, ни unsupported_claims
+  // не могли потребовать человека — и такой ответ уходил клиенту без единой
+  // проверки на выдумки. Ровно тот путь, который этот же PR делает
+  // доставляемым, обязан проходить тот же контроль, что и остальные.
+  const hasSynthesisEvidence = contextChunks.length > 0 || rules.length > 0 || qaPairs.length > 0;
+  if (hasSynthesisEvidence && confidenceLevel !== 'insufficient') {
     try {
       // Verify against the FULL synthesis context — chunks AND rules AND Q&A —
       // not just chunks. The synthesizer legitimately uses rules and Q&A as
@@ -2104,6 +2162,37 @@ export function mergeCitations<T extends EvidenceCitation>(
     if (merged.length >= MAX_CITATIONS) break;
   }
   return merged;
+}
+
+/**
+ * Уровень уверенности с учётом СЕМАНТИКИ ПРАВИЛ (translation-wmq).
+ *
+ * До этого уверенность считалась только по семантике чанков и совпадению с
+ * Q&A. Правила не весили ничего, и это измеримо ломало ответы: на батарее
+ * вне-тематического документа вопрос находил 6 релевантных правил и 0 чанков,
+ * получал confidence ровно 0.00 и уходил клиенту как «уточню у коллеги» — при
+ * том, что ответ лежал в базе. Для непрофильных услуг (курьерская доставка,
+ * разовые работы), у которых нет ни строки в прайсе, ни утверждённой Q&A-пары,
+ * правило — вообще единственный носитель ответа.
+ *
+ * ПОЧЕМУ ПОРОГ = CONFIDENCE_THRESHOLD_MEDIUM, а не новое число. Правило здесь
+ * заменяет собой чанк, поэтому обязано проходить ТУ ЖЕ планку, на которой мы
+ * уже согласны отвечать по чанку. Своя константа означала бы вторую, никем не
+ * откалиброванную шкалу для того же решения.
+ *
+ * ПОТОЛОК — `medium`, никогда `high`. `high` требует ДВУХ чанков, то есть
+ * подтверждения из независимых мест; одно правило подтверждением самому себе
+ * быть не может. Так изменение остаётся надстройкой: любой вопрос, который и
+ * раньше доходил до medium/high по чанкам, идёт прежним путём — правила
+ * поднимают только то, что иначе осталось бы insufficient/low.
+ */
+export function resolveConfidenceWithRules(
+  base: 'high' | 'medium' | 'low' | 'insufficient',
+  bestRuleSemanticScore: number | null
+): 'high' | 'medium' | 'low' | 'insufficient' {
+  if (base === 'high' || base === 'medium') return base;
+  if (bestRuleSemanticScore === null) return base;
+  return bestRuleSemanticScore >= CONFIDENCE_THRESHOLD_MEDIUM ? 'medium' : base;
 }
 
 /**

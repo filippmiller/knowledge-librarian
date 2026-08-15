@@ -273,9 +273,22 @@ export function checkExtractionCoreInvariants(
 export const extractedKnowledgeUnitSchema = extractedKnowledgeUnitCoreSchema
   .extend({
     extractionRef: nonBlankString('extractionRef не может быть пустым'),
-    parentExtractionRef: nonBlankString(
-      'parentExtractionRef не может быть пустой строкой'
-    ).nullable(),
+    // `.nullish().transform(v => v ?? null)`, не голый `.nullable()` — тот же
+    // класс LLM-выдачи, что уже нормализован выше для triggerCondition/
+    // numericConstraint/uncertainties. Живой прогон (--stage=extraction,
+    // openai/gpt-4o, 2026-08-14) поймал то же поведение и здесь: 6 из 6
+    // попыток модель ПРОПУСКАЛА ключ parentExtractionRef целиком у
+    // самостоятельных unit'ов вместо явного null, хотя промпт
+    // (knowledge-unit-extractor.ts) прямо требует null в этом случае —
+    // extractedKnowledgeUnitSchema.safeParse() отвергал каждую попытку,
+    // ретраи исчерпывались, и извлечение падало на любом документе, где
+    // встречался хотя бы один самостоятельный unit. Голый `.nullable()`
+    // требует присутствия ключа; отсутствующий ключ и `null` — два
+    // синтаксически разных, но семантически одинаковых способа сказать
+    // "родителя нет", и normalize-then-accept обязан считать их равными.
+    parentExtractionRef: nonBlankString('parentExtractionRef не может быть пустой строкой')
+      .nullish()
+      .transform((value) => value ?? null),
   })
   .superRefine(checkExtractionCoreInvariants);
 
