@@ -11,8 +11,13 @@ import prisma from '@/lib/db';
  * Почему не `prisma migrate deploy` на старте: прод-БД исторически ведётся
  * через db push и НЕ имеет записи baseline-миграции — migrate deploy попытался
  * бы накатить baseline поверх живых таблиц и упал. Идемпотентный DDL ниже
- * строго аддитивен: существующие таблицы не читает и не меняет, повторный
- * запуск — no-op.
+ * строго аддитивен: только CREATE IF NOT EXISTS / ADD COLUMN IF NOT EXISTS,
+ * повторный запуск — no-op.
+ *
+ * С 2026-08-19 сюда же входят колонки `corpusId`. Путь ответов их читает
+ * сразу после выкладки: без колонок /api/ask падает на missing column.
+ * Поэтому этот блок больше не «только таблицы Aurora, которые никто не
+ * читает» — от него зависит живой ответ.
  */
 export const KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS "KnowledgeExtractionRun" (
@@ -84,6 +89,18 @@ export const KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS: readonly string[] = [
   // правило без вектора в оценку уверенности не входит. Поэтому выкладка
   // безопасна сама по себе и не требует согласованности с прогоном скрипта.
   `ALTER TABLE "Rule" ADD COLUMN IF NOT EXISTS "embedding" JSONB`,
+  // Изоляция корпусов (PR #91). Дефолт 'aurora' делает уже лежащие строки
+  // корректными без бэкфилла: сегодняшняя база — корпус бюро.
+  `ALTER TABLE "Document" ADD COLUMN IF NOT EXISTS "corpusId" TEXT NOT NULL DEFAULT 'aurora'`,
+  `ALTER TABLE "Rule" ADD COLUMN IF NOT EXISTS "corpusId" TEXT NOT NULL DEFAULT 'aurora'`,
+  `ALTER TABLE "QAPair" ADD COLUMN IF NOT EXISTS "corpusId" TEXT NOT NULL DEFAULT 'aurora'`,
+  `ALTER TABLE "DocChunk" ADD COLUMN IF NOT EXISTS "corpusId" TEXT NOT NULL DEFAULT 'aurora'`,
+  `ALTER TABLE "Tariff" ADD COLUMN IF NOT EXISTS "corpusId" TEXT NOT NULL DEFAULT 'aurora'`,
+  `CREATE INDEX IF NOT EXISTS "Document_corpusId_idx" ON "Document"("corpusId")`,
+  `CREATE INDEX IF NOT EXISTS "Rule_corpusId_idx" ON "Rule"("corpusId")`,
+  `CREATE INDEX IF NOT EXISTS "QAPair_corpusId_idx" ON "QAPair"("corpusId")`,
+  `CREATE INDEX IF NOT EXISTS "DocChunk_corpusId_idx" ON "DocChunk"("corpusId")`,
+  `CREATE INDEX IF NOT EXISTS "Tariff_corpusId_idx" ON "Tariff"("corpusId")`,
 ];
 
 /** Ключ advisory-лока: два инстанса на одном деплое не гоняют DDL наперегонки. */

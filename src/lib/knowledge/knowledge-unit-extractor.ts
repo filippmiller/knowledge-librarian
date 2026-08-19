@@ -98,8 +98,122 @@ export function buildExtractionPromptMessages(blocks: readonly SourceBlock[]): C
   ];
 }
 
+/**
+ * `extractionRef` синтезируется, если модель его не прислала.
+ *
+ * Тот же класс LLM-выдачи, что уже нормализован для facets/triggerCondition/
+ * numericConstraint/uncertainties/parentExtractionRef: ключ пропускается
+ * целиком. Живой прогон (--stage=extraction, openai/gpt-4o, 2026-08-14) поймал
+ * это на repair-проходе — модель вернула unit с `parentExtractionRef`, но без
+ * собственного `extractionRef`, и всё извлечение падало на валидации.
+ *
+ * Подставлять безопасно, потому что `extractionRef` живёт РОВНО ОДИН ответ
+ * модели: его единственная работа — дать соседним unit'ам того же ответа на
+ * что сослаться (`ExtractedKnowledgeUnit.extractionRef`: «не переживают
+ * прогон», устойчивый идентификатор назначает `assignIdentity` позже). Unit,
+ * на который никто не ссылается, в осмысленном значении не нуждается.
+ *
+ * Чужая ссылка при этом НЕ чинится молча: если другой unit ссылался на
+ * пропущенный ref, ссылка не разрешится и `resolveParentExtractionRefs`
+ * обнулит её с явной uncertainty — то есть потеря родителя останется видимой,
+ * а не будет замазана синтетическим совпадением.
+ */
+/**
+ * Доля юнитов, которую позволено отбраковать поэлементно, прежде чем ответ
+ * модели считается негодным целиком.
+ *
+ * Порог существует, чтобы громкий провал не превратился в тихую дыру: без него
+ * ответ, где схему прошёл один юнит из двадцати, выглядел бы как «успешное
+ * извлечение», а девятнадцать правил исчезли бы молча.
+ */
+const MAX_REJECTED_UNIT_SHARE = 0.5;
+
+export interface RejectedUnit {
+  readonly index: number;
+  readonly reason: string;
+}
+
+/** Отбракованные юниты последнего разбора — для журнала и для гейта выше. */
+export const lastRejectedUnits: RejectedUnit[] = [];
+
+/**
+ * ПОЭЛЕМЕНТНЫЙ разбор ответа модели вместо «всё или ничего».
+ *
+ * Живой прогон 2026-08-15 на «Публичной оферте» — СОБСТВЕННОМ документе бюро:
+ * gpt-4o семь раз подряд поставил `facets.service` на `PROCEDURE_STEP` (ось
+ * неприменима к этому виду по truth table §2.1), и извлечение ВСЕГО документа
+ * падало целиком — вместе с корректными statement и доказательствами всех
+ * остальных юнитов. Тот же класс на чужом домене: документ про ремонт
+ * велосипедов не извлекался вовсе из-за одного незнакомого факта условия.
+ *
+ * Схема при этом НЕ ослабляется — ни один инвариант не снят. Матрица «вид ×
+ * применимая ось» остаётся ровно такой, как её объявляет truth table (там
+ * `service` у `PROCEDURE_STEP` рассмотрен и явно отклонён), неизвестные ключи
+ * фасет по-прежнему отвергаются, типы значений проверяются как раньше.
+ * Меняется только ЦЕНА нарушения: выбывает нарушивший юнит, а не документ.
+ *
+ * `extractionRef` синтезируется, если модель его не прислала: поле живёт ровно
+ * один ответ модели, его работа — дать соседям на что сослаться. Unit, на
+ * который никто не ссылается, в осмысленном значении не нуждается. Чужая
+ * ссылка при этом молча не чинится — `resolveParentExtractionRefs` обнулит
+ * неразрешившуюся с явной uncertainty.
+ */
 const extractionResponseSchema = z.strictObject({
-  units: z.array(extractedKnowledgeUnitSchema).readonly(),
+  units: z.array(z.unknown()).transform((raw, ctx) => {
+    lastRejectedUnits.length = 0;
+    const accepted: z.infer<typeof extractedKnowledgeUnitSchema>[] = [];
+
+    raw.forEach((value, index) => {
+      const withRef =
+        value !== null &&
+        typeof value === 'object' &&
+        !Array.isArray(value) &&
+        (value as Record<string, unknown>).extractionRef === undefined
+          ? { ...(value as Record<string, unknown>), extractionRef: `auto-u${index + 1}` }
+          : value;
+
+      const parsed = extractedKnowledgeUnitSchema.safeParse(withRef);
+      if (parsed.success) {
+        accepted.push(parsed.data);
+        return;
+      }
+      lastRejectedUnits.push({
+        index,
+        reason: parsed.error.issues
+          .map((i) => `${i.path.join('.')}: ${i.message}`)
+          .join('; '),
+      });
+    });
+
+    if (lastRejectedUnits.length > 0) {
+      console.warn(
+        `[knowledge-unit-extractor] отбраковано ${lastRejectedUnits.length} из ${raw.length} юнитов: ` +
+          lastRejectedUnits.map((r) => `#${r.index} ${r.reason}`).join(' | ')
+      );
+    }
+
+    // Полностью пустой ответ и ответ, где выжило меньшинство, — это не
+    // «извлечение с потерями», а негодная выдача: принять её значило бы
+    // отчитаться успехом за документ, из которого почти ничего не взято.
+    if (raw.length > 0 && accepted.length === 0) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `ни один из ${raw.length} юнитов не прошёл схему: ${lastRejectedUnits.map((r) => r.reason).join(' | ')}`,
+      });
+      return z.NEVER;
+    }
+    if (raw.length > 0 && lastRejectedUnits.length / raw.length > MAX_REJECTED_UNIT_SHARE) {
+      ctx.addIssue({
+        code: 'custom',
+        message:
+          `отбраковано ${lastRejectedUnits.length} из ${raw.length} юнитов — больше допустимой доли ` +
+          `${MAX_REJECTED_UNIT_SHARE}; выдача считается негодной, а не частично успешной`,
+      });
+      return z.NEVER;
+    }
+
+    return accepted;
+  }),
 });
 
 export interface ExtractKnowledgeUnitsOptions {

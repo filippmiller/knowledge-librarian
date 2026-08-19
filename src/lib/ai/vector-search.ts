@@ -9,6 +9,7 @@ import prisma from '@/lib/db';
 import { generateEmbeddings, EMBEDDING_DIMENSIONS } from '@/lib/openai';
 import { Prisma } from '@prisma/client';
 import { admissibleAudiences, audienceSqlValues, type Audience } from '@/lib/knowledge/audience';
+import { DEFAULT_CORPUS_ID } from '@/lib/knowledge/corpus';
 import { reciprocalRankFusion } from './reciprocal-rank-fusion';
 
 export interface SearchResult {
@@ -109,7 +110,8 @@ export async function searchSimilarChunksPgvector(
   limit: number = 5,
   minSimilarity: number = 0.3,
   scenarioAncestors: string[] = [],
-  audience: Audience = 'internal'
+  audience: Audience = 'internal',
+  corpusId: string = DEFAULT_CORPUS_ID
 ): Promise<SearchResult[]> {
   try {
     const embeddingStr = `[${queryEmbedding.join(',')}]`;
@@ -158,6 +160,7 @@ export async function searchSimilarChunksPgvector(
       ${Prisma.raw(domainFilter)}
       ${Prisma.raw(scenarioFilter)}
       ${Prisma.raw(audienceFilterClause(audience))}
+      AND c."corpusId" = ${corpusId}
       AND 1 - (c."embeddingVector" <=> ${embeddingStr}::vector) >= ${minSimilarity}
       ORDER BY c."embeddingVector" <=> ${embeddingStr}::vector
       LIMIT ${limit}
@@ -204,7 +207,8 @@ async function searchSimilarChunksInMemory(
   domainSlugs: string[] = [],
   limit: number = 5,
   scenarioAncestors: string[] = [],
-  audience: Audience = 'internal'
+  audience: Audience = 'internal',
+  corpusId: string = DEFAULT_CORPUS_ID
 ): Promise<SearchResult[]> {
   const conditions: Prisma.DocChunkWhereInput[] = [];
   if (domainSlugs.length > 0) {
@@ -215,6 +219,7 @@ async function searchSimilarChunksInMemory(
   }
   // Тот же фильтр, что в pgvector-пути: резервная ветка не должна быть дырой.
   conditions.push({ audience: { in: admissibleAudiences(audience) } });
+  conditions.push({ corpusId });
   const whereClause: Prisma.DocChunkWhereInput = conditions.length > 0 ? { AND: conditions } : {};
 
   const chunks = await prisma.docChunk.findMany({
@@ -261,7 +266,8 @@ export async function searchSimilarChunks(
   domainSlugs: string[] = [],
   limit: number = 5,
   scenarioAncestors: string[] = [],
-  audience: Audience = 'internal'
+  audience: Audience = 'internal',
+  corpusId: string = DEFAULT_CORPUS_ID
 ): Promise<SearchResult[]> {
   // Generate query embedding
   const [queryEmbedding] = await generateEmbeddings([query]);
@@ -270,14 +276,36 @@ export async function searchSimilarChunks(
 
   if (usePgvector) {
     try {
-      return await searchSimilarChunksPgvector(queryEmbedding, domainSlugs, limit, 0.3, scenarioAncestors, audience);
+      return await searchSimilarChunksPgvector(
+        queryEmbedding,
+        domainSlugs,
+        limit,
+        0.3,
+        scenarioAncestors,
+        audience,
+        corpusId
+      );
     } catch {
       // Fallback to in-memory if pgvector fails unexpectedly
       console.warn('[vector-search] Falling back to in-memory search due to pgvector error');
-      return searchSimilarChunksInMemory(queryEmbedding, domainSlugs, limit, scenarioAncestors, audience);
+      return searchSimilarChunksInMemory(
+        queryEmbedding,
+        domainSlugs,
+        limit,
+        scenarioAncestors,
+        audience,
+        corpusId
+      );
     }
   } else {
-    return searchSimilarChunksInMemory(queryEmbedding, domainSlugs, limit, scenarioAncestors, audience);
+    return searchSimilarChunksInMemory(
+      queryEmbedding,
+      domainSlugs,
+      limit,
+      scenarioAncestors,
+      audience,
+      corpusId
+    );
   }
 }
 
@@ -290,7 +318,8 @@ export async function searchByKeywords(
   domainSlugs: string[] = [],
   limit: number = 10,
   scenarioAncestors: string[] = [],
-  audience: Audience = 'internal'
+  audience: Audience = 'internal',
+  corpusId: string = DEFAULT_CORPUS_ID
 ): Promise<SearchResult[]> {
   // Normalize query for Russian text search
   const normalizedQuery = query
@@ -338,6 +367,7 @@ export async function searchByKeywords(
         c."scenarioKey"
       FROM "DocChunk" c
       WHERE to_tsvector('russian', c.content) @@ plainto_tsquery('russian', ${query})
+      AND c."corpusId" = ${corpusId}
       ${Prisma.raw(domainFilter)}
       ${Prisma.raw(scenarioFilter)}
       ${Prisma.raw(audienceFilterClause(audience))}
@@ -355,14 +385,14 @@ export async function searchByKeywords(
       }));
     }
   } catch {
-    return searchByKeywordTerms(query, domainSlugs, limit, scenarioAncestors, audience);
+    return searchByKeywordTerms(query, domainSlugs, limit, scenarioAncestors, audience, corpusId);
   }
 
   // PostgreSQL full-text search is strict about all lexemes in the query.
   // If a user asks "для каких стран требуется КЛ", a chunk titled "страны,
   // для которых нужна КЛ" can miss because "требуется" != "нужна". Fall back
   // to OR-style term matching for recall.
-  return searchByKeywordTerms(query, domainSlugs, limit, scenarioAncestors, audience);
+  return searchByKeywordTerms(query, domainSlugs, limit, scenarioAncestors, audience, corpusId);
 }
 
 async function searchByKeywordTerms(
@@ -370,7 +400,8 @@ async function searchByKeywordTerms(
   domainSlugs: string[] = [],
   limit: number = 10,
   scenarioAncestors: string[] = [],
-  audience: Audience = 'internal'
+  audience: Audience = 'internal',
+  corpusId: string = DEFAULT_CORPUS_ID
 ): Promise<SearchResult[]> {
   const searchTerms = query
     .toLowerCase()
@@ -396,6 +427,7 @@ async function searchByKeywordTerms(
   // попадает сюда (пустой полнотекстовый результат или ошибка SQL), не должен
   // становиться обходом фильтра аудитории.
   fallbackConditions.push({ audience: { in: admissibleAudiences(audience) } });
+  fallbackConditions.push({ corpusId });
   const whereClause: Prisma.DocChunkWhereInput = { AND: fallbackConditions };
 
   const chunks = await prisma.docChunk.findMany({
@@ -436,12 +468,13 @@ export async function hybridSearch(
   limit: number = 5,
   semanticWeight: number = 0.7,
   scenarioAncestors: string[] = [],
-  audience: Audience = 'internal'
+  audience: Audience = 'internal',
+  corpusId: string = DEFAULT_CORPUS_ID
 ): Promise<HybridSearchResult[]> {
   // Run both searches in parallel
   const [semanticResults, keywordResults] = await Promise.all([
-    searchSimilarChunks(query, domainSlugs, limit * 2, scenarioAncestors, audience),
-    searchByKeywords(query, domainSlugs, limit * 2, scenarioAncestors, audience),
+    searchSimilarChunks(query, domainSlugs, limit * 2, scenarioAncestors, audience, corpusId),
+    searchByKeywords(query, domainSlugs, limit * 2, scenarioAncestors, audience, corpusId),
   ]);
 
   // RRF — чистая функция (PR G, [R4a]), не второй раз своя копия формулы:

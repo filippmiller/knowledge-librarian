@@ -15,6 +15,11 @@
  */
 import prisma from '@/lib/db';
 import {
+  corpusWhere,
+  DEFAULT_CORPUS_ID,
+  resolveCorpusId,
+} from '@/lib/knowledge/corpus';
+import {
   toTariffRecord,
   type TariffAudienceKey,
   type TariffRecord,
@@ -27,20 +32,23 @@ interface CacheEntry {
   tariffs: TariffRecord[];
 }
 
-let cache: CacheEntry | null = null;
+const caches = new Map<string, CacheEntry>();
 
 /** Контуры, чьи тарифы допустимо показать этой аудитории. */
 function admissibleTariffAudiences(audience: 'client' | 'internal'): TariffAudienceKey[] {
   return audience === 'client' ? ['CLIENT_SAFE'] : ['CLIENT_SAFE', 'INTERNAL_ONLY'];
 }
 
-async function loadAll(): Promise<TariffRecord[]> {
-  const fresh = cache && Date.now() - cache.loadedAt < CACHE_TTL_MS;
-  if (fresh && cache) return cache.tariffs;
+async function loadAll(corpusId: string): Promise<TariffRecord[]> {
+  const hit = caches.get(corpusId);
+  const fresh = hit && Date.now() - hit.loadedAt < CACHE_TTL_MS;
+  if (fresh && hit) return hit.tariffs;
 
-  const rows = await prisma.tariff.findMany({ where: { isActive: true } });
+  const rows = await prisma.tariff.findMany({
+    where: { isActive: true, ...corpusWhere(corpusId) },
+  });
   const tariffs = rows.map(toTariffRecord);
-  cache = { loadedAt: Date.now(), tariffs };
+  caches.set(corpusId, { loadedAt: Date.now(), tariffs });
   return tariffs;
 }
 
@@ -51,9 +59,12 @@ async function loadAll(): Promise<TariffRecord[]> {
  * единственный источник ответа. Пустой список означает «сверять не с чем», и
  * проверка молчит, а не блокирует.
  */
-export async function getTariffs(audience: 'client' | 'internal'): Promise<TariffRecord[]> {
+export async function getTariffs(
+  audience: 'client' | 'internal',
+  corpusId: string = DEFAULT_CORPUS_ID
+): Promise<TariffRecord[]> {
   try {
-    const all = await loadAll();
+    const all = await loadAll(resolveCorpusId(corpusId));
     const allowed = new Set(admissibleTariffAudiences(audience));
     const now = new Date();
     return all.filter(
@@ -70,5 +81,5 @@ export async function getTariffs(audience: 'client' | 'internal'): Promise<Tarif
 
 /** Сбросить кэш — вызывается админкой после правки тарифа. */
 export function invalidateTariffCache(): void {
-  cache = null;
+  caches.clear();
 }

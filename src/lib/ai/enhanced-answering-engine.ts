@@ -22,6 +22,7 @@ import { verifyAnswer, type ConsistencyReport } from '@/lib/ai/consistency-gate'
 import { recordHallucinationLog, type TelemetryMode } from '@/lib/ai/answer-telemetry';
 import { checkClaimGrounding, claimExcerpt, type GroundedClaim } from '@/lib/ai/claim-grounding';
 import { generateEmbeddings } from '@/lib/openai';
+import { corpusWhere, DEFAULT_CORPUS_ID, resolveCorpusId } from '@/lib/knowledge/corpus';
 import { cosineSimilarity, parseStoredEmbedding } from '@/lib/knowledge/rule-embedding';
 import {
   detectIssuingRegion,
@@ -354,11 +355,12 @@ async function multiQuerySearch(
   domainSlugs: string[],
   limit: number,
   scenarioAncestors: string[] = [],
-  audience: Audience = 'internal'
+  audience: Audience = 'internal',
+  corpusId: string = DEFAULT_CORPUS_ID
 ): Promise<HybridSearchResult[]> {
   // Run searches in parallel
   const allResults = await Promise.all(
-    queries.map(q => hybridSearch(q, domainSlugs, limit, 0.7, scenarioAncestors, audience))
+    queries.map(q => hybridSearch(q, domainSlugs, limit, 0.7, scenarioAncestors, audience, corpusId))
   );
 
   // Merge and deduplicate, keeping the STRONGEST signal seen for each chunk
@@ -723,7 +725,8 @@ function answerSignalsCompositeCapabilityRisk(question: string, answer: string):
  */
 async function findCanonicalQaOverride(
   question: string,
-  audience: Audience
+  audience: Audience,
+  corpusId: string
 ): Promise<QAPair | null> {
   // Beads translation-2yt (Grok/Codex, ревью плана): fuzzy term-overlap не
   // доказывает применимость пары к ЭТОМУ вопросу — но и точное совпадение
@@ -749,6 +752,9 @@ async function findCanonicalQaOverride(
       where: {
         status: 'ACTIVE',
         audience: { in: admissibleAudiences(audience) },
+        // Канонический override подменяет ответ ЦЕЛИКОМ с высокой уверенностью —
+        // тем более обязан быть заперт в своём корпусе.
+        ...corpusWhere(corpusId),
         OR: [
           { metadata: { path: ['authorityTag'], equals: 'VOICE_ANSWER_AUTHORITY' } },
           { metadata: { path: ['origin'], equals: 'voice-operator' } },
@@ -856,6 +862,16 @@ export interface AnswerRequest {
   sessionId?: string;
   includeDebug?: boolean;
   /**
+   * Корпус знаний, в котором искать (translation-0lr). Не задан — корпус по
+   * умолчанию, то есть сегодняшнее поведение бюро.
+   *
+   * Смысл поля не в том, чтобы его кто-то передавал сегодня — второго корпуса
+   * в проде нет. Смысл в том, что поиск обязан СПРОСИТЬ корпус и отфильтровать
+   * по нему: до этого поля данные не разделялись ничем, и любой чужой документ
+   * в той же базе попадал в ответ клиенту бюро через открытый поиск.
+   */
+  corpusId?: string;
+  /**
    * 'disabled' глушит fire-and-forget телеметрию качества ответа
    * (`HallucinationLog`). Только для прогонов золотого корпуса: они бьют по
    * продовой базе и не должны подмешивать синтетику в статистику по реальным
@@ -871,6 +887,9 @@ export async function answerQuestionEnhanced(
   req: AnswerRequest
 ): Promise<EnhancedAnswerResult> {
   const { question, audience, sessionId, includeDebug = false, telemetryMode } = req;
+  // Корпус спрашивается ОДИН раз и дальше обязателен во всех чтениях знаний
+  // ниже. Разойтись фильтры не могут: значение одно на весь вызов.
+  const corpusId = resolveCorpusId(req.corpusId);
   console.log(
     `[enhanced-answering] Starting for question (audience=${audience}):`,
     question.substring(0, 100)
@@ -896,7 +915,7 @@ export async function answerQuestionEnhanced(
   // Canonical Q&A override: operator-approved voice/historical pairs bypass
   // the scenario gate when the user's question closely matches the canonical
   // question. This closes the training loop: save an answer → the bot uses it.
-  const canonicalQa = await findCanonicalQaOverride(question, audience);
+  const canonicalQa = await findCanonicalQaOverride(question, audience, corpusId);
   if (canonicalQa) {
     console.log('[enhanced-answering] Canonical QA override matched:', canonicalQa.id);
     const canonicalResult = await buildCanonicalQaResult(question, canonicalQa, includeDebug);
@@ -1052,7 +1071,8 @@ export async function answerQuestionEnhanced(
       [], // domains disabled — scenario filter does the narrowing
       10,
       scenarioAncestors,
-      audience
+      audience,
+      corpusId
     );
     console.log('[enhanced-answering] Step 3 completed. Found', chunks.length, 'chunks');
   } catch (error) {
@@ -1143,6 +1163,9 @@ export async function answerQuestionEnhanced(
   // здесь, а не на выходе. Вырезать фразы из готового ответа было бы хрупко:
   // модель перескажет тот же факт другими словами.
   const audienceWhere = { audience: { in: admissibleAudiences(audience) } };
+  // Корпус — такой же обязательный предикат, как аудитория, и стоит рядом
+  // намеренно: оба отвечают на вопрос «кому это знание вообще можно показать».
+  const corpusWhereClause = corpusWhere(corpusId);
   let rules;
   try {
     // Two candidate pools, merged: (a) keyword-prefiltered — rules whose body
@@ -1164,7 +1187,7 @@ export async function answerQuestionEnhanced(
     const perTerm = await Promise.all(
       keyTerms.map((t) =>
         prisma.rule.findMany({
-          where: { status: 'ACTIVE', ...scenarioWhere, ...audienceWhere, body: { contains: t, mode: 'insensitive' as const } },
+          where: { status: 'ACTIVE', ...scenarioWhere, ...audienceWhere, ...corpusWhereClause, body: { contains: t, mode: 'insensitive' as const } },
           include: { document: { select: { title: true } } },
           take: 25,
           orderBy: { confidence: 'desc' },
@@ -1189,6 +1212,7 @@ export async function answerQuestionEnhanced(
       where: {
         status: 'ACTIVE',
         ...audienceWhere,
+        ...corpusWhereClause,
         AND: [scenarioWhere, ...((openKnowledgeLookup || SCOPE_NULL_STRICT) ? [{ NOT: { scenarioKey: null } }] : [])],
       },
       include: { document: { select: { title: true } } },
@@ -1235,6 +1259,7 @@ export async function answerQuestionEnhanced(
             status: 'ACTIVE',
             ...scenarioWhere,
             ...audienceWhere,
+            ...corpusWhereClause,
             OR: [
               { question: { contains: t, mode: 'insensitive' as const } },
               { answer: { contains: t, mode: 'insensitive' as const } },
@@ -1253,6 +1278,7 @@ export async function answerQuestionEnhanced(
       where: {
         status: 'ACTIVE',
         ...audienceWhere,
+        ...corpusWhereClause,
         AND: [scenarioWhere, ...((openKnowledgeLookup || SCOPE_NULL_STRICT) ? [{ NOT: { scenarioKey: null } }] : [])],
       },
       take: 100,
@@ -1411,7 +1437,7 @@ export async function answerQuestionEnhanced(
   console.log('[enhanced-answering] Step 9: Generating answer with confidence level:', confidenceLevel);
   // Прайс к вопросу. Сбой чтения сетки не должен ронять ответ: `getTariffs`
   // возвращает пустой список, и блок просто не появляется.
-  const tariffs = await getTariffs(audience);
+  const tariffs = await getTariffs(audience, corpusId);
   const tariffContext = buildTariffContext(question, tariffs);
   if (tariffContext.count > 0) {
     console.log(`[enhanced-answering] Прайс: ${tariffContext.count} строк в контекст синтеза`);

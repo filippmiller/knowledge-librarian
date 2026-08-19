@@ -44,6 +44,20 @@ describe('KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS', () => {
       expect(all, `bootstrap потерял объект миграции: ${name}`).toContain(`"${name}"`);
     }
   });
+
+  it('зеркалит миграцию корпусов: колонки и индексы corpusId есть в bootstrap', async () => {
+    const migration = await readFile(
+      join(process.cwd(), 'prisma/migrations/20260819120000_corpus_isolation/migration.sql'),
+      'utf8'
+    );
+    const all = KNOWLEDGE_SCHEMA_BOOTSTRAP_STATEMENTS.join('\n');
+    for (const match of migration.matchAll(/CREATE INDEX IF NOT EXISTS "([^"]+)"|ALTER TABLE "([^"]+)" ADD COLUMN/g)) {
+      const name = match[1] ?? match[2];
+      expect(all, `bootstrap потерял объект миграции корпусов: ${name}`).toContain(`"${name}"`);
+    }
+    expect(all).toContain('"corpusId"');
+    expect(all).toContain("'aurora'");
+  });
 });
 
 describe('runKnowledgeSchemaBootstrap', () => {

@@ -45,6 +45,11 @@ model Document {
   /// setDocumentAudience() в src/lib/knowledge/audience.ts.
   audience KnowledgeAudience @default(INTERNAL_ONLY)
 
+  /// Корпус знаний, которому принадлежит запись (translation-0lr).
+  /// Дефолт делает всё уже лежащее и все существующие пути записи корректными
+  /// без правок: сегодняшняя база — это корпус бюро. См. lib/knowledge/corpus.ts.
+  corpusId String @default("aurora")
+
   // Scenario tagging — see src/lib/knowledge/scenarios.ts. Null = universal
   // (cross-service) or not-yet-classified. See scenarioFilterClause() for
   // retrieval semantics (ancestor path + null).
@@ -64,6 +69,7 @@ model Document {
 
   @@index([parseStatus])
   @@index([scenarioKey])
+  @@index([corpusId])
 }
 
 // Audit trail of document/rule edits. Pre-existing table (created out-of-band);
@@ -210,6 +216,11 @@ model Rule {
   /// предикатом без join. Меняется только через setDocumentAudience().
   audience KnowledgeAudience @default(INTERNAL_ONLY)
 
+  /// Корпус знаний, которому принадлежит запись (translation-0lr).
+  /// Дефолт делает всё уже лежащее и все существующие пути записи корректными
+  /// без правок: сегодняшняя база — это корпус бюро. См. lib/knowledge/corpus.ts.
+  corpusId String @default("aurora")
+
   // Relations
   document       Document?          @relation(fields: [documentId], references: [id])
   supersedesRule Rule?              @relation("RuleVersions", fields: [supersedesRuleId], references: [id])
@@ -225,6 +236,7 @@ model Rule {
   @@index([documentId])
   @@index([scenarioKey])
   @@index([audience])
+  @@index([corpusId])
 }
 
 // Q&A pairs extracted from documents
@@ -249,6 +261,11 @@ model QAPair {
   /// См. Rule.audience. У пар без документа значение задаётся при создании.
   audience KnowledgeAudience @default(INTERNAL_ONLY)
 
+  /// Корпус знаний, которому принадлежит запись (translation-0lr).
+  /// Дефолт делает всё уже лежащее и все существующие пути записи корректными
+  /// без правок: сегодняшняя база — это корпус бюро. См. lib/knowledge/corpus.ts.
+  corpusId String @default("aurora")
+
   // Relations
   document     Document?  @relation(fields: [documentId], references: [id])
   rule         Rule?      @relation(fields: [ruleId], references: [id])
@@ -261,6 +278,7 @@ model QAPair {
   @@index([ruleId])
   @@index([scenarioKey])
   @@index([audience])
+  @@index([corpusId])
 }
 
 enum KnowledgeStatus {
@@ -287,6 +305,11 @@ model DocChunk {
   /// См. Rule.audience. Фильтруется в сыром SQL векторного поиска.
   audience KnowledgeAudience @default(INTERNAL_ONLY)
 
+  /// Корпус знаний, которому принадлежит запись (translation-0lr).
+  /// Дефолт делает всё уже лежащее и все существующие пути записи корректными
+  /// без правок: сегодняшняя база — это корпус бюро. См. lib/knowledge/corpus.ts.
+  corpusId String @default("aurora")
+
   // Relations
   document Document      @relation(fields: [documentId], references: [id], onDelete: Cascade)
   domains  ChunkDomain[]
@@ -295,6 +318,7 @@ model DocChunk {
   @@index([documentId])
   @@index([scenarioKey])
   @@index([audience])
+  @@index([corpusId])
 }
 
 // ============================================
@@ -1054,6 +1078,11 @@ model Tariff {
   /// себестоимости клиенту.
   audience KnowledgeAudience @default(INTERNAL_ONLY)
 
+  /// Корпус знаний, которому принадлежит запись (translation-0lr).
+  /// Дефолт делает всё уже лежащее и все существующие пути записи корректными
+  /// без правок: сегодняшняя база — это корпус бюро. См. lib/knowledge/corpus.ts.
+  corpusId String @default("aurora")
+
   /// Оговорка, без которой цену называть нельзя: «цены не включают перевод,
   /// пересылку, консульский сбор». Хранится на строке, а не рядом с разделом,
   /// потому что теряется именно при выдаче одной строки.
@@ -1088,6 +1117,7 @@ model Tariff {
   @@index([effectiveFrom])
   @@index([language, complexityCategory, direction, turnaround])
   @@index([section, isActive])
+  @@index([corpusId])
 }
 
 /// Ответ, не ушедший собеседнику, и вердикт человека о нём.
