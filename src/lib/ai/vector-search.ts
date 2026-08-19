@@ -276,14 +276,36 @@ export async function searchSimilarChunks(
 
   if (usePgvector) {
     try {
-      return await searchSimilarChunksPgvector(queryEmbedding, domainSlugs, limit, 0.3, scenarioAncestors, audience);
+      return await searchSimilarChunksPgvector(
+        queryEmbedding,
+        domainSlugs,
+        limit,
+        0.3,
+        scenarioAncestors,
+        audience,
+        corpusId
+      );
     } catch {
       // Fallback to in-memory if pgvector fails unexpectedly
       console.warn('[vector-search] Falling back to in-memory search due to pgvector error');
-      return searchSimilarChunksInMemory(queryEmbedding, domainSlugs, limit, scenarioAncestors, audience);
+      return searchSimilarChunksInMemory(
+        queryEmbedding,
+        domainSlugs,
+        limit,
+        scenarioAncestors,
+        audience,
+        corpusId
+      );
     }
   } else {
-    return searchSimilarChunksInMemory(queryEmbedding, domainSlugs, limit, scenarioAncestors, audience);
+    return searchSimilarChunksInMemory(
+      queryEmbedding,
+      domainSlugs,
+      limit,
+      scenarioAncestors,
+      audience,
+      corpusId
+    );
   }
 }
 
@@ -363,14 +385,14 @@ export async function searchByKeywords(
       }));
     }
   } catch {
-    return searchByKeywordTerms(query, domainSlugs, limit, scenarioAncestors, audience);
+    return searchByKeywordTerms(query, domainSlugs, limit, scenarioAncestors, audience, corpusId);
   }
 
   // PostgreSQL full-text search is strict about all lexemes in the query.
   // If a user asks "для каких стран требуется КЛ", a chunk titled "страны,
   // для которых нужна КЛ" can miss because "требуется" != "нужна". Fall back
   // to OR-style term matching for recall.
-  return searchByKeywordTerms(query, domainSlugs, limit, scenarioAncestors, audience);
+  return searchByKeywordTerms(query, domainSlugs, limit, scenarioAncestors, audience, corpusId);
 }
 
 async function searchByKeywordTerms(

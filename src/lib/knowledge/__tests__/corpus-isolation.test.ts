@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   corpusWhere,
@@ -61,5 +63,25 @@ describe('corpusWhere()', () => {
 
   it('корпус бюро и чужой корпус — разные значения', () => {
     expect(resolveCorpusId('bike-shop')).not.toBe(DEFAULT_CORPUS_ID);
+  });
+});
+
+describe('прокидка corpusId в запасные ветки поиска', () => {
+  const src = readFileSync(join(process.cwd(), 'src/lib/ai/vector-search.ts'), 'utf8');
+
+  it('searchSimilarChunks передаёт corpusId в pgvector и in-memory', () => {
+    const start = src.indexOf('export async function searchSimilarChunks(');
+    const end = src.indexOf('export async function searchByKeywords(');
+    const fn = src.slice(start, end);
+    expect(fn).toMatch(/searchSimilarChunksPgvector\([\s\S]*?corpusId/);
+    expect((fn.match(/searchSimilarChunksInMemory\([\s\S]*?corpusId/g) ?? []).length).toBe(2);
+  });
+
+  it('searchByKeywords передаёт corpusId в оба запасных вызова', () => {
+    const start = src.indexOf('export async function searchByKeywords(');
+    const end = src.indexOf('async function searchByKeywordTerms(');
+    const fn = src.slice(start, end);
+    expect(fn).toContain('searchByKeywordTerms(query, domainSlugs, limit, scenarioAncestors, audience, corpusId)');
+    expect((fn.match(/searchByKeywordTerms\([^)]*corpusId\)/g) ?? []).length).toBe(2);
   });
 });

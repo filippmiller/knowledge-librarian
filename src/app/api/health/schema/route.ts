@@ -13,11 +13,23 @@ const AURORA_V2_TABLES = [
   'KnowledgeUnitReviewDecision',
 ] as const;
 
+const CORPUS_TABLES = ['Document', 'Rule', 'QAPair', 'DocChunk', 'Tariff'] as const;
+
 async function listPresentTables(): Promise<string[]> {
   const rows = await prisma.$queryRaw<{ table_name: string }[]>`
     SELECT table_name FROM information_schema.tables
     WHERE table_schema = 'public'
       AND table_name IN ('KnowledgeExtractionRun', 'KnowledgeUnitRecord', 'KnowledgeUnitReviewDecision')
+  `;
+  return rows.map((row) => row.table_name).sort();
+}
+
+async function listPresentCorpusTables(): Promise<string[]> {
+  const rows = await prisma.$queryRaw<{ table_name: string }[]>`
+    SELECT table_name FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND column_name = 'corpusId'
+      AND table_name IN ('Document', 'Rule', 'QAPair', 'DocChunk', 'Tariff')
   `;
   return rows.map((row) => row.table_name).sort();
 }
@@ -36,23 +48,30 @@ export async function GET() {
   try {
     let present = await listPresentTables();
     let missing = AURORA_V2_TABLES.filter((table) => !present.includes(table));
+    let corpusPresent = await listPresentCorpusTables();
+    let corpusMissing = CORPUS_TABLES.filter((table) => !corpusPresent.includes(table));
 
-    if (missing.length > 0) {
+    if (missing.length > 0 || corpusMissing.length > 0) {
       await bootstrapKnowledgeSchemaAtStartup();
       present = await listPresentTables();
       missing = AURORA_V2_TABLES.filter((table) => !present.includes(table));
+      corpusPresent = await listPresentCorpusTables();
+      corpusMissing = CORPUS_TABLES.filter((table) => !corpusPresent.includes(table));
     }
 
     return NextResponse.json({
       auroraV2Ready: missing.length === 0,
+      corpusIsolationReady: corpusMissing.length === 0,
       present,
       missing,
+      corpusColumns: { present: corpusPresent, missing: corpusMissing },
       lastBootstrap: getLastBootstrapStatus(),
     });
   } catch (error) {
     return NextResponse.json(
       {
         auroraV2Ready: false,
+        corpusIsolationReady: false,
         error: error instanceof Error ? error.message : 'unknown',
         lastBootstrap: getLastBootstrapStatus(),
       },

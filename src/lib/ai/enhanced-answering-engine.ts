@@ -1437,7 +1437,7 @@ export async function answerQuestionEnhanced(
   console.log('[enhanced-answering] Step 9: Generating answer with confidence level:', confidenceLevel);
   // Прайс к вопросу. Сбой чтения сетки не должен ронять ответ: `getTariffs`
   // возвращает пустой список, и блок просто не появляется.
-  const tariffs = await getTariffs(audience);
+  const tariffs = await getTariffs(audience, corpusId);
   const tariffContext = buildTariffContext(question, tariffs);
   if (tariffContext.count > 0) {
     console.log(`[enhanced-answering] Прайс: ${tariffContext.count} строк в контекст синтеза`);
